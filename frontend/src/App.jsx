@@ -1523,172 +1523,192 @@ export default function App() {
                   </div>
                 )}
 
-                {/* STEP 4: VISUELS & SOURCES D'IMAGES (OPTION A, OPTION B, OPTION C HYBRIDE) */}
-                {wizardStep === 4 && (
-                  <div className="space-y-6">
-                    <div>
-                      <h3 className="text-base font-bold text-white">4. Source d'Images Visuelles & Mode de Génération</h3>
-                      <p className="text-xs text-slate-400 mt-1">Choisissez la provenance des visuels pour votre vidéo (Dossier local, IA intégrale, ou Mode Hybride).</p>
-                    </div>
+                {/* STEP 4: VISUELS & SOURCES D'IMAGES (OPTION A & OPTION B COCHABLES) */}
+                {wizardStep === 4 && (() => {
+                  const isOptionAChecked = newChannel.image_style.source === 'library' || newChannel.image_style.source === 'hybrid';
+                  const isOptionBChecked = newChannel.image_style.source === 'ai_generated' || newChannel.image_style.source === 'hybrid';
 
-                    {/* 3 CARDS SELECTION GRID */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                      
-                      {/* OPTION A: DOSSIER IMAGES LOCALES */}
-                      <div 
-                        onClick={() => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: 'library' } })}
-                        className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
-                          newChannel.image_style.source === 'library'
-                            ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
-                            : 'bg-[#141923] border-[#263042] hover:border-slate-500'
-                        }`}
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2.5">
-                            <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">folder_open</span>
-                            <h4 className="font-bold text-white text-xs">Option A: Importer un dossier local</h4>
-                          </div>
-                          <p className="text-[11px] text-slate-400">
-                            Sélectionnez un dossier complet contenant toutes les images de votre machine.
-                          </p>
-                        </div>
+                  const toggleOptionA = () => {
+                    let nextA = !isOptionAChecked;
+                    let nextB = isOptionBChecked;
+                    if (!nextA && !nextB) nextA = true;
+                    let source = nextA && nextB ? 'hybrid' : nextA ? 'library' : 'ai_generated';
+                    setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source } });
+                  };
 
-                        {/* Folder Picker & File Fallback Dropzone */}
-                        <div
-                          onDragOver={(e) => { e.preventDefault(); setIsFolderDragging(true); }}
-                          onDragLeave={() => setIsFolderDragging(false)}
-                          onDrop={handleFolderDrop}
-                          className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all ${
-                            isFolderDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-[#00c2ff] bg-[#0f1217]/60'
+                  const toggleOptionB = () => {
+                    let nextA = isOptionAChecked;
+                    let nextB = !isOptionBChecked;
+                    if (!nextA && !nextB) nextB = true;
+                    let source = nextA && nextB ? 'hybrid' : nextA ? 'library' : 'ai_generated';
+                    setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source } });
+                  };
+
+                  return (
+                    <div className="space-y-6">
+                      <div>
+                        <h3 className="text-base font-bold text-white">4. Source d'Images Visuelles & Mode de Génération</h3>
+                        <p className="text-xs text-slate-400 mt-1">Sélectionnez la ou les sources visuelles souhaitées (Vous pouvez cocher l'Option A, l'Option B, ou les deux !).</p>
+                      </div>
+
+                      {/* 2 CARDS SELECTION GRID WITH CHECKBOXES */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        
+                        {/* OPTION A: DOSSIER IMAGES LOCALES */}
+                        <div 
+                          onClick={toggleOptionA}
+                          className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
+                            isOptionAChecked
+                              ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
+                              : 'bg-[#141923] border-[#263042] hover:border-slate-500 opacity-60'
                           }`}
                         >
-                          {/* Folder Input - NO accept attribute so OS folder picker works reliably! */}
-                          <input
-                            type="file"
-                            ref={wizardFolderInputRef}
-                            webkitdirectory="true"
-                            directory="true"
-                            multiple
-                            onChange={handleLocalFolderSelect}
-                            className="hidden"
-                          />
-                          <span className="material-symbols-outlined text-slate-400 text-[28px] mb-1">drive_folder_upload</span>
-                          
-                          <div className="flex flex-col gap-2 mt-1">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (wizardFolderInputRef.current) wizardFolderInputRef.current.click();
-                              }}
-                              className="px-3 py-1.5 bg-[#00c2ff] text-slate-950 rounded-lg text-xs font-bold hover:bg-[#38d0ff] transition-all"
-                            >
-                              📁 Choisir un dossier d'images
-                            </button>
-                          </div>
-                          
-                          {localImageFiles.length > 0 && (
-                            <div className="mt-3 px-2.5 py-1 bg-emerald-950 text-emerald-300 rounded-lg text-[10px] font-bold font-mono truncate">
-                              ✓ {selectedFolderName || 'Dossier'}: {localImageFiles.length} images
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5">
+                                <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">folder_open</span>
+                                <h4 className="font-bold text-white text-xs">Option A: Importer un dossier local</h4>
+                              </div>
+                              <input 
+                                type="checkbox"
+                                checked={isOptionAChecked}
+                                onChange={toggleOptionA}
+                                className="w-5 h-5 accent-[#00c2ff] cursor-pointer rounded"
+                              />
                             </div>
-                          )}
+                            <p className="text-[11px] text-slate-400">
+                              Sélectionnez un dossier complet contenant toutes les images de votre machine.
+                            </p>
+                          </div>
+
+                          {/* Folder Picker & File Fallback Dropzone */}
+                          <div
+                            onDragOver={(e) => { e.preventDefault(); setIsFolderDragging(true); }}
+                            onDragLeave={() => setIsFolderDragging(false)}
+                            onDrop={handleFolderDrop}
+                            className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all ${
+                              isFolderDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-[#00c2ff] bg-[#0f1217]/60'
+                            }`}
+                          >
+                            <input
+                              type="file"
+                              ref={wizardFolderInputRef}
+                              webkitdirectory="true"
+                              directory="true"
+                              multiple
+                              onChange={handleLocalFolderSelect}
+                              className="hidden"
+                            />
+                            <span className="material-symbols-outlined text-slate-400 text-[28px] mb-1">drive_folder_upload</span>
+                            
+                            <div className="flex flex-col gap-2 mt-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (wizardFolderInputRef.current) wizardFolderInputRef.current.click();
+                                }}
+                                className="px-3 py-1.5 bg-[#00c2ff] text-slate-950 rounded-lg text-xs font-bold hover:bg-[#38d0ff] transition-all"
+                              >
+                                📁 Choisir un dossier d'images
+                              </button>
+                            </div>
+                            
+                            {localImageFiles.length > 0 && (
+                              <div className="mt-3 px-2.5 py-1 bg-emerald-950 text-emerald-300 rounded-lg text-[10px] font-bold font-mono truncate">
+                                ✓ {selectedFolderName || 'Dossier'}: {localImageFiles.length} images importées
+                              </div>
+                            )}
+                          </div>
                         </div>
+
+                        {/* OPTION B: GÉNÉRATION IA AUTOMATIQUE */}
+                        <div 
+                          onClick={toggleOptionB}
+                          className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
+                            isOptionBChecked
+                              ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
+                              : 'bg-[#141923] border-[#263042] hover:border-slate-500 opacity-60'
+                          }`}
+                        >
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5">
+                                <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">auto_awesome</span>
+                                <h4 className="font-bold text-white text-xs">Option B: Génération IA Automatique</h4>
+                              </div>
+                              <input 
+                                type="checkbox"
+                                checked={isOptionBChecked}
+                                onChange={toggleOptionB}
+                                className="w-5 h-5 accent-[#00c2ff] cursor-pointer rounded"
+                              />
+                            </div>
+                            <p className="text-[11px] text-slate-400">
+                              L'IA génère automatiquement les visuels pour chaque scène (style optionnel).
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 mb-1">Style de prompt (Optionnel)</label>
+                            <textarea
+                              rows="2"
+                              value={newChannel.image_style.style_prompt}
+                              onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, style_prompt: e.target.value } })}
+                              className="w-full bg-[#0f1217] border border-[#2b374d] rounded-xl p-2.5 text-[11px] text-white focus:border-[#00c2ff] outline-none placeholder-slate-500"
+                              placeholder="Optionnel: cinematic lighting, stoic sculpture style..."
+                            />
+                          </div>
+                        </div>
+
                       </div>
 
-                      {/* OPTION B: GÉNÉRATION IA AUTOMATIQUE */}
-                      <div 
-                        onClick={() => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: 'ai_generated' } })}
-                        className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
-                          newChannel.image_style.source === 'ai_generated'
-                            ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
-                            : 'bg-[#141923] border-[#263042] hover:border-slate-500'
-                        }`}
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2.5">
-                            <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">auto_awesome</span>
-                            <h4 className="font-bold text-white text-xs">Option B: Génération IA Automatique</h4>
-                          </div>
-                          <p className="text-[11px] text-slate-400">
-                            L'IA génère automatiquement les visuels pour chaque scène (style optionnel).
-                          </p>
+                      {isOptionAChecked && isOptionBChecked && (
+                        <div className="bg-[#00c2ff]/10 border border-[#00c2ff]/30 p-3 rounded-xl flex items-center gap-2.5 text-xs text-[#00c2ff]">
+                          <span className="material-symbols-outlined text-[20px]">info</span>
+                          <span><strong>Mode Hybride activé !</strong> Le système utilisera vos images locales prioritaires et l'IA pour compléter les scènes manquantes.</span>
                         </div>
-
-                        <div>
-                          <label className="block text-[10px] font-bold text-slate-400 mb-1">Style de prompt (Optionnel)</label>
-                          <textarea
-                            rows="2"
-                            value={newChannel.image_style.style_prompt}
-                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, style_prompt: e.target.value } })}
-                            className="w-full bg-[#0f1217] border border-[#2b374d] rounded-xl p-2.5 text-[11px] text-white focus:border-[#00c2ff] outline-none placeholder-slate-500"
-                            placeholder="Optionnel: cinematic lighting, stoic sculpture style..."
-                          />
-                        </div>
-                      </div>
-
-                      {/* OPTION C: MODE HYBRIDE (DOSSIER LOCAL + COMPLÉMENT IA) */}
-                      <div 
-                        onClick={() => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: 'hybrid' } })}
-                        className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
-                          newChannel.image_style.source === 'hybrid'
-                            ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
-                            : 'bg-[#141923] border-[#263042] hover:border-slate-500'
-                        }`}
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2.5">
-                            <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">tune</span>
-                            <h4 className="font-bold text-white text-xs">Option C: Mode Hybride (Dossier + IA)</h4>
-                          </div>
-                          <p className="text-[11px] text-slate-400">
-                            Utilise vos images locales et laisse l'IA proposer des suggestions complémentaires pour enrichir la vidéo.
-                          </p>
-                        </div>
-
-                        <div className="bg-[#0f1217]/60 p-3 rounded-xl border border-[#2b374d] text-[10px] text-slate-300 space-y-1">
-                          <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
-                            <span className="material-symbols-outlined text-[14px]">check_circle</span>
-                            Dossier local prioritaire
-                          </div>
-                          <div className="flex items-center gap-1.5 text-[#00c2ff] font-bold">
-                            <span className="material-symbols-outlined text-[14px]">sparkles</span>
-                            Complément d'images IA
-                          </div>
-                        </div>
-                      </div>
-
+                      )}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* STEP 5: APERÇU FINAL DU DESIGN VIDÉO (LIVE 16:9 LANDSCAPE PREVIEW) */}
-                {wizardStep === 5 && (
-                  <div className="space-y-6">
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <h3 className="text-base font-bold text-white">5. Aperçu Final du Layout & Design Vidéo</h3>
-                        <p className="text-xs text-slate-400 mt-0.5">Voici le rendu final simulé — format vidéo longue durée 16:9 (YouTube).</p>
+                {wizardStep === 5 && (() => {
+                  const userImagePreview = localImageFiles.length > 0 ? URL.createObjectURL(localImageFiles[0]) : null;
+                  return (
+                    <div className="space-y-6">
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <h3 className="text-base font-bold text-white">5. Aperçu Final du Layout & Design Vidéo</h3>
+                          <p className="text-xs text-slate-400 mt-0.5">Voici le rendu final simulé — format vidéo longue durée 16:9 (YouTube).</p>
+                        </div>
+                        <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/80 px-3 py-1 rounded-lg border border-emerald-800">Format 16:9 Paysage</span>
                       </div>
-                      <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/80 px-3 py-1 rounded-lg border border-emerald-800">Format 16:9 Paysage</span>
-                    </div>
 
-                    {/* Live 16:9 Landscape Video Mockup Preview */}
-                    <div className="flex justify-center">
-                      <div className="w-full max-w-[640px] aspect-[16/9] bg-slate-950 rounded-2xl border-4 border-[#2b374d] relative overflow-hidden shadow-2xl flex flex-col justify-between p-5">
+                      {/* Live 16:9 Landscape Video Mockup Preview */}
+                      <div className="flex justify-center">
+                        <div className="w-full max-w-[640px] aspect-[16/9] bg-slate-950 rounded-2xl border-4 border-[#2b374d] relative overflow-hidden shadow-2xl flex flex-col justify-between p-5">
 
-                        {/* Background Scene Visual — real example of a generated/library image */}
-                        <div className="absolute inset-0">
-                          <img
-                            src={`${STORAGE_BASE}/examples/example_scene.png`}
-                            alt="Exemple de scène générée"
-                            className="w-full h-full object-cover opacity-80"
-                          />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30"></div>
-                        </div>
-                        <div className="absolute top-3 left-3 z-20 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-lg text-[10px] font-mono text-slate-300 border border-white/10">
-                          Exemple: {newChannel.image_style.source === 'library' ? (selectedFolderName ? `Dossier: ${selectedFolderName}` : 'Images Locales') :
-                           newChannel.image_style.source === 'hybrid' ? 'Mode Hybride (Dossier + IA)' : 'Scènes générées par IA'}
-                        </div>
+                          {/* Background Scene Visual — real user image if imported! */}
+                          <div className="absolute inset-0">
+                            <img
+                              src={userImagePreview || `${STORAGE_BASE}/examples/example_scene.png`}
+                              alt="Aperçu visuel de la vidéo"
+                              className="w-full h-full object-cover opacity-85"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30"></div>
+                          </div>
+                          <div className="absolute top-3 left-3 z-20 bg-black/70 backdrop-blur-md px-3 py-1 rounded-lg text-[10px] font-mono text-slate-200 border border-white/20 flex items-center gap-1.5 shadow-lg">
+                            {userImagePreview ? (
+                              <>
+                                <span className="material-symbols-outlined text-emerald-400 text-[14px]">check_circle</span>
+                                <span className="font-bold text-emerald-300">Image du dossier: {selectedFolderName || 'Local'} ({localImageFiles[0]?.name})</span>
+                              </>
+                            ) : (
+                              <span>Exemple: {newChannel.image_style.source === 'library' ? 'Images Locales' : newChannel.image_style.source === 'hybrid' ? 'Mode Hybride (Dossier + IA)' : 'Scènes générées par IA'}</span>
+                            )}
+                          </div>
 
                         {/* Top Header Bar inside Mockup */}
                         <div className="relative z-20 flex justify-between items-center text-xs text-white">
@@ -1758,8 +1778,8 @@ export default function App() {
 
                       </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Wizard Footer Navigation */}
                 <div className="flex justify-between items-center pt-6 border-t border-[#263042]">
