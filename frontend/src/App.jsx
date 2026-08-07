@@ -85,31 +85,6 @@ export default function App() {
   // Karaoke Animation Preview Index
   const [previewWordIndex, setPreviewWordIndex] = useState(0);
 
-  // Database Connection Info
-  const [dbInfo, setDbInfo] = useState({
-    status: 'connected',
-    engine: 'postgresql',
-    service_name: 'Supabase PostgreSQL (Self-Hosted VPS rooseveltvps)',
-    supabase_url: 'https://bd.izivoice.app',
-    database_host: '31.97.118.192:5432'
-  });
-
-  const fetchDbStatus = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/db-status`);
-      if (res.ok) {
-        const data = await res.json();
-        setDbInfo(data);
-      }
-    } catch (e) {
-      console.error("Error fetching db status:", e);
-    }
-  };
-
-  useEffect(() => {
-    fetchDbStatus();
-  }, []);
-
   // Karaoke timer animation effect for subtitle preview
   useEffect(() => {
     const timer = setInterval(() => {
@@ -644,7 +619,7 @@ export default function App() {
         {/* Top Header Bar */}
         <div className="hidden md:flex justify-between items-center px-8 py-5 border-b border-[#202938] bg-[#141923]/60 backdrop-blur-md">
           <h1 className="text-xl font-extrabold text-white tracking-tight flex items-center gap-3">
-            {view === 'home' && 'Dashboard Overview'}
+            {view === 'home' && 'Tableau de Bord'}
             {view === 'channels' && 'Vos Pipelines de Chaînes'}
             {view === 'videos' && 'Bibliothèque de Vidéos'}
             {view === 'wizard' && (wizardMode === 'edit' ? 'Modifier le Pipeline' : 'Assistant de Création de Chaîne')}
@@ -652,17 +627,6 @@ export default function App() {
           </h1>
 
           <div className="flex items-center gap-4">
-            {/* Supabase VPS Live Database Status Badge */}
-            <div 
-              onClick={() => setShowProfileModal(true)}
-              className="flex items-center gap-2.5 bg-emerald-950/70 border border-emerald-700/60 text-emerald-300 px-3.5 py-1.5 rounded-xl text-xs font-mono cursor-pointer hover:bg-emerald-900/80 transition-colors shadow-sm"
-              title={`Database Status: ${dbInfo.service_name}`}
-            >
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-sm shadow-emerald-400"></div>
-              <span className="font-bold">Supabase VPS</span>
-              <span className="text-[10px] opacity-75 font-mono">({dbInfo.database_host})</span>
-            </div>
-
             {/* Search Input */}
             <div className="relative focus-glow rounded-xl">
               <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" style={{ fontSize: '18px' }}>search</span>
@@ -675,14 +639,6 @@ export default function App() {
               />
             </div>
 
-            {/* Header Action Button */}
-            <button 
-              onClick={openCreateWizard}
-              className="bg-[#00c2ff] text-slate-950 px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 hover:bg-[#38d0ff] transition-all shadow-md shadow-[#00c2ff]/20"
-            >
-              <span className="material-symbols-outlined text-[18px]">add</span>
-              Nouvelle Chaîne
-            </button>
           </div>
         </div>
 
@@ -831,18 +787,9 @@ export default function App() {
             {/* VIEW 2: MES CHAÎNES (Dedicated Channel Pipelines Cards List with 3-Dots Menu) */}
             {view === 'channels' && (
               <section className="space-y-6">
-                <div className="flex justify-between items-center">
-                  <div>
-                    <h2 className="text-xl font-extrabold text-white">Vos Pipelines de Chaînes</h2>
-                    <p className="text-xs text-slate-400 mt-1">Configurez l'identité, les sous-titres et les effets de vos chaînes automatiques.</p>
-                  </div>
-                  <button
-                    onClick={openCreateWizard}
-                    className="px-5 py-2.5 bg-[#00c2ff] hover:bg-[#38d0ff] text-slate-950 font-bold text-xs rounded-xl transition-all flex items-center gap-2 shadow-md shadow-[#00c2ff]/20"
-                  >
-                    <span className="material-symbols-outlined text-[18px]">add</span>
-                    Ajouter une Chaîne
-                  </button>
+                <div>
+                  <h2 className="text-xl font-extrabold text-white">Vos Pipelines de Chaînes</h2>
+                  <p className="text-xs text-slate-400 mt-1">Configurez l'identité, les sous-titres et les effets de vos chaînes automatiques.</p>
                 </div>
 
                 {filteredChannels.length === 0 ? (
@@ -1858,18 +1805,18 @@ export default function App() {
               </button>
             </div>
 
-            <div className="aspect-[9/16] bg-black rounded-2xl overflow-hidden border border-[#263042]">
+            <div className="aspect-[16/9] bg-black rounded-2xl overflow-hidden border border-[#263042]">
               <video
-                src={`${STORAGE_BASE}/${selectedVideo.output_video_path}`}
+                src={`${STORAGE_BASE}/${selectedVideo.output_path?.replace('storage/', '')}`}
                 controls
                 autoPlay
-                className="w-full h-full object-cover"
+                className="w-full h-full object-contain"
               />
             </div>
 
             <div className="flex justify-between items-center pt-2">
               <a
-                href={`${STORAGE_BASE}/${selectedVideo.output_video_path}`}
+                href={`${STORAGE_BASE}/${selectedVideo.output_path?.replace('storage/', '')}`}
                 download
                 target="_blank"
                 rel="noreferrer"
