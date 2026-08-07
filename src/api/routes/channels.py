@@ -1,11 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from src.db.session import get_db
 from src.db.models import Channel, Video
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus
+from src.config import STORAGE_PATH
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
+
+ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(db: Session = Depends(get_db)):
@@ -68,6 +72,35 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.image_style = payload.image_style.model_dump()
     if payload.effects_config is not None:
         channel.effects_config = payload.effects_config.model_dump()
+
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+@router.post("/{channel_id}/logo")
+async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp, gif, svg).")
+
+    channel_dir = STORAGE_PATH / "channels" / channel.id
+    channel_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove any previous logo so switching formats doesn't leave stale files behind
+    for old_logo in channel_dir.glob("logo.*"):
+        old_logo.unlink(missing_ok=True)
+
+    dest_file = channel_dir / f"logo{ext}"
+    contents = await file.read()
+    dest_file.write_bytes(contents)
+
+    branding = dict(channel.branding or {})
+    branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
+    channel.branding = branding
 
     db.commit()
     db.refresh(channel)

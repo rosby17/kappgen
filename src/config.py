@@ -9,6 +9,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # API Keys
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
+IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
+IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
 AI_IMAGE_PROVIDER_API_KEY = os.getenv("AI_IMAGE_PROVIDER_API_KEY", "")
 AI_IMAGE_PROVIDER_ENDPOINT = os.getenv("AI_IMAGE_PROVIDER_ENDPOINT", "")
 

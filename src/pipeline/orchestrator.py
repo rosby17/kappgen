@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional
 from src.utils.logger import logger
-from src.pipeline.voiceover import generate_voiceover
+from src.pipeline.voiceover import generate_voiceover, generate_transcript_for_audio
 from src.pipeline.pacing import calculate_pacing_segments
 from src.pipeline.images import fetch_or_generate_images
 from src.pipeline.clip_builder import build_image_clip
@@ -36,29 +36,14 @@ def run_video_pipeline(
     if pre_recorded_audio_path and pre_recorded_audio_path.exists():
         logger.info(f"Step 1/7: Using pre-recorded audio file: {pre_recorded_audio_path}")
         # Copy pre-recorded audio or convert to MP3
-        from src.utils.ffmpeg_runner import run_ffmpeg, get_audio_duration
+        from src.utils.ffmpeg_runner import run_ffmpeg
         cmd = ["ffmpeg", "-y", "-i", str(pre_recorded_audio_path.resolve()), "-c:a", "libmp3lame", "-b:a", "192k", str(raw_vo_path)]
         run_ffmpeg(cmd)
-        
-        duration = get_audio_duration(raw_vo_path)
-        words_list = [w for w in (script_text or "").split() if w.strip()]
-        if not words_list:
-            words_list = ["Audio", "préenregistré", "déjà", "prêt"]
-            
-        word_dur = max(0.2, duration / len(words_list))
-        words_timed = []
-        for idx, w in enumerate(words_list):
-            words_timed.append({
-                "word": w,
-                "start": round(idx * word_dur, 2),
-                "end": round((idx + 1) * word_dur, 2)
-            })
-            
-        transcript_info = {
-            "text": script_text or "Audio préenregistré",
-            "duration": duration,
-            "words": words_timed
-        }
+
+        # Real spoken content is unknown for uploaded audio (script_text is only the
+        # filename-derived title), so transcribe via Izivoice speech-to-text to get
+        # accurate subtitle text and word-level timing.
+        transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré")
     else:
         logger.info("Step 1/7: Generating voiceover audio via TTS...")
         _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path)
