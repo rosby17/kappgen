@@ -54,8 +54,8 @@ def process_single_queued_video() -> bool:
 
         video.status = VideoStatus.DONE.value
         video.finished_at = datetime.utcnow()
-        video.output_path = str(output_mp4.relative_to(STORAGE_PATH.parent) if STORAGE_PATH.parent in output_mp4.parents else output_mp4)
-        video.source_assets_path = str((video_dir / "source").relative_to(STORAGE_PATH.parent) if STORAGE_PATH.parent in (video_dir / "source").parents else (video_dir / "source"))
+        video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
+        video.source_assets_path = str((video_dir / "source").relative_to(STORAGE_PATH) if STORAGE_PATH in (video_dir / "source").parents else (video_dir / "source"))
         video.error_message = None
         db.commit()
         logger.info(f"Worker successfully finished rendering video ID: {video.id}")
