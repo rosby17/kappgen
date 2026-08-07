@@ -3,8 +3,17 @@ import React, { useState, useEffect, useRef } from 'react';
 const getOrigin = () => (typeof window !== 'undefined' ? window.location.origin : '');
 const isLocalhost = getOrigin().includes('localhost') || getOrigin().includes('127.0.0.1');
 
-const API_BASE = import.meta.env.VITE_API_BASE || (isLocalhost ? `${getOrigin()}/api` : "https://api-nichecut.tools-cl.com/api");
-const STORAGE_BASE = import.meta.env.VITE_STORAGE_BASE || (isLocalhost ? `${getOrigin()}/storage` : "https://api-nichecut.tools-cl.com/storage");
+let rawApiBase = import.meta.env.VITE_API_BASE || (isLocalhost ? `${getOrigin()}/api` : "https://api-nichecut.tools-cl.com/api");
+if (rawApiBase.startsWith("http://api-nichecut.tools-cl.com")) {
+  rawApiBase = rawApiBase.replace("http://", "https://");
+}
+const API_BASE = rawApiBase;
+
+let rawStorageBase = import.meta.env.VITE_STORAGE_BASE || (isLocalhost ? `${getOrigin()}/storage` : "https://api-nichecut.tools-cl.com/storage");
+if (rawStorageBase.startsWith("http://api-nichecut.tools-cl.com")) {
+  rawStorageBase = rawStorageBase.replace("http://", "https://");
+}
+const STORAGE_BASE = rawStorageBase;
 
 const getVideoUrl = (path) => {
   if (!path) return '';
