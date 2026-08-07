@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const API_BASE = import.meta.env.VITE_API_BASE || "https://api-nichecut.tools-cl.com/api";
-const STORAGE_BASE = import.meta.env.VITE_STORAGE_BASE || "https://api-nichecut.tools-cl.com/storage";
+const getOrigin = () => (typeof window !== 'undefined' ? window.location.origin : '');
+const isLocalhost = getOrigin().includes('localhost') || getOrigin().includes('127.0.0.1');
+
+const API_BASE = import.meta.env.VITE_API_BASE || (isLocalhost ? `${getOrigin()}/api` : "https://api-nichecut.tools-cl.com/api");
+const STORAGE_BASE = import.meta.env.VITE_STORAGE_BASE || (isLocalhost ? `${getOrigin()}/storage` : "https://api-nichecut.tools-cl.com/storage");
 
 const getVideoUrl = (path) => {
   if (!path) return '';
@@ -383,7 +386,12 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(newChannel)
         });
-        if (!res.ok) throw new Error((await res.json()).detail || "Erreur de mise à jour.");
+        if (!res.ok) {
+          const text = await res.text();
+          let msg = "Erreur de mise à jour.";
+          try { msg = JSON.parse(text).detail || msg; } catch {}
+          throw new Error(msg);
+        }
         saved = await res.json();
       } else {
         const url = currentUser ? `${API_BASE}/channels?user_id=${currentUser.id}` : `${API_BASE}/channels`;
@@ -392,7 +400,12 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(newChannel)
         });
-        if (!res.ok) throw new Error((await res.json()).detail || "Erreur de création.");
+        if (!res.ok) {
+          const text = await res.text();
+          let msg = "Erreur de création.";
+          try { msg = JSON.parse(text).detail || msg; } catch {}
+          throw new Error(msg);
+        }
         saved = await res.json();
       }
 
