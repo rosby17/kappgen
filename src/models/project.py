@@ -73,12 +73,20 @@ class BatchVideoCreate(BaseModel):
 
 class UserCreate(BaseModel):
     email: str
-    name: str = "Créateur NicheCut"
     password: str
 
 class UserLogin(BaseModel):
     email: str
     password: str
+
+class ChangePasswordPayload(BaseModel):
+    user_id: str
+    old_password: str
+    new_password: str
+
+class ResetPasswordPayload(BaseModel):
+    email: str
+    new_password: str
 
 class UserResponse(BaseModel):
     id: str
