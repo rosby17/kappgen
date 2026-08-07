@@ -555,7 +555,7 @@ export default function App() {
         <div className="hidden md:flex justify-between items-center px-xl py-6 border-b border-outline-variant">
           <h1 className="font-display-lg text-display-lg text-on-surface">
             {view === 'dashboard' && 'Dashboard'}
-            {view === 'wizard' && 'Assistant de Création'}
+            {view === 'wizard' && (wizardMode === 'edit' ? 'Modifier la Chaîne' : 'Assistant de Création')}
             {view === 'channel_detail' && (activeChannel ? activeChannel.name : 'Détail Chaîne')}
           </h1>
           <div className="flex items-center gap-4">
@@ -688,31 +688,52 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                      {filteredChannels.map(chan => (
-                        <div 
-                          key={chan.id} 
+                      {filteredChannels.map(chan => {
+                        const logoUrl = getChannelLogoUrl(chan);
+                        const statusInfo = getChannelStatusInfo(chan);
+                        return (
+                        <div
+                          key={chan.id}
                           onClick={() => { setActiveChannel(chan); fetchChannelVideos(chan.id); setView('channel_detail'); }}
-                          className="bg-level-1 rounded-xl p-5 hover:bg-surface-container-high transition-colors border border-transparent hover:border-outline-variant cursor-pointer group flex flex-col justify-between min-h-[180px]"
+                          className="bg-level-1 rounded-xl p-5 hover:bg-surface-container-high transition-colors border border-transparent hover:border-outline-variant cursor-pointer group flex flex-col justify-between min-h-[190px]"
                         >
                           <div className="flex items-start justify-between">
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold font-title-sm">
-                                {chan.name.slice(0, 2).toUpperCase()}
-                              </div>
-                              <div>
-                                <h4 className="font-title-sm text-title-sm text-on-surface group-hover:text-primary-container transition-colors">{chan.name}</h4>
-                                <span className="font-label-bold text-label-bold text-on-surface-variant">{chan.niche}</span>
+                            <div className="flex items-center gap-3 min-w-0">
+                              {logoUrl ? (
+                                <img src={logoUrl} alt={chan.name} className="w-10 h-10 rounded-xl object-cover border border-surface-container-highest flex-shrink-0" />
+                              ) : (
+                                <div className="w-10 h-10 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold font-title-sm flex-shrink-0">
+                                  {chan.name.slice(0, 2).toUpperCase()}
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <h4 className="font-title-sm text-title-sm text-on-surface group-hover:text-primary-container transition-colors truncate">{chan.name}</h4>
+                                <span className="font-label-bold text-label-bold text-on-surface-variant truncate block">{chan.niche}</span>
                               </div>
                             </div>
-                            <button 
-                              onClick={(e) => handleDeleteChannel(chan.id, e)}
-                              className="text-error hover:text-red-400 p-1"
-                            >
-                              <span className="material-symbols-outlined text-[18px]">delete</span>
-                            </button>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <button
+                                onClick={(e) => openEditWizard(chan, e)}
+                                className="text-on-surface-variant hover:text-primary-container p-1"
+                                title="Modifier la chaîne"
+                              >
+                                <span className="material-symbols-outlined text-[18px]">edit</span>
+                              </button>
+                              <button
+                                onClick={(e) => handleDeleteChannel(chan.id, e)}
+                                className="text-error hover:text-red-400 p-1"
+                                title="Supprimer la chaîne"
+                              >
+                                <span className="material-symbols-outlined text-[18px]">delete</span>
+                              </button>
+                            </div>
                           </div>
 
-                          <div className="grid grid-cols-2 gap-2 mt-4">
+                          <span className={`self-start mt-3 px-2.5 py-1 rounded-md text-[11px] font-mono-label font-bold uppercase ${statusInfo.className}`}>
+                            {statusInfo.label}
+                          </span>
+
+                          <div className="grid grid-cols-2 gap-2 mt-3">
                             <div className="bg-surface p-2 rounded-xl border border-surface-container-highest">
                               <div className="font-label-bold text-label-bold text-on-surface-variant mb-1">En File</div>
                               <div className="font-body-md text-body-md text-primary-container font-bold">{(chan.queued_count || 0) + (chan.rendering_count || 0)}</div>
@@ -722,11 +743,19 @@ export default function App() {
                               <div className="font-body-md text-body-md text-on-surface font-bold">{chan.done_count || 0}</div>
                             </div>
                           </div>
+
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setActiveChannel(chan); setShowSubmitModal(true); }}
+                            className="mt-3 w-full py-2 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-xs hover:bg-primary-container hover:text-on-primary-container transition-colors flex items-center justify-center gap-1.5"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">add</span> Nouvelle Vidéo
+                          </button>
                         </div>
-                      ))}
+                        );
+                      })}
 
                       {/* Add Channel Button Card */}
-                      <button 
+                      <button
                         onClick={openCreateWizard}
                         className="rounded-xl p-5 border-2 border-dashed border-surface-container-highest hover:border-primary-container hover:bg-surface transition-all flex flex-col items-center justify-center gap-3 min-h-[180px] text-on-surface-variant hover:text-primary-container group"
                       >
@@ -744,15 +773,15 @@ export default function App() {
             {/* VIEW 2: CHANNEL CREATION WIZARD */}
             {view === 'wizard' && (
               <div className="max-w-[800px] mx-auto space-y-6">
-                <button 
-                  onClick={() => setView('dashboard')}
+                <button
+                  onClick={() => { setView(wizardMode === 'edit' ? 'channel_detail' : 'dashboard'); resetWizardState(); }}
                   className="text-on-surface-variant hover:text-on-surface flex items-center gap-2 font-label-bold"
                 >
                   <span className="material-symbols-outlined">arrow_back</span> Retour
                 </button>
 
                 <div className="bg-level-1 rounded-xl p-8 border border-surface-container-highest">
-                  <h2 className="font-display-lg text-display-lg text-on-surface mb-2">Assistant de Création</h2>
+                  <h2 className="font-display-lg text-display-lg text-on-surface mb-2">{wizardMode === 'edit' ? 'Modifier la Chaîne' : 'Assistant de Création'}</h2>
                   <p className="text-on-surface-variant mb-6">Étape {wizardStep} sur 5 — Configurez l'identité et le style de votre chaîne automatisée.</p>
 
                   <div className="flex items-center justify-between w-full mb-8 relative">
@@ -769,9 +798,43 @@ export default function App() {
                   {wizardStep === 1 && (
                     <div className="space-y-4">
                       <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Informations Générales</h3>
+
+                      <div>
+                        <label className="block font-label-bold text-on-surface-variant mb-2">Photo / logo de la chaîne</label>
+                        <div className="flex items-center gap-4">
+                          <div
+                            onClick={() => logoInputRef.current && logoInputRef.current.click()}
+                            className="w-20 h-20 rounded-xl bg-surface border border-surface-container-highest hover:border-primary-container cursor-pointer flex items-center justify-center overflow-hidden flex-shrink-0 transition-colors"
+                          >
+                            {logoPreviewUrl ? (
+                              <img src={logoPreviewUrl} alt="Logo" className="w-full h-full object-cover" />
+                            ) : (
+                              <span className="material-symbols-outlined text-on-surface-variant text-[28px]">add_a_photo</span>
+                            )}
+                          </div>
+                          <div>
+                            <input
+                              type="file"
+                              ref={logoInputRef}
+                              accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                              onChange={handleLogoFileSelect}
+                              className="hidden"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => logoInputRef.current && logoInputRef.current.click()}
+                              className="px-4 py-2 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-xs hover:bg-surface-variant transition-colors"
+                            >
+                              {logoPreviewUrl ? "Changer l'image" : "Choisir une image"}
+                            </button>
+                            <p className="text-xs text-on-surface-variant mt-1">PNG, JPG, WEBP, GIF ou SVG</p>
+                          </div>
+                        </div>
+                      </div>
+
                       <div>
                         <label className="block font-label-bold text-on-surface-variant mb-2">Nom de la chaîne YouTube</label>
-                        <input 
+                        <input
                           value={newChannel.name}
                           onChange={e => setNewChannel({ ...newChannel, name: e.target.value })}
                           className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
@@ -878,15 +941,39 @@ export default function App() {
                       <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Style Visuel & Effets</h3>
                       <div>
                         <label className="block font-label-bold text-on-surface-variant mb-2">Source d'Images</label>
-                        <select 
+                        <select
                           value={newChannel.image_style.source}
                           onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: e.target.value } })}
                           className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
                         >
-                          <option value="library">Bibliothèque / Banques d'Images Locales</option>
-                          <option value="ai_generated">Génération IA Automatique (Prompts per-segment)</option>
+                          <option value="library">Dossier Local (mes propres images)</option>
+                          <option value="ai_generated">Génération IA Automatique (payant, par segment)</option>
                         </select>
                       </div>
+
+                      {newChannel.image_style.source === 'library' ? (
+                        <div>
+                          <label className="block font-label-bold text-on-surface-variant mb-2">Chemin du dossier d'images local</label>
+                          <input
+                            value={newChannel.image_style.library_path || ''}
+                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, library_path: e.target.value } })}
+                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none font-mono text-sm"
+                            placeholder="/Users/moi/Images/ma-chaine"
+                          />
+                          <p className="text-xs text-on-surface-variant mt-2">Chemin absolu, sur la machine qui exécute NicheCut, vers un dossier contenant vos images (JPG, PNG, WEBP). Laissez vide pour utiliser la bibliothèque par défaut.</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block font-label-bold text-on-surface-variant mb-2">Style / ambiance des images générées</label>
+                          <input
+                            value={newChannel.image_style.style_prompt || ''}
+                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, style_prompt: e.target.value } })}
+                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
+                            placeholder="cinematic dramatic lighting, high detail"
+                          />
+                          <p className="text-xs text-on-surface-variant mt-2">Chaque image de la vidéo est générée automatiquement via IA (ai33.pro) — des crédits sont consommés à chaque vidéo générée.</p>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -908,12 +995,13 @@ export default function App() {
                         Suivant <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
                       </button>
                     ) : (
-                      <button 
-                        onClick={handleCreateChannel}
+                      <button
+                        onClick={handleSaveChannel}
                         disabled={loading}
                         className="px-6 py-2 rounded-xl bg-primary-container text-on-primary-container font-label-bold hover:bg-primary transition-colors flex items-center gap-2"
                       >
-                        <span className="material-symbols-outlined text-[18px]">check</span> {loading ? "Enregistrement..." : "Créer le Pipeline"}
+                        <span className="material-symbols-outlined text-[18px]">check</span>
+                        {loading ? "Enregistrement..." : (wizardMode === 'edit' ? "Enregistrer les modifications" : "Créer le Pipeline")}
                       </button>
                     )}
                   </div>
@@ -925,22 +1013,37 @@ export default function App() {
             {view === 'channel_detail' && activeChannel && (
               <div className="space-y-8">
                 <section className="flex flex-col md:flex-row md:items-end justify-between gap-6">
-                  <div className="flex items-center gap-6">
-                    <div className="w-20 h-20 rounded-xl bg-surface-container-high border border-outline-variant flex items-center justify-center text-primary-container font-bold text-2xl">
-                      {activeChannel.name.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <h1 className="font-display-lg text-display-lg text-on-surface">{activeChannel.name}</h1>
+                  <div className="flex items-center gap-6 min-w-0">
+                    {getChannelLogoUrl(activeChannel) ? (
+                      <img src={getChannelLogoUrl(activeChannel)} alt={activeChannel.name} className="w-20 h-20 rounded-xl object-cover border border-outline-variant flex-shrink-0" />
+                    ) : (
+                      <div className="w-20 h-20 rounded-xl bg-surface-container-high border border-outline-variant flex items-center justify-center text-primary-container font-bold text-2xl flex-shrink-0">
+                        {activeChannel.name.slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <h1 className="font-display-lg text-display-lg text-on-surface truncate">{activeChannel.name}</h1>
                       <div className="flex items-center gap-4 text-on-surface-variant font-body-md">
                         <span>Niche: <strong>{activeChannel.niche}</strong></span>
                         <span>•</span>
                         <span className="font-mono-label text-mono-label">ID: {activeChannel.id.slice(0, 8)}...</span>
                       </div>
+                      {(() => {
+                        const s = getChannelStatusInfo(activeChannel);
+                        return <span className={`inline-block mt-2 px-2.5 py-1 rounded-md text-[11px] font-mono-label font-bold uppercase ${s.className}`}>{s.label}</span>;
+                      })()}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3">
-                    <button 
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    <button
+                      onClick={(e) => openEditWizard(activeChannel, e)}
+                      className="px-4 py-2.5 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-label-bold hover:bg-surface-variant transition-colors flex items-center gap-2"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">edit</span>
+                      Modifier
+                    </button>
+                    <button
                       onClick={() => setShowSubmitModal(true)}
                       className="px-5 py-2.5 bg-primary-container text-on-primary-container rounded-xl font-label-bold text-label-bold hover:bg-primary transition-colors flex items-center gap-2 shadow-lg shadow-primary-container/20"
                     >
@@ -1321,18 +1424,92 @@ export default function App() {
               </div>
             )}
 
+            {/* CHANNEL PICKER MODAL — used by "Nouvelle Vidéo" when no channel context is implied */}
+            {showChannelPickerModal && (
+              <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
+                <div className="bg-level-1 rounded-xl p-8 max-w-[720px] w-full max-h-[85vh] overflow-y-auto border border-surface-container-highest shadow-2xl">
+                  <div className="flex justify-between items-center mb-6">
+                    <div>
+                      <h3 className="font-headline-md text-headline-md text-on-surface">Choisir une chaîne</h3>
+                      <p className="text-on-surface-variant text-sm mt-1">Sur quelle chaîne voulez-vous générer cette vidéo ?</p>
+                    </div>
+                    <button onClick={() => setShowChannelPickerModal(false)} className="text-on-surface-variant hover:text-on-surface p-1">
+                      <span className="material-symbols-outlined">close</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {channels.map(chan => {
+                      const logoUrl = getChannelLogoUrl(chan);
+                      return (
+                        <button
+                          key={chan.id}
+                          onClick={() => {
+                            setActiveChannel(chan);
+                            fetchChannelVideos(chan.id);
+                            setShowChannelPickerModal(false);
+                            setShowSubmitModal(true);
+                          }}
+                          className="flex items-center gap-3 bg-surface p-4 rounded-xl border border-surface-container-highest hover:border-primary-container hover:bg-surface-container-high transition-colors text-left"
+                        >
+                          {logoUrl ? (
+                            <img src={logoUrl} alt={chan.name} className="w-12 h-12 rounded-xl object-cover border border-surface-container-highest flex-shrink-0" />
+                          ) : (
+                            <div className="w-12 h-12 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold flex-shrink-0">
+                              {chan.name.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-title-sm text-title-sm text-on-surface truncate">{chan.name}</div>
+                            <div className="font-label-bold text-label-bold text-on-surface-variant truncate">{chan.niche}</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+
+                    <button
+                      onClick={() => { setShowChannelPickerModal(false); openCreateWizard(); }}
+                      className="flex items-center justify-center gap-2 border-2 border-dashed border-surface-container-highest hover:border-primary-container hover:bg-surface rounded-xl p-4 text-on-surface-variant hover:text-primary-container transition-all"
+                    >
+                      <span className="material-symbols-outlined">add</span>
+                      <span className="font-label-bold text-label-bold">Nouvelle chaîne</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* VIDEO SUBMISSION MODAL */}
             {showSubmitModal && activeChannel && (
               <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
                 <div className="bg-level-1 rounded-xl p-8 max-w-[760px] w-full max-h-[90vh] overflow-y-auto border border-surface-container-highest shadow-2xl">
-                  <div className="flex justify-between items-center mb-6">
-                    <div>
-                      <h3 className="font-headline-md text-headline-md text-on-surface">Soumettre un sujet de vidéo</h3>
-                      <p className="text-on-surface-variant text-sm mt-1">Chaîne : <strong className="text-primary-container">{activeChannel.name}</strong></p>
-                    </div>
+                  <div className="flex justify-between items-start mb-6">
+                    <h3 className="font-headline-md text-headline-md text-on-surface">Nouvelle vidéo</h3>
                     <button onClick={() => setShowSubmitModal(false)} className="text-on-surface-variant hover:text-on-surface p-1">
                       <span className="material-symbols-outlined">close</span>
                     </button>
+                  </div>
+
+                  <div className="flex items-center gap-4 bg-surface-container-lowest p-4 rounded-xl border border-surface-container-highest mb-6">
+                    {getChannelLogoUrl(activeChannel) ? (
+                      <img src={getChannelLogoUrl(activeChannel)} alt={activeChannel.name} className="w-14 h-14 rounded-xl object-cover border border-surface-container-highest flex-shrink-0" />
+                    ) : (
+                      <div className="w-14 h-14 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold text-lg flex-shrink-0">
+                        {activeChannel.name.slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-title-sm text-title-sm text-on-surface truncate">{activeChannel.name}</div>
+                      <div className="font-label-bold text-label-bold text-on-surface-variant truncate">{activeChannel.niche}</div>
+                    </div>
+                    {channels.length > 1 && (
+                      <button
+                        onClick={() => { setShowSubmitModal(false); setShowChannelPickerModal(true); }}
+                        className="px-3 py-1.5 bg-surface-container-high text-on-surface-variant hover:text-on-surface rounded-lg text-xs font-label-bold flex-shrink-0 transition-colors"
+                      >
+                        Changer
+                      </button>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3 bg-surface-container-lowest p-2 rounded-xl mb-6 border border-surface-container-highest">
