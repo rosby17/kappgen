@@ -13,7 +13,7 @@ IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
 AI_IMAGE_PROVIDER_API_KEY = os.getenv("AI_IMAGE_PROVIDER_API_KEY", "")
 AI_IMAGE_PROVIDER_ENDPOINT = os.getenv("AI_IMAGE_PROVIDER_ENDPOINT", "https://api.ai33.pro")
-AI_IMAGE_MODEL_ID = os.getenv("AI_IMAGE_MODEL_ID", "bytedance-seedream-4.5")
+AI_IMAGE_MODEL_ID = os.getenv("AI_IMAGE_MODEL_ID", "gemini-2.5-flash-image")
 
 # Supabase Credentials
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")

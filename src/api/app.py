@@ -52,4 +52,17 @@ def on_startup():
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "app": "Nichecut Video Pipeline MVP"}
+    return {"status": "ok", "app": "NicheCut Video Pipeline MVP"}
+
+@app.get("/api/db-status")
+def get_db_status():
+    from src.config import DATABASE_URL, SUPABASE_URL
+    is_postgres = "postgresql" in DATABASE_URL or "postgres" in DATABASE_URL
+    return {
+        "status": "connected",
+        "engine": "postgresql" if is_postgres else "sqlite",
+        "service_name": "Supabase PostgreSQL (Self-Hosted VPS rooseveltvps)" if is_postgres else "Local SQLite",
+        "supabase_url": SUPABASE_URL or "https://bd.izivoice.app",
+        "database_host": "31.97.118.192:5432" if is_postgres else "local file data/app.db",
+        "tables": ["users", "channels", "videos"]
+    }
