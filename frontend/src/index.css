@@ -1,47 +1,76 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Montserrat:wght@600;700;800;900&family=Bebas+Neue&family=Oswald:wght@600;700&display=swap');
 
 body {
-  background-color: #131313;
-  color: #e5e2e1;
+  background-color: #0f1217;
+  color: #e5e8f0;
   font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
+/* Warm modern dark panels & glassmorphic aesthetics */
 .bg-level-1 {
-  background-color: #1c1b1b;
-  border: 1px solid #2a2a2a;
+  background-color: #161b22;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
 }
 
 .bg-level-2 {
-  background-color: #201f1f;
-  border: 1px solid #353534;
+  background-color: #1f2633;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .glass-panel {
-  background-color: #201f1f;
-  border: 1px solid #353534;
+  background: rgba(22, 27, 34, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.card-warm-hover {
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.card-warm-hover:hover {
+  transform: translateY(-2px);
+  border-color: rgba(0, 194, 255, 0.4);
+  box-shadow: 0 12px 35px -8px rgba(0, 194, 255, 0.15);
 }
 
 .focus-glow:focus-within {
-  box-shadow: 0 0 0 2px rgba(146, 217, 255, 0.2);
-  border-color: #92d9ff;
+  box-shadow: 0 0 0 2px rgba(0, 194, 255, 0.4);
+  border-color: #00c2ff;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #131313;
+  background: #0f1217;
 }
 ::-webkit-scrollbar-thumb {
-  background: #353534;
+  background: #2a3447;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #474746;
+  background: #00c2ff;
 }
 
 .material-symbols-outlined {
   font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Keyframe animations for karaoke preview */
+@keyframes karaokeGlow {
+  0%, 100% {
+    text-shadow: 0 0 12px rgba(255, 215, 0, 0.8), 0 2px 4px rgba(0, 0, 0, 0.9);
+    transform: scale(1);
+  }
+  50% {
+    text-shadow: 0 0 24px rgba(255, 215, 0, 1), 0 2px 8px rgba(0, 0, 0, 0.9);
+    transform: scale(1.06);
+  }
+}
+
+.animate-karaoke {
+  animation: karaokeGlow 1.5s infinite ease-in-out;
 }

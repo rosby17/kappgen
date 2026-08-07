@@ -3,18 +3,87 @@ import React, { useState, useEffect, useRef } from 'react';
 const API_BASE = "http://localhost:8000/api";
 const STORAGE_BASE = "http://localhost:8000/storage";
 
+// Preset Subtitle Styles
+const SUBTITLE_PRESETS = [
+  {
+    id: 'hormozi',
+    name: 'Hormozi Gold 🔥',
+    font: 'Montserrat',
+    size: 46,
+    color: '#FFD700',
+    outline_color: '#000000',
+    outline_width: 4,
+    position: 'bottom',
+    karaoke: true,
+    box_color: 'transparent'
+  },
+  {
+    id: 'tiktok_glow',
+    name: 'TikTok Neon Cyan ⚡',
+    font: 'Inter',
+    size: 44,
+    color: '#00FFFF',
+    outline_color: '#003b46',
+    outline_width: 3,
+    position: 'bottom',
+    karaoke: true,
+    box_color: 'rgba(0,0,0,0.6)'
+  },
+  {
+    id: 'cinematic_dark',
+    name: 'Cinématique Épuré 🎬',
+    font: 'Montserrat',
+    size: 40,
+    color: '#FFFFFF',
+    outline_color: '#111111',
+    outline_width: 2,
+    position: 'bottom',
+    karaoke: true,
+    box_color: 'transparent'
+  },
+  {
+    id: 'classic_stoic',
+    name: 'Stoïcien Vintage 📜',
+    font: 'Bebas Neue',
+    size: 50,
+    color: '#F5EBE0',
+    outline_color: '#2B1E16',
+    outline_width: 3,
+    position: 'bottom',
+    karaoke: false,
+    box_color: 'rgba(20,15,10,0.7)'
+  }
+];
+
+// Available Voice Models
+const VOICE_MODELS = [
+  { id: 'fr-FR-Thomas', name: 'Thomas — Voix Stoïque & Profonde', lang: 'fr-FR', desc: 'Idéal pour philosophie, citations et stoïcisme' },
+  { id: 'fr-FR-Elodie', name: 'Élodie — Narrative Éléganter', lang: 'fr-FR', desc: 'Idéal pour récits historiques et contes' },
+  { id: 'fr-FR-Nicolas', name: 'Nicolas — Voix Grave & Envoûtante', lang: 'fr-FR', desc: 'Idéal pour spiritualité et méditations guidées' },
+  { id: 'fr-FR-Claire', name: 'Claire — Douce & Inspirante', lang: 'fr-FR', desc: 'Idéal pour développement personnel' }
+];
+
 export default function App() {
   const [channels, setChannels] = useState([]);
   const [activeChannel, setActiveChannel] = useState(null);
   const [channelVideos, setChannelVideos] = useState([]);
-  const [view, setView] = useState('dashboard'); // 'dashboard', 'wizard', 'channel_detail'
+  const [allVideos, setAllVideos] = useState([]);
+  const [view, setView] = useState('home'); // 'home', 'channels', 'videos', 'channel_detail', 'wizard'
   const [selectedVideo, setSelectedVideo] = useState(null);
+  
+  // Modals & Menu Popups
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showChannelPickerModal, setShowChannelPickerModal] = useState(false);
+  const [openChannelMenuId, setOpenChannelMenuId] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [videoFilterChannelId, setVideoFilterChannelId] = useState('all');
+
+  // Karaoke Animation Preview Index
+  const [previewWordIndex, setPreviewWordIndex] = useState(0);
 
   // Database Connection Info
   const [dbInfo, setDbInfo] = useState({
@@ -41,64 +110,79 @@ export default function App() {
     fetchDbStatus();
   }, []);
 
-  // Theme State ('dark' | 'light')
-  const [themeMode, setThemeMode] = useState(() => {
-    return localStorage.getItem("nichecut_theme") || "dark";
-  });
-
+  // Karaoke timer animation effect for subtitle preview
   useEffect(() => {
-    localStorage.setItem("nichecut_theme", themeMode);
-    if (themeMode === "light") {
-      document.documentElement.classList.remove("dark");
-    } else {
-      document.documentElement.classList.add("dark");
-    }
-  }, [themeMode]);
+    const timer = setInterval(() => {
+      setPreviewWordIndex(prev => (prev + 1) % 6);
+    }, 800);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Close channel popup menus when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (!e.target.closest('.channel-menu-container')) {
+        setOpenChannelMenuId(null);
+      }
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, []);
 
   // User Auth State
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = localStorage.getItem("nichecut_user");
-    return saved ? JSON.parse(saved) : null;
+    return saved ? JSON.parse(saved) : { name: 'Mogo', email: 'rooseveltmkng@gmail.com', id: 'user-demo-1' };
   });
-  const [authTab, setAuthTab] = useState('login'); // 'login' | 'register' | 'forgot'
+  const [authTab, setAuthTab] = useState('login');
   const [authForm, setAuthForm] = useState({ email: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [resetSuccessMsg, setResetSuccessMsg] = useState('');
 
   // Profile Settings Form State
-  const [profileTab, setProfileTab] = useState('database'); // 'database' | 'security' | 'appearance'
+  const [profileTab, setProfileTab] = useState('database');
   const [passwordForm, setPasswordForm] = useState({ old_password: '', new_password: '', confirm_password: '' });
-  const [enable2FA, setEnable2FA] = useState(false);
 
-  // Submission Form State (Strictly 2 Modes)
+  // Submission Form State (Nouvelle Vidéo)
   const [submitMode, setSubmitMode] = useState('text'); // 'text' | 'audio_upload'
   const [singleScriptText, setSingleScriptText] = useState('');
+  const [selectedVoice, setSelectedVoice] = useState('fr-FR-Thomas');
   const [audioFilesList, setAudioFilesList] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Wizard state
+  // Wizard State
   const [wizardStep, setWizardStep] = useState(1);
-  const [wizardMode, setWizardMode] = useState('create'); // 'create' | 'edit'
+  const [wizardMode, setWizardMode] = useState('create');
   const [editingChannelId, setEditingChannelId] = useState(null);
   const [logoFile, setLogoFile] = useState(null);
   const [logoPreviewUrl, setLogoPreviewUrl] = useState(null);
   const logoInputRef = useRef(null);
+
+  // Local Image Folder Upload State for Wizard Step 5
+  const [localImageFiles, setLocalImageFiles] = useState([]);
+  const [selectedFolderName, setSelectedFolderName] = useState('');
+  const [isFolderDragging, setIsFolderDragging] = useState(false);
+  const wizardFolderInputRef = useRef(null);
+
   const defaultChannelForm = {
     name: '',
     niche: 'Philosophie & Stoïcisme',
     subtitle_style: {
-      font: 'Arial',
+      font: 'Montserrat',
       size: 44,
-      color: '&H00FFFFFF',
-      outline_color: '&H00000000',
+      color: '#FFD700',
+      outline_color: '#000000',
       outline_width: 3,
       position: 'bottom',
-      karaoke: true
+      karaoke: true,
+      box_color: 'transparent'
     },
     branding: {
       channel_name_text: '',
-      logo_path: ''
+      logo_path: '',
+      watermark_position: 'top_right',
+      watermark_opacity: 0.85
     },
     music_preference: {
       enabled: true,
@@ -107,7 +191,7 @@ export default function App() {
     },
     image_style: {
       source: 'library',
-      style_prompt: 'cinematic dramatic lighting, high detail',
+      style_prompt: 'cinematic dramatic lighting, high detail, stoic sculpture style, dark moody atmosphere',
       library_path: ''
     },
     effects_config: {
@@ -131,6 +215,19 @@ export default function App() {
     }
   };
 
+  const fetchAllVideos = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/videos`);
+      if (res.ok) {
+        const data = await res.json();
+        setAllVideos(data);
+      }
+    } catch (e) {
+      // Fallback: aggregate from channel videos if route not ready
+      console.log("Fetching channel videos fallback");
+    }
+  };
+
   const fetchChannelVideos = async (channelId) => {
     try {
       const res = await fetch(`${API_BASE}/videos/channel/${channelId}`);
@@ -145,94 +242,34 @@ export default function App() {
 
   useEffect(() => {
     fetchChannels();
+    fetchAllVideos();
     const interval = setInterval(() => {
       fetchChannels();
       if (activeChannel) {
         fetchChannelVideos(activeChannel.id);
       }
-    }, 4000);
+    }, 6000);
     return () => clearInterval(interval);
   }, [activeChannel]);
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
-    if (!authForm.email || !authForm.password) return alert("Veuillez remplir l'email et le mot de passe.");
-
-    if (authTab === 'forgot') {
-      try {
-        setLoading(true);
-        const res = await fetch(`${API_BASE}/auth/reset-password`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: authForm.email, new_password: authForm.password })
-        });
-        if (res.ok) {
-          setResetSuccessMsg("Mot de passe réinitialisé avec succès ! Connectez-vous.");
-          setAuthTab('login');
-        } else {
-          const err = await res.json();
-          alert(err.detail || "Erreur de réinitialisation.");
-        }
-      } catch (err) {
-        alert("Erreur réseau: " + err.message);
-      } finally {
-        setLoading(false);
-      }
-      return;
-    }
-
-    const endpoint = authTab === 'register' ? `${API_BASE}/auth/register` : `${API_BASE}/auth/login`;
     try {
       setLoading(true);
+      const endpoint = authTab === 'register' ? `${API_BASE}/auth/register` : `${API_BASE}/auth/login`;
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(authForm)
       });
       if (res.ok) {
-        const user = await res.json();
-        setCurrentUser(user);
-        localStorage.setItem("nichecut_user", JSON.stringify(user));
+        const data = await res.json();
+        setCurrentUser(data.user);
+        localStorage.setItem("nichecut_user", JSON.stringify(data.user));
         setShowAuthModal(false);
-        setAuthForm({ email: '', password: '' });
       } else {
         const err = await res.json();
         alert(err.detail || "Erreur d'authentification.");
-      }
-    } catch (err) {
-      alert("Erreur réseau: " + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleGoogleAuth = () => {
-    alert("Connexion via Google : Redirection OAuth vers Google en cours...");
-  };
-
-  const handleChangePasswordSubmit = async (e) => {
-    e.preventDefault();
-    if (!currentUser) return;
-    if (passwordForm.new_password !== passwordForm.confirm_password) {
-      return alert("Le nouveau mot de passe et sa confirmation ne correspondent pas.");
-    }
-    try {
-      setLoading(true);
-      const res = await fetch(`${API_BASE}/auth/change-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: currentUser.id,
-          old_password: passwordForm.old_password,
-          new_password: passwordForm.new_password
-        })
-      });
-      if (res.ok) {
-        alert("Mot de passe modifié avec succès !");
-        setPasswordForm({ old_password: '', new_password: '', confirm_password: '' });
-      } else {
-        const err = await res.json();
-        alert(err.detail || "Erreur lors du changement de mot de passe.");
       }
     } catch (err) {
       alert("Erreur réseau: " + err.message);
@@ -253,6 +290,7 @@ export default function App() {
     setEditingChannelId(null);
     setLogoFile(null);
     setLogoPreviewUrl(null);
+    setLocalImageFiles([]);
     setWizardStep(1);
   };
 
@@ -263,6 +301,7 @@ export default function App() {
 
   const openEditWizard = (channel, e) => {
     if (e) e.stopPropagation();
+    setOpenChannelMenuId(null);
     setWizardMode('edit');
     setEditingChannelId(channel.id);
     setNewChannel({
@@ -285,6 +324,49 @@ export default function App() {
     if (!file) return;
     setLogoFile(file);
     setLogoPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const handleLocalFolderSelect = (e) => {
+    const files = Array.from(e.target.files).filter(f => 
+      f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|svg|avif)$/i.test(f.name)
+    );
+    if (files.length > 0) {
+      // Extract directory name from webkitRelativePath
+      const firstPath = files[0].webkitRelativePath || '';
+      const folderName = firstPath ? firstPath.split('/')[0] : 'Dossier Images';
+      setSelectedFolderName(folderName);
+      setLocalImageFiles(files);
+      setNewChannel(prev => ({
+        ...prev,
+        image_style: {
+          ...prev.image_style,
+          library_path: `${folderName} (${files.length} images)`
+        }
+      }));
+    }
+  };
+
+  const handleFolderDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsFolderDragging(false);
+
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(f => 
+      f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|svg|avif)$/i.test(f.name)
+    );
+
+    if (droppedFiles.length > 0) {
+      const folderName = "Dossier Images Déposé";
+      setSelectedFolderName(folderName);
+      setLocalImageFiles(droppedFiles);
+      setNewChannel(prev => ({
+        ...prev,
+        image_style: {
+          ...prev.image_style,
+          library_path: `${folderName} (${droppedFiles.length} images)`
+        }
+      }));
+    }
   };
 
   const uploadChannelLogo = async (channelId) => {
@@ -341,23 +423,11 @@ export default function App() {
     const queued = channel.queued_count || 0;
     const done = channel.done_count || 0;
     const failed = channel.failed_count || 0;
-    if (rendering > 0) return { label: 'Rendu en cours', className: 'bg-blue-950 text-blue-300 border border-blue-800 animate-pulse' };
-    if (queued > 0) return { label: 'En file d\'attente', className: 'bg-yellow-950 text-yellow-300 border border-yellow-800' };
-    if (done > 0) return { label: 'Prêt', className: 'bg-emerald-950 text-emerald-300 border border-emerald-800' };
-    if (failed > 0) return { label: 'Échec de rendu', className: 'bg-red-950 text-red-300 border border-red-800' };
-    return { label: 'Aucune vidéo', className: 'bg-surface-container-high text-on-surface-variant border border-surface-container-highest' };
-  };
-
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
+    if (rendering > 0) return { label: 'Rendu en cours', className: 'bg-blue-950/80 text-blue-300 border border-blue-700/60 animate-pulse' };
+    if (queued > 0) return { label: 'En file', className: 'bg-amber-950/80 text-amber-300 border border-amber-700/60' };
+    if (done > 0) return { label: 'Prête', className: 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/60' };
+    if (failed > 0) return { label: 'Échec de rendu', className: 'bg-rose-950/80 text-rose-300 border border-rose-700/60' };
+    return { label: 'Configurée', className: 'bg-slate-800/80 text-slate-300 border border-slate-700/60' };
   };
 
   const handleDrop = (e) => {
@@ -374,23 +444,13 @@ export default function App() {
     }
   };
 
-  const handleFileSelect = (e) => {
-    const selected = Array.from(e.target.files);
-    if (selected.length > 0) {
-      setAudioFilesList(prev => [...prev, ...selected]);
-    }
-  };
-
-  const removeAudioFile = (index) => {
-    setAudioFilesList(prev => prev.filter((_, i) => i !== index));
-  };
-
   const handleSubjectSubmit = async () => {
     if (!activeChannel) return alert("Veuillez sélectionner une chaîne.");
 
     const formData = new FormData();
     formData.append("channel_id", activeChannel.id);
     formData.append("input_type", submitMode === 'audio_upload' ? 'audio' : 'text');
+    formData.append("voice_id", selectedVoice);
 
     if (submitMode === 'text') {
       if (!singleScriptText.trim()) return alert("Veuillez saisir le texte de votre script.");
@@ -414,6 +474,8 @@ export default function App() {
         setShowSubmitModal(false);
         fetchChannelVideos(activeChannel.id);
         fetchChannels();
+        fetchAllVideos();
+        alert("Vidéo soumise avec succès ! Le montage et le rendu sont lancés.");
       } else {
         const err = await res.json();
         alert(err.detail || "Erreur lors de l'envoi.");
@@ -429,6 +491,7 @@ export default function App() {
     try {
       await fetch(`${API_BASE}/videos/${videoId}/retry`, { method: 'POST' });
       if (activeChannel) fetchChannelVideos(activeChannel.id);
+      fetchAllVideos();
     } catch (e) {
       console.error(e);
     }
@@ -436,13 +499,14 @@ export default function App() {
 
   const handleDeleteChannel = async (channelId, e) => {
     e.stopPropagation();
-    if (!confirm("Voulez-vous vraiment supprimer cette chaîne ?")) return;
+    setOpenChannelMenuId(null);
+    if (!confirm("Voulez-vous vraiment supprimer cette chaîne ? All videos and settings will be removed.")) return;
     try {
       await fetch(`${API_BASE}/channels/${channelId}`, { method: 'DELETE' });
       fetchChannels();
       if (activeChannel && activeChannel.id === channelId) {
         setActiveChannel(null);
-        setView('dashboard');
+        setView('channels');
       }
     } catch (err) {
       console.error(err);
@@ -457,580 +521,581 @@ export default function App() {
   const totalQueued = channels.reduce((acc, c) => acc + (c.queued_count || 0) + (c.rendering_count || 0), 0);
   const totalCompleted = channels.reduce((acc, c) => acc + (c.done_count || 0), 0);
 
+  // Sample sentence for karaoke animation preview
+  const sampleWords = [
+    { text: "Le", highlight: previewWordIndex === 0 },
+    { text: "calme", highlight: previewWordIndex === 1 },
+    { text: "intérieur", highlight: previewWordIndex === 2 },
+    { text: "dépend", highlight: previewWordIndex === 3 },
+    { text: "de votre", highlight: previewWordIndex === 4 },
+    { text: "esprit", highlight: previewWordIndex === 5 },
+  ];
+
   return (
-    <div className="font-body-md antialiased overflow-hidden flex h-screen bg-background text-on-background">
+    <div className="font-body-md antialiased overflow-hidden flex h-screen bg-[#0f1217] text-[#e5e8f0]">
       
-      {/* SideNavBar */}
-      <nav className="hidden md:flex flex-col bg-surface-container text-primary font-label-bold text-label-bold fixed left-0 top-0 h-screen w-[240px] z-40 border-r border-outline-variant py-xl">
-        <div className="px-6 mb-8 flex items-center gap-3 cursor-pointer" onClick={() => setView('dashboard')}>
-          <div className="w-8 h-8 rounded-lg bg-primary-container flex items-center justify-center text-on-primary-container font-bold">N</div>
-          <div>
-            <div className="font-title-sm text-title-sm font-black text-on-surface">NicheCut</div>
-            <div className="text-on-surface-variant font-body-sm text-body-sm">Video Automation</div>
+      {/* SIDE NAVBAR */}
+      <nav className="hidden md:flex flex-col bg-[#141923] text-primary font-label-bold text-label-bold fixed left-0 top-0 h-screen w-[240px] z-40 border-r border-[#263042] py-6 justify-between">
+        
+        <div>
+          {/* Brand Logo Header */}
+          <div className="px-6 mb-8 flex items-center gap-3 cursor-pointer" onClick={() => setView('home')}>
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00c2ff] to-[#0088ff] flex items-center justify-center text-slate-950 font-black text-lg shadow-lg shadow-[#00c2ff]/20">
+              N
+            </div>
+            <div>
+              <div className="font-title-sm text-base font-black text-white tracking-wide">NicheCut</div>
+              <div className="text-slate-400 text-xs font-normal">Video Automation</div>
+            </div>
+          </div>
+
+          {/* Navigation Links - Single Active Item Highlighted */}
+          <div className="px-3 space-y-1.5">
+            <button 
+              onClick={() => setView('home')}
+              className={`w-full flex items-center gap-3.5 px-4 py-3 cursor-pointer rounded-xl transition-all font-medium text-sm ${
+                (view === 'home' || view === 'dashboard') 
+                  ? 'bg-gradient-to-r from-[#00c2ff] to-[#0099ff] text-slate-950 font-bold shadow-md shadow-[#00c2ff]/20' 
+                  : 'text-slate-300 hover:bg-[#1f2838] hover:text-white'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: (view === 'home' || view === 'dashboard') ? "'FILL' 1" : "'FILL' 0" }}>home</span>
+              Home
+            </button>
+
+            <button
+              onClick={() => setView('channels')}
+              className={`w-full flex items-center gap-3.5 px-4 py-3 cursor-pointer rounded-xl transition-all font-medium text-sm ${
+                (view === 'channels' || view === 'channel_detail') 
+                  ? 'bg-gradient-to-r from-[#00c2ff] to-[#0099ff] text-slate-950 font-bold shadow-md shadow-[#00c2ff]/20' 
+                  : 'text-slate-300 hover:bg-[#1f2838] hover:text-white'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: (view === 'channels' || view === 'channel_detail') ? "'FILL' 1" : "'FILL' 0" }}>subscriptions</span>
+              Mes Chaînes
+            </button>
+
+            <button
+              onClick={() => setView('videos')}
+              className={`w-full flex items-center gap-3.5 px-4 py-3 cursor-pointer rounded-xl transition-all font-medium text-sm ${
+                view === 'videos' 
+                  ? 'bg-gradient-to-r from-[#00c2ff] to-[#0099ff] text-slate-950 font-bold shadow-md shadow-[#00c2ff]/20' 
+                  : 'text-slate-300 hover:bg-[#1f2838] hover:text-white'
+              }`}
+            >
+              <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: view === 'videos' ? "'FILL' 1" : "'FILL' 0" }}>movie</span>
+              Mes Vidéos
+            </button>
+
+            {/* Main Action: Create Video Button */}
+            <div className="pt-4 px-1">
+              <button
+                onClick={() => {
+                  if (channels.length === 0) {
+                    openCreateWizard();
+                  } else if (channels.length === 1) {
+                    setActiveChannel(channels[0]);
+                    setShowSubmitModal(true);
+                  } else {
+                    setShowChannelPickerModal(true);
+                  }
+                }}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 cursor-pointer rounded-xl transition-all bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg shadow-emerald-500/25"
+              >
+                <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: "'FILL' 1" }}>add_circle</span>
+                Nouvelle Vidéo
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="flex-1 px-4 space-y-2 overflow-y-auto">
-          <button 
-            onClick={() => setView('dashboard')}
-            className={`w-full flex items-center gap-3 px-4 py-3 cursor-pointer rounded-xl transition-all ${view === 'dashboard' ? 'bg-primary-container text-on-primary-container font-bold' : 'text-on-surface-variant hover:bg-surface-container-high'}`}
-          >
-            <span className="material-symbols-outlined" style={{ fontVariationSettings: view === 'dashboard' ? "'FILL' 1" : "'FILL' 0" }}>dashboard</span>
-            Home
-          </button>
-
-          <button
-            onClick={() => setView('dashboard')}
-            className={`w-full flex items-center gap-3 px-4 py-3 cursor-pointer rounded-xl transition-all ${(view === 'dashboard' || view === 'channel_detail') ? 'bg-primary-container text-on-primary-container font-bold' : 'text-on-surface-variant hover:bg-surface-container-high'}`}
-          >
-            <span className="material-symbols-outlined" style={{ fontVariationSettings: (view === 'dashboard' || view === 'channel_detail') ? "'FILL' 1" : "'FILL' 0" }}>subscriptions</span>
-            Mes Chaînes
-          </button>
-
-          {/* Paramètres & Profil placed BEFORE Nouvelle Vidéo */}
-          <button 
-            onClick={() => {
-              if (currentUser) {
-                setShowProfileModal(true);
-              } else {
-                setShowAuthModal(true);
-              }
-            }}
-            className="w-full flex items-center gap-3 px-4 py-3 cursor-pointer rounded-xl transition-all text-on-surface-variant hover:bg-surface-container-high"
-          >
-            <span className="material-symbols-outlined">settings</span>
-            Paramètres & Profil
-          </button>
-
-          <button
-            onClick={() => {
-              if (channels.length === 0) {
-                openCreateWizard();
-              } else if (channels.length === 1) {
-                setActiveChannel(channels[0]);
-                setShowSubmitModal(true);
-              } else {
-                setShowChannelPickerModal(true);
-              }
-            }}
-            className="w-full flex items-center gap-3 px-4 py-3 cursor-pointer rounded-xl transition-all text-on-surface-variant hover:bg-surface-container-high"
-          >
-            <span className="material-symbols-outlined">add_circle</span>
-            Nouvelle Vidéo
-          </button>
-        </div>
-
-        {/* Bottom Sidebar Profile Card */}
-        <div className="px-4 mt-auto space-y-3">
+        {/* Bottom Sidebar User Profile Card (Paramètres & Profil integrated directly here) */}
+        <div className="px-3">
           {currentUser ? (
             <div 
               onClick={() => setShowProfileModal(true)}
-              className="p-3 bg-surface-container-low hover:bg-surface-container-high rounded-xl border border-surface-container-highest cursor-pointer flex items-center gap-3 transition-all group"
+              className="p-3 bg-[#1b2230] hover:bg-[#252f42] rounded-xl border border-[#2b374d] cursor-pointer flex items-center gap-3 transition-all group shadow-sm"
+              title="Cliquez pour ouvrir les Paramètres & Profil"
             >
-              <div className="w-8 h-8 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-sm">
+              <div className="w-9 h-9 rounded-xl bg-[#00c2ff] text-slate-950 flex items-center justify-center font-bold text-sm flex-shrink-0 shadow-md">
                 {currentUser.name.slice(0, 1).toUpperCase()}
               </div>
               <div className="truncate flex-1">
-                <div className="text-xs text-on-surface font-semibold truncate group-hover:text-primary-container">{currentUser.name}</div>
-                <div className="text-[10px] text-on-surface-variant truncate">{currentUser.email}</div>
+                <div className="text-xs text-white font-bold truncate group-hover:text-[#00c2ff] transition-colors">{currentUser.name}</div>
+                <div className="text-[10px] text-slate-400 truncate">{currentUser.email}</div>
               </div>
-              <span className="material-symbols-outlined text-[18px] text-on-surface-variant">tune</span>
+              <span className="material-symbols-outlined text-[18px] text-slate-400 group-hover:text-white transition-colors">settings</span>
             </div>
           ) : (
             <button 
               onClick={() => setShowAuthModal(true)}
-              className="w-full py-3 bg-primary-container text-on-primary-container rounded-xl font-label-bold text-xs hover:bg-primary transition-colors flex items-center justify-center gap-2 shadow-md"
+              className="w-full py-3 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-colors flex items-center justify-center gap-2 shadow-md"
             >
               <span className="material-symbols-outlined text-[18px]">account_circle</span>
-              Se connecter / S'inscrire
+              Connexion / Inscription
             </button>
           )}
         </div>
       </nav>
 
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col md:ml-[240px] h-screen overflow-hidden bg-background">
+      {/* MAIN CONTENT AREA */}
+      <main className="flex-1 flex flex-col md:ml-[240px] h-screen overflow-hidden bg-[#0f1217]">
         
-        {/* Top Header */}
-        <div className="hidden md:flex justify-between items-center px-xl py-6 border-b border-outline-variant">
-          <h1 className="font-display-lg text-display-lg text-on-surface">
-            {view === 'dashboard' && 'Dashboard'}
-            {view === 'wizard' && (wizardMode === 'edit' ? 'Modifier la Chaîne' : 'Assistant de Création')}
-            {view === 'channel_detail' && (activeChannel ? activeChannel.name : 'Détail Chaîne')}
+        {/* Top Header Bar */}
+        <div className="hidden md:flex justify-between items-center px-8 py-5 border-b border-[#202938] bg-[#141923]/60 backdrop-blur-md">
+          <h1 className="text-xl font-extrabold text-white tracking-tight flex items-center gap-3">
+            {view === 'home' && 'Dashboard Overview'}
+            {view === 'channels' && 'Vos Pipelines de Chaînes'}
+            {view === 'videos' && 'Bibliothèque de Vidéos'}
+            {view === 'wizard' && (wizardMode === 'edit' ? 'Modifier le Pipeline' : 'Assistant de Création de Chaîne')}
+            {view === 'channel_detail' && (activeChannel ? `Chaîne: ${activeChannel.name}` : 'Détail Chaîne')}
           </h1>
+
           <div className="flex items-center gap-4">
-            
-            {/* Supabase VPS Live Database Status Pill */}
+            {/* Supabase VPS Live Database Status Badge */}
             <div 
               onClick={() => setShowProfileModal(true)}
-              className="flex items-center gap-2 bg-emerald-950/60 border border-emerald-800 text-emerald-300 px-3 py-1.5 rounded-xl text-xs font-mono cursor-pointer hover:bg-emerald-900/60 transition-colors shadow-sm"
-              title={`Base de données: ${dbInfo.service_name} (${dbInfo.database_host})`}
+              className="flex items-center gap-2.5 bg-emerald-950/70 border border-emerald-700/60 text-emerald-300 px-3.5 py-1.5 rounded-xl text-xs font-mono cursor-pointer hover:bg-emerald-900/80 transition-colors shadow-sm"
+              title={`Database Status: ${dbInfo.service_name}`}
             >
-              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
+              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-sm shadow-emerald-400"></div>
               <span className="font-bold">Supabase VPS</span>
-              <span className="text-[10px] opacity-75">({dbInfo.database_host})</span>
+              <span className="text-[10px] opacity-75 font-mono">({dbInfo.database_host})</span>
             </div>
 
+            {/* Search Input */}
             <div className="relative focus-glow rounded-xl">
-              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant" style={{ fontSize: '18px' }}>search</span>
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" style={{ fontSize: '18px' }}>search</span>
               <input 
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                className="bg-surface-container-low border border-outline-variant rounded-xl pl-10 pr-4 py-2 font-body-sm text-body-sm text-on-surface focus:outline-none w-64 transition-all" 
+                className="bg-[#1b2230] border border-[#2b374d] rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-400 focus:outline-none w-60 transition-all" 
                 placeholder="Rechercher une chaîne..." 
                 type="text"
               />
             </div>
 
-            {/* Profile Header Indicator */}
-            {currentUser ? (
-              <div 
-                onClick={() => setShowProfileModal(true)}
-                className="flex items-center gap-2 bg-surface-container-high hover:bg-surface-variant px-3 py-1.5 rounded-xl border border-surface-container-highest cursor-pointer transition-all"
-              >
-                <div className="w-7 h-7 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-xs">
-                  {currentUser.name.slice(0, 1).toUpperCase()}
-                </div>
-                <span className="text-xs text-on-surface font-semibold">{currentUser.name}</span>
-              </div>
-            ) : (
-              <button 
-                onClick={() => setShowAuthModal(true)}
-                className="px-3 py-1.5 bg-surface-container-high hover:bg-surface-variant text-on-surface rounded-xl text-xs font-label-bold flex items-center gap-1.5 border border-surface-container-highest"
-              >
-                <span className="material-symbols-outlined text-[16px]">account_circle</span> Connexion
-              </button>
-            )}
-
+            {/* Header Action Button */}
             <button 
               onClick={openCreateWizard}
-              className="bg-primary-container text-on-primary-container px-4 py-2 rounded-xl font-label-bold text-label-bold flex items-center gap-2 hover:bg-primary transition-colors"
+              className="bg-[#00c2ff] text-slate-950 px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 hover:bg-[#38d0ff] transition-all shadow-md shadow-[#00c2ff]/20"
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>add</span>
+              <span className="material-symbols-outlined text-[18px]">add</span>
               Nouvelle Chaîne
             </button>
           </div>
         </div>
 
-        {/* Scrollable Canvas */}
-        <div className="flex-1 overflow-y-auto p-gutter md:p-xl">
-          <div className="max-w-[1440px] mx-auto space-y-8">
+        {/* Scrollable Canvas View Content */}
+        <div className="flex-1 overflow-y-auto p-6 md:p-8">
+          <div className="max-w-[1400px] mx-auto space-y-8">
             
-            {/* VIEW 1: DASHBOARD */}
-            {view === 'dashboard' && (
+            {/* VIEW 1: HOME / DASHBOARD OVERVIEW */}
+            {(view === 'home' || view === 'dashboard') && (
               <>
-                {/* Stats Row Bento */}
-                <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="bg-level-1 rounded-xl p-6 flex flex-col justify-between">
+                {/* Stats Row Bento Cards */}
+                <section className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                  <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-6 flex flex-col justify-between shadow-lg relative overflow-hidden group">
+                    <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-[#00c2ff]/5 rounded-full blur-xl group-hover:bg-[#00c2ff]/10 transition-all"></div>
                     <div className="flex justify-between items-start mb-4">
-                      <h3 className="font-label-bold text-label-bold text-on-surface-variant uppercase tracking-wider">Chaînes Actives</h3>
-                      <span className="material-symbols-outlined text-primary" style={{ fontVariationSettings: "'FILL' 1" }}>cell_tower</span>
-                    </div>
-                    <div className="flex items-end justify-between">
-                      <span className="font-display-lg text-display-lg text-on-surface">{channels.length}</span>
-                      <div className="flex items-center gap-1 text-primary font-mono-label text-mono-label">
-                        <span>Configurées</span>
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Chaînes Actives</h3>
+                      <div className="p-2 rounded-xl bg-[#00c2ff]/10 text-[#00c2ff]">
+                        <span className="material-symbols-outlined text-[22px]" style={{ fontVariationSettings: "'FILL' 1" }}>cell_tower</span>
                       </div>
                     </div>
-                    <div className="w-full h-1 bg-surface-container mt-4 rounded-full overflow-hidden">
-                      <div className="h-full bg-primary w-full rounded-full"></div>
+                    <div className="flex items-end justify-between">
+                      <span className="text-4xl font-extrabold text-white">{channels.length}</span>
+                      <span className="text-xs font-bold text-[#00c2ff] bg-[#00c2ff]/10 px-2.5 py-1 rounded-lg">Configurées</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-[#202938] mt-4 rounded-full overflow-hidden">
+                      <div className="h-full bg-gradient-to-r from-[#00c2ff] to-[#0088ff] w-full rounded-full"></div>
                     </div>
                   </div>
 
-                  <div className="bg-level-1 rounded-xl p-6 flex flex-col justify-between">
+                  <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-6 flex flex-col justify-between shadow-lg relative overflow-hidden group">
                     <div className="flex justify-between items-start mb-4">
-                      <h3 className="font-label-bold text-label-bold text-on-surface-variant uppercase tracking-wider">Vidéos en Attente</h3>
-                      <span className="material-symbols-outlined text-tertiary" style={{ fontVariationSettings: "'FILL' 1" }}>hourglass_empty</span>
-                    </div>
-                    <div className="flex items-end justify-between">
-                      <span className="font-display-lg text-display-lg text-on-surface">{totalQueued}</span>
-                      <div className="flex items-center gap-1 text-on-surface-variant font-mono-label text-mono-label">
-                        <span>En cours de rendu...</span>
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Vidéos en Attente</h3>
+                      <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400">
+                        <span className="material-symbols-outlined text-[22px]" style={{ fontVariationSettings: "'FILL' 1" }}>hourglass_empty</span>
                       </div>
                     </div>
-                    <div className="w-full h-1 bg-surface-container mt-4 rounded-full overflow-hidden flex">
-                      <div className="h-full bg-primary-container w-1/2"></div>
+                    <div className="flex items-end justify-between">
+                      <span className="text-4xl font-extrabold text-white">{totalQueued}</span>
+                      <span className="text-xs font-medium text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded-lg">En cours de rendu...</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-[#202938] mt-4 rounded-full overflow-hidden flex">
+                      <div className="h-full bg-amber-400 w-2/3 animate-pulse"></div>
                     </div>
                   </div>
 
-                  <div className="bg-level-1 rounded-xl p-6 flex flex-col justify-between">
+                  <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-6 flex flex-col justify-between shadow-lg relative overflow-hidden group">
                     <div className="flex justify-between items-start mb-4">
-                      <h3 className="font-label-bold text-label-bold text-on-surface-variant uppercase tracking-wider">Vidéos Terminées</h3>
-                      <span className="material-symbols-outlined text-primary-container" style={{ fontVariationSettings: "'FILL' 1" }}>task_alt</span>
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Vidéos Terminées</h3>
+                      <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400">
+                        <span className="material-symbols-outlined text-[22px]" style={{ fontVariationSettings: "'FILL' 1" }}>task_alt</span>
+                      </div>
                     </div>
                     <div className="flex items-end justify-between">
-                      <span className="font-display-lg text-display-lg text-on-surface">{totalCompleted}</span>
-                      <div className="font-label-bold text-label-bold text-on-surface-variant">Prêtes</div>
+                      <span className="text-4xl font-extrabold text-white">{totalCompleted}</span>
+                      <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-lg">Prêtes à publier</span>
                     </div>
-                    <div className="w-full h-1 bg-surface-container mt-4 rounded-full overflow-hidden">
-                      <div className="h-full bg-primary-container w-full"></div>
+                    <div className="w-full h-1.5 bg-[#202938] mt-4 rounded-full overflow-hidden">
+                      <div className="h-full bg-emerald-400 w-full rounded-full"></div>
                     </div>
                   </div>
                 </section>
 
-                {/* Channels Section */}
+                {/* Quick Launch Banner */}
+                <section className="bg-gradient-to-r from-[#161b22] via-[#1a2332] to-[#161b22] border border-[#263042] rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-xl">
+                  <div className="space-y-1">
+                    <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[#00c2ff]">auto_awesome</span>
+                      Générateur de Vidéo Automatisé
+                    </h3>
+                    <p className="text-sm text-slate-400">
+                      Générez une vidéo Shorts / TikTok / Reels complète avec sous-titres karaoké, voix off IA et montage visuel en 1 clic.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (channels.length > 0) {
+                        setActiveChannel(channels[0]);
+                        setShowSubmitModal(true);
+                      } else {
+                        openCreateWizard();
+                      }
+                    }}
+                    className="px-6 py-3 bg-[#00c2ff] hover:bg-[#38d0ff] text-slate-950 font-bold text-sm rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-[#00c2ff]/20 flex-shrink-0"
+                  >
+                    <span className="material-symbols-outlined text-[20px]">videocam</span>
+                    Lancer une Génération
+                  </button>
+                </section>
+
+                {/* Pipelines Preview in Home */}
                 <section>
-                  <div className="flex justify-between items-center mb-6">
-                    <h2 className="font-headline-md text-headline-md text-on-surface">Vos Pipelines de Chaînes</h2>
+                  <div className="flex justify-between items-center mb-5">
+                    <h3 className="text-lg font-bold text-white">Aperçu des Chaînes</h3>
+                    <button onClick={() => setView('channels')} className="text-xs font-bold text-[#00c2ff] hover:underline flex items-center gap-1">
+                      Voir toutes les chaînes ({channels.length}) <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
+                    </button>
                   </div>
 
-                  {filteredChannels.length === 0 ? (
-                    <div className="bg-level-1 rounded-xl p-12 text-center">
-                      <span className="material-symbols-outlined text-[48px] text-on-surface-variant mb-4">subscriptions</span>
-                      <h3 className="font-title-sm text-title-sm text-on-surface mb-2">Aucune chaîne configurée</h3>
-                      <p className="text-on-surface-variant mb-6">Configurez votre premier pipeline une fois (sous-titres, logo, musique, images) et générez sans limites.</p>
-                      <button 
-                        onClick={openCreateWizard}
-                        className="bg-primary-container text-on-primary-container px-6 py-3 rounded-xl font-label-bold text-label-bold hover:bg-primary transition-colors inline-flex items-center gap-2"
-                      >
-                        <span className="material-symbols-outlined">add</span> Créer une chaîne
+                  {channels.length === 0 ? (
+                    <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-10 text-center">
+                      <span className="material-symbols-outlined text-[48px] text-slate-500 mb-3">subscriptions</span>
+                      <h4 className="text-base font-bold text-white mb-1">Aucune chaîne configurée</h4>
+                      <p className="text-xs text-slate-400 mb-5">Créez votre première chaîne pour automatiser le montage.</p>
+                      <button onClick={openCreateWizard} className="px-5 py-2.5 bg-[#00c2ff] text-slate-950 font-bold text-xs rounded-xl">
+                        + Créer une chaîne
                       </button>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                      {filteredChannels.map(chan => {
-                        const logoUrl = getChannelLogoUrl(chan);
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                      {channels.slice(0, 3).map(chan => {
                         const statusInfo = getChannelStatusInfo(chan);
                         return (
-                        <div
-                          key={chan.id}
-                          onClick={() => { setActiveChannel(chan); fetchChannelVideos(chan.id); setView('channel_detail'); }}
-                          className="bg-level-1 rounded-xl p-5 hover:bg-surface-container-high transition-colors border border-transparent hover:border-outline-variant cursor-pointer group flex flex-col justify-between min-h-[190px]"
-                        >
-                          <div className="flex items-start justify-between">
-                            <div className="flex items-center gap-3 min-w-0">
-                              {logoUrl ? (
-                                <img src={logoUrl} alt={chan.name} className="w-10 h-10 rounded-xl object-cover border border-surface-container-highest flex-shrink-0" />
+                          <div 
+                            key={chan.id} 
+                            onClick={() => { setActiveChannel(chan); fetchChannelVideos(chan.id); setView('channel_detail'); }}
+                            className="bg-[#161b22] border border-[#263042] hover:border-[#00c2ff]/40 rounded-2xl p-5 cursor-pointer transition-all hover:-translate-y-1 shadow-md space-y-4"
+                          >
+                            <div className="flex items-center gap-3">
+                              {getChannelLogoUrl(chan) ? (
+                                <img src={getChannelLogoUrl(chan)} alt={chan.name} className="w-12 h-12 rounded-xl object-cover border border-[#2b374d]" />
                               ) : (
-                                <div className="w-10 h-10 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold font-title-sm flex-shrink-0">
+                                <div className="w-12 h-12 rounded-xl bg-[#1b2230] text-[#00c2ff] font-extrabold flex items-center justify-center text-lg border border-[#2b374d]">
                                   {chan.name.slice(0, 2).toUpperCase()}
                                 </div>
                               )}
-                              <div className="min-w-0">
-                                <h4 className="font-title-sm text-title-sm text-on-surface group-hover:text-primary-container transition-colors truncate">{chan.name}</h4>
-                                <span className="font-label-bold text-label-bold text-on-surface-variant truncate block">{chan.niche}</span>
+                              <div className="min-w-0 flex-1">
+                                <h4 className="font-bold text-white text-sm truncate">{chan.name}</h4>
+                                <span className="text-xs text-slate-400 block truncate">{chan.niche}</span>
                               </div>
                             </div>
-                            <div className="flex items-center gap-1 flex-shrink-0">
-                              <button
-                                onClick={(e) => openEditWizard(chan, e)}
-                                className="text-on-surface-variant hover:text-primary-container p-1"
-                                title="Modifier la chaîne"
-                              >
-                                <span className="material-symbols-outlined text-[18px]">edit</span>
-                              </button>
-                              <button
-                                onClick={(e) => handleDeleteChannel(chan.id, e)}
-                                className="text-error hover:text-red-400 p-1"
-                                title="Supprimer la chaîne"
-                              >
-                                <span className="material-symbols-outlined text-[18px]">delete</span>
-                              </button>
+                            <div className="flex items-center justify-between text-xs pt-2 border-t border-[#202938]">
+                              <span className={`px-2.5 py-1 rounded-lg font-bold text-[11px] uppercase ${statusInfo.className}`}>
+                                {statusInfo.label}
+                              </span>
+                              <span className="text-slate-400 font-mono">{chan.done_count || 0} vidéos prêtes</span>
                             </div>
                           </div>
-
-                          <span className={`self-start mt-3 px-2.5 py-1 rounded-md text-[11px] font-mono-label font-bold uppercase ${statusInfo.className}`}>
-                            {statusInfo.label}
-                          </span>
-
-                          <div className="grid grid-cols-2 gap-2 mt-3">
-                            <div className="bg-surface p-2 rounded-xl border border-surface-container-highest">
-                              <div className="font-label-bold text-label-bold text-on-surface-variant mb-1">En File</div>
-                              <div className="font-body-md text-body-md text-primary-container font-bold">{(chan.queued_count || 0) + (chan.rendering_count || 0)}</div>
-                            </div>
-                            <div className="bg-surface p-2 rounded-xl border border-surface-container-highest">
-                              <div className="font-label-bold text-label-bold text-on-surface-variant mb-1">Vidéos Prêtes</div>
-                              <div className="font-body-md text-body-md text-on-surface font-bold">{chan.done_count || 0}</div>
-                            </div>
-                          </div>
-
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setActiveChannel(chan); setShowSubmitModal(true); }}
-                            className="mt-3 w-full py-2 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-xs hover:bg-primary-container hover:text-on-primary-container transition-colors flex items-center justify-center gap-1.5"
-                          >
-                            <span className="material-symbols-outlined text-[16px]">add</span> Nouvelle Vidéo
-                          </button>
-                        </div>
                         );
                       })}
-
-                      {/* Add Channel Button Card */}
-                      <button
-                        onClick={openCreateWizard}
-                        className="rounded-xl p-5 border-2 border-dashed border-surface-container-highest hover:border-primary-container hover:bg-surface transition-all flex flex-col items-center justify-center gap-3 min-h-[180px] text-on-surface-variant hover:text-primary-container group"
-                      >
-                        <div className="w-12 h-12 rounded-full bg-surface-container-low group-hover:bg-primary-container flex items-center justify-center transition-colors">
-                          <span className="material-symbols-outlined text-[24px] group-hover:text-on-primary-container">add</span>
-                        </div>
-                        <span className="font-title-sm text-title-sm">Créer une Chaîne</span>
-                      </button>
                     </div>
                   )}
                 </section>
               </>
             )}
 
-            {/* VIEW 2: CHANNEL CREATION WIZARD */}
-            {view === 'wizard' && (
-              <div className="max-w-[800px] mx-auto space-y-6">
-                <button
-                  onClick={() => { setView(wizardMode === 'edit' ? 'channel_detail' : 'dashboard'); resetWizardState(); }}
-                  className="text-on-surface-variant hover:text-on-surface flex items-center gap-2 font-label-bold"
-                >
-                  <span className="material-symbols-outlined">arrow_back</span> Retour
-                </button>
-
-                <div className="bg-level-1 rounded-xl p-8 border border-surface-container-highest">
-                  <h2 className="font-display-lg text-display-lg text-on-surface mb-2">{wizardMode === 'edit' ? 'Modifier la Chaîne' : 'Assistant de Création'}</h2>
-                  <p className="text-on-surface-variant mb-6">Étape {wizardStep} sur 5 — Configurez l'identité et le style de votre chaîne automatisée.</p>
-
-                  <div className="flex items-center justify-between w-full mb-8 relative">
-                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-full h-[2px] bg-surface-container-high -z-10"></div>
-                    {[1, 2, 3, 4, 5].map(step => (
-                      <div key={step} className="flex flex-col items-center gap-1">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-label-bold text-label-bold ${wizardStep >= step ? 'bg-primary-container text-on-primary-container' : 'bg-surface-container-high text-outline'}`}>
-                          {step}
-                        </div>
-                      </div>
-                    ))}
+            {/* VIEW 2: MES CHAÎNES (Dedicated Channel Pipelines Cards List with 3-Dots Menu) */}
+            {view === 'channels' && (
+              <section className="space-y-6">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h2 className="text-xl font-extrabold text-white">Vos Pipelines de Chaînes</h2>
+                    <p className="text-xs text-slate-400 mt-1">Configurez l'identité, les sous-titres et les effets de vos chaînes automatiques.</p>
                   </div>
-
-                  {wizardStep === 1 && (
-                    <div className="space-y-4">
-                      <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Informations Générales</h3>
-
-                      <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Photo / logo de la chaîne</label>
-                        <div className="flex items-center gap-4">
-                          <div
-                            onClick={() => logoInputRef.current && logoInputRef.current.click()}
-                            className="w-20 h-20 rounded-xl bg-surface border border-surface-container-highest hover:border-primary-container cursor-pointer flex items-center justify-center overflow-hidden flex-shrink-0 transition-colors"
-                          >
-                            {logoPreviewUrl ? (
-                              <img src={logoPreviewUrl} alt="Logo" className="w-full h-full object-cover" />
-                            ) : (
-                              <span className="material-symbols-outlined text-on-surface-variant text-[28px]">add_a_photo</span>
-                            )}
-                          </div>
-                          <div>
-                            <input
-                              type="file"
-                              ref={logoInputRef}
-                              accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
-                              onChange={handleLogoFileSelect}
-                              className="hidden"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => logoInputRef.current && logoInputRef.current.click()}
-                              className="px-4 py-2 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-xs hover:bg-surface-variant transition-colors"
-                            >
-                              {logoPreviewUrl ? "Changer l'image" : "Choisir une image"}
-                            </button>
-                            <p className="text-xs text-on-surface-variant mt-1">PNG, JPG, WEBP, GIF ou SVG</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Nom de la chaîne YouTube</label>
-                        <input
-                          value={newChannel.name}
-                          onChange={e => setNewChannel({ ...newChannel, name: e.target.value })}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                          placeholder="Ex: Stoic Mind Daily"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Niche de contenu</label>
-                        <select 
-                          value={newChannel.niche}
-                          onChange={e => setNewChannel({ ...newChannel, niche: e.target.value })}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                        >
-                          <option value="Philosophie & Stoïcisme">Philosophie & Stoïcisme</option>
-                          <option value="Spiritualité & Méditation">Spiritualité & Méditation</option>
-                          <option value="Religion & Récits Antiquité">Religion & Récits Antiquité</option>
-                          <option value="Développement Personnel">Développement Personnel</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                  {wizardStep === 2 && (
-                    <div className="space-y-4">
-                      <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Sous-titres & Karaoké ASS</h3>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block font-label-bold text-on-surface-variant mb-2">Police (Font)</label>
-                          <select 
-                            value={newChannel.subtitle_style.font}
-                            onChange={e => setNewChannel({ ...newChannel, subtitle_style: { ...newChannel.subtitle_style, font: e.target.value } })}
-                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                          >
-                            <option value="Arial">Arial</option>
-                            <option value="Helvetica">Helvetica</option>
-                            <option value="Montserrat">Montserrat</option>
-                            <option value="Impact">Impact</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block font-label-bold text-on-surface-variant mb-2">Taille Font (px)</label>
-                          <input 
-                            type="number"
-                            value={newChannel.subtitle_style.size}
-                            onChange={e => setNewChannel({ ...newChannel, subtitle_style: { ...newChannel.subtitle_style, size: parseInt(e.target.value) || 44 } })}
-                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="mt-6">
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Aperçu vidéo en direct</label>
-                        <div className="w-full h-48 rounded-xl bg-surface-container-lowest border border-surface-container-highest flex items-center justify-center relative overflow-hidden">
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent"></div>
-                          <div style={{
-                            fontFamily: newChannel.subtitle_style.font,
-                            fontSize: `${newChannel.subtitle_style.size * 0.4}px`,
-                            fontWeight: 'bold',
-                            color: '#fff',
-                            textShadow: '0 2px 6px rgba(0,0,0,0.9)'
-                          }} className="relative z-10 text-center px-4">
-                            Le calme intérieur dépend de votre esprit
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {wizardStep === 3 && (
-                    <div className="space-y-4">
-                      <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Branding & Logo</h3>
-                      <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Texte Filigrane / Nom de chaîne</label>
-                        <input 
-                          value={newChannel.branding.channel_name_text}
-                          onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, channel_name_text: e.target.value } })}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                          placeholder="ex: @StoicMindDaily"
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {wizardStep === 4 && (
-                    <div className="space-y-4">
-                      <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Musique de Fond & Auto-Ducking</h3>
-                      <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Style Musical Ambiant</label>
-                        <select 
-                          value={newChannel.music_preference.track_id_or_style}
-                          onChange={e => setNewChannel({ ...newChannel, music_preference: { ...newChannel.music_preference, track_id_or_style: e.target.value } })}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                        >
-                          <option value="ambient">Zen & Méditation (Ambiant)</option>
-                          <option value="dramatic">Méditatif & Profond</option>
-                          <option value="cinematic">Cinématique Épique</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                  {wizardStep === 5 && (
-                    <div className="space-y-4">
-                      <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Style Visuel & Effets</h3>
-                      <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Source d'Images</label>
-                        <select
-                          value={newChannel.image_style.source}
-                          onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: e.target.value } })}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                        >
-                          <option value="library">Dossier Local (mes propres images)</option>
-                          <option value="ai_generated">Génération IA Automatique (payant, par segment)</option>
-                        </select>
-                      </div>
-
-                      {newChannel.image_style.source === 'library' ? (
-                        <div>
-                          <label className="block font-label-bold text-on-surface-variant mb-2">Chemin du dossier d'images local</label>
-                          <input
-                            value={newChannel.image_style.library_path || ''}
-                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, library_path: e.target.value } })}
-                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none font-mono text-sm"
-                            placeholder="/Users/moi/Images/ma-chaine"
-                          />
-                          <p className="text-xs text-on-surface-variant mt-2">Chemin absolu, sur la machine qui exécute NicheCut, vers un dossier contenant vos images (JPG, PNG, WEBP). Laissez vide pour utiliser la bibliothèque par défaut.</p>
-                        </div>
-                      ) : (
-                        <div>
-                          <label className="block font-label-bold text-on-surface-variant mb-2">Style / ambiance des images générées</label>
-                          <input
-                            value={newChannel.image_style.style_prompt || ''}
-                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, style_prompt: e.target.value } })}
-                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
-                            placeholder="cinematic dramatic lighting, high detail"
-                          />
-                          <p className="text-xs text-on-surface-variant mt-2">Chaque image de la vidéo est générée automatiquement via IA (ai33.pro) — des crédits sont consommés à chaque vidéo générée.</p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="flex justify-between items-center mt-8 pt-6 border-t border-surface-container-highest">
-                    {wizardStep > 1 ? (
-                      <button 
-                        onClick={() => setWizardStep(wizardStep - 1)}
-                        className="px-6 py-2 rounded-xl bg-surface-container-high text-on-surface font-label-bold hover:bg-surface-variant transition-colors"
-                      >
-                        Retour
-                      </button>
-                    ) : <div></div>}
-
-                    {wizardStep < 5 ? (
-                      <button 
-                        onClick={() => setWizardStep(wizardStep + 1)}
-                        className="px-6 py-2 rounded-xl bg-primary-container text-on-primary-container font-label-bold hover:bg-primary transition-colors flex items-center gap-2"
-                      >
-                        Suivant <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
-                      </button>
-                    ) : (
-                      <button
-                        onClick={handleSaveChannel}
-                        disabled={loading}
-                        className="px-6 py-2 rounded-xl bg-primary-container text-on-primary-container font-label-bold hover:bg-primary transition-colors flex items-center gap-2"
-                      >
-                        <span className="material-symbols-outlined text-[18px]">check</span>
-                        {loading ? "Enregistrement..." : (wizardMode === 'edit' ? "Enregistrer les modifications" : "Créer le Pipeline")}
-                      </button>
-                    )}
-                  </div>
+                  <button
+                    onClick={openCreateWizard}
+                    className="px-5 py-2.5 bg-[#00c2ff] hover:bg-[#38d0ff] text-slate-950 font-bold text-xs rounded-xl transition-all flex items-center gap-2 shadow-md shadow-[#00c2ff]/20"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">add</span>
+                    Ajouter une Chaîne
+                  </button>
                 </div>
-              </div>
+
+                {filteredChannels.length === 0 ? (
+                  <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-12 text-center">
+                    <span className="material-symbols-outlined text-[54px] text-slate-500 mb-4">video_settings</span>
+                    <h3 className="text-lg font-bold text-white mb-2">Aucune chaîne trouvée</h3>
+                    <p className="text-sm text-slate-400 mb-6 max-w-md mx-auto">
+                      Configurez votre premier pipeline vidéo (sous-titres karaoké, logo, musique de fond, images) et générez sans limite.
+                    </p>
+                    <button 
+                      onClick={openCreateWizard}
+                      className="bg-[#00c2ff] text-slate-950 px-6 py-3 rounded-xl font-bold text-sm hover:bg-[#38d0ff] transition-all shadow-lg inline-flex items-center gap-2"
+                    >
+                      <span className="material-symbols-outlined">add</span> Créer un Pipeline de Chaîne
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {filteredChannels.map(chan => {
+                      const logoUrl = getChannelLogoUrl(chan);
+                      const statusInfo = getChannelStatusInfo(chan);
+                      const isMenuOpen = openChannelMenuId === chan.id;
+
+                      return (
+                        <div
+                          key={chan.id}
+                          onClick={() => { setActiveChannel(chan); fetchChannelVideos(chan.id); setView('channel_detail'); }}
+                          className="bg-[#161b22] hover:bg-[#1c232e] border border-[#263042] hover:border-[#00c2ff]/40 rounded-2xl p-5 transition-all cursor-pointer group flex flex-col justify-between min-h-[220px] shadow-lg relative card-warm-hover channel-menu-container"
+                        >
+                          {/* Card Header & 3-Dots Action Button */}
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-center gap-3.5 min-w-0">
+                              {logoUrl ? (
+                                <img src={logoUrl} alt={chan.name} className="w-12 h-12 rounded-xl object-cover border border-[#2b374d] flex-shrink-0 shadow-md" />
+                              ) : (
+                                <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-[#004c66] to-[#007f99] text-[#c2e8ff] flex items-center justify-center font-black text-lg flex-shrink-0 border border-[#00c2ff]/30 shadow-md">
+                                  {chan.name.slice(0, 2).toUpperCase()}
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <h4 className="font-bold text-base text-white group-hover:text-[#00c2ff] transition-colors truncate">{chan.name}</h4>
+                                <span className="text-xs font-medium text-slate-400 truncate block mt-0.5">{chan.niche}</span>
+                              </div>
+                            </div>
+
+                            {/* 3-Dots Menu Button (Kebab Menu) */}
+                            <div className="relative flex-shrink-0">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenChannelMenuId(isMenuOpen ? null : chan.id);
+                                }}
+                                className="p-2 rounded-xl hover:bg-[#2a3547] text-slate-400 hover:text-white transition-colors"
+                                title="Actions chaîne"
+                              >
+                                <span className="material-symbols-outlined text-[20px]">more_vert</span>
+                              </button>
+
+                              {/* Dropdown Popup Menu */}
+                              {isMenuOpen && (
+                                <div className="absolute right-0 top-10 w-48 bg-[#1f2838] border border-[#2d3a52] rounded-xl shadow-2xl z-50 py-1.5 animate-in fade-in duration-150">
+                                  <button
+                                    onClick={(e) => openEditWizard(chan, e)}
+                                    className="w-full text-left px-4 py-2.5 text-xs text-slate-200 hover:bg-[#2c394e] hover:text-white flex items-center gap-2 font-medium"
+                                  >
+                                    <span className="material-symbols-outlined text-[16px] text-[#00c2ff]">edit</span>
+                                    Modifier la chaîne
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setOpenChannelMenuId(null);
+                                      setActiveChannel(chan);
+                                      setShowSubmitModal(true);
+                                    }}
+                                    className="w-full text-left px-4 py-2.5 text-xs text-slate-200 hover:bg-[#2c394e] hover:text-white flex items-center gap-2 font-medium"
+                                  >
+                                    <span className="material-symbols-outlined text-[16px] text-emerald-400">add_circle</span>
+                                    Nouvelle vidéo
+                                  </button>
+                                  <div className="h-[1px] bg-[#2d3a52] my-1"></div>
+                                  <button
+                                    onClick={(e) => handleDeleteChannel(chan.id, e)}
+                                    className="w-full text-left px-4 py-2.5 text-xs text-rose-400 hover:bg-rose-950/50 flex items-center gap-2 font-medium"
+                                  >
+                                    <span className="material-symbols-outlined text-[16px]">delete</span>
+                                    Supprimer la chaîne
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Status Tag */}
+                          <div className="mt-4">
+                            <span className={`inline-block px-3 py-1 rounded-lg text-[11px] font-mono font-bold uppercase tracking-wider ${statusInfo.className}`}>
+                              {statusInfo.label}
+                            </span>
+                          </div>
+
+                          {/* Counters Grid */}
+                          <div className="grid grid-cols-2 gap-2 mt-4">
+                            <div className="bg-[#11151c] p-2.5 rounded-xl border border-[#202938]">
+                              <div className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">En File</div>
+                              <div className="text-base text-[#00c2ff] font-extrabold mt-0.5">{(chan.queued_count || 0) + (chan.rendering_count || 0)}</div>
+                            </div>
+                            <div className="bg-[#11151c] p-2.5 rounded-xl border border-[#202938]">
+                              <div className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Vidéos Prêtes</div>
+                              <div className="text-base text-white font-extrabold mt-0.5">{chan.done_count || 0}</div>
+                            </div>
+                          </div>
+
+                          {/* Action Footer */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setActiveChannel(chan); setShowSubmitModal(true); }}
+                            className="mt-4 w-full py-2.5 bg-[#1f2736] text-white rounded-xl font-bold text-xs hover:bg-[#00c2ff] hover:text-slate-950 transition-all flex items-center justify-center gap-2 border border-[#2b374d]"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">video_call</span>
+                            Générer une Vidéo
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
             )}
 
-            {/* VIEW 3: CHANNEL DETAIL */}
+            {/* VIEW 3: MES VIDÉOS (Videos Library View) */}
+            {view === 'videos' && (
+              <section className="space-y-6">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-extrabold text-white">Bibliothèque de Vidéos</h2>
+                    <p className="text-xs text-slate-400 mt-1">Historique de tous les sujets de vidéos rendus ou en cours de traitement.</p>
+                  </div>
+                  
+                  {/* Channel Filter Selector */}
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs text-slate-400 font-bold">Filtrer par chaîne:</label>
+                    <select
+                      value={videoFilterChannelId}
+                      onChange={e => setVideoFilterChannelId(e.target.value)}
+                      className="bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2 text-xs text-white focus:outline-none"
+                    >
+                      <option value="all">Toutes les chaînes ({channels.length})</option>
+                      {channels.map(c => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Videos List Container */}
+                {allVideos.length === 0 ? (
+                  <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-12 text-center">
+                    <span className="material-symbols-outlined text-[54px] text-slate-500 mb-3">movie</span>
+                    <h3 className="text-base font-bold text-white mb-1">Aucune vidéo dans l'historique</h3>
+                    <p className="text-xs text-slate-400 mb-5">Lancez une nouvelle génération depuis la barre latérale ou la liste des chaînes.</p>
+                    <button
+                      onClick={() => {
+                        if (channels.length > 0) {
+                          setActiveChannel(channels[0]);
+                          setShowSubmitModal(true);
+                        } else {
+                          openCreateWizard();
+                        }
+                      }}
+                      className="px-5 py-2.5 bg-[#00c2ff] text-slate-950 font-bold text-xs rounded-xl"
+                    >
+                      + Nouvelle Vidéo
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {allVideos
+                      .filter(v => videoFilterChannelId === 'all' || v.channel_id === videoFilterChannelId)
+                      .map(vid => {
+                        const channelObj = channels.find(c => c.id === vid.channel_id);
+                        return (
+                          <div key={vid.id} className="bg-[#161b22] rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 border border-[#263042] hover:border-[#00c2ff]/30 transition-all">
+                            <div className="space-y-2 max-w-[70%]">
+                              <div className="flex items-center gap-3 flex-wrap">
+                                <span className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold uppercase ${
+                                  vid.status === 'done' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
+                                  vid.status === 'rendering' ? 'bg-blue-950 text-blue-300 border border-blue-800 animate-pulse' :
+                                  vid.status === 'failed' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
+                                  'bg-amber-950 text-amber-300 border border-amber-800'
+                                }`}>
+                                  {vid.status}
+                                </span>
+                                {channelObj && (
+                                  <span className="text-xs font-bold text-[#00c2ff] bg-[#00c2ff]/10 px-2.5 py-0.5 rounded-lg border border-[#00c2ff]/20">
+                                    {channelObj.name}
+                                  </span>
+                                )}
+                                <span className="text-xs text-slate-400 font-mono">
+                                  Mode: {vid.input_type === 'audio' ? 'Audio importé' : 'Texte Izivoice'}
+                                </span>
+                              </div>
+                              <p className="text-white text-sm line-clamp-2 italic font-medium">
+                                "{vid.script_text}"
+                              </p>
+                            </div>
+
+                            <div className="flex items-center gap-3 flex-shrink-0">
+                              {vid.status === 'done' && (
+                                <button 
+                                  onClick={() => setSelectedVideo(vid)}
+                                  className="px-4 py-2 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center gap-2 shadow-md shadow-[#00c2ff]/20"
+                                >
+                                  <span className="material-symbols-outlined text-[18px]">play_circle</span> Voir Vidéo
+                                </button>
+                              )}
+                              {vid.status === 'failed' && (
+                                <button 
+                                  onClick={() => handleRetryVideo(vid.id)}
+                                  className="px-4 py-2 bg-[#1f2838] text-white rounded-xl font-bold text-xs hover:bg-[#2b384e] transition-all flex items-center gap-2 border border-[#2b374d]"
+                                >
+                                  <span className="material-symbols-outlined text-[18px]">refresh</span> Relancer
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* VIEW 4: CHANNEL DETAIL VIEW */}
             {view === 'channel_detail' && activeChannel && (
               <div className="space-y-8">
-                <section className="flex flex-col md:flex-row md:items-end justify-between gap-6">
-                  <div className="flex items-center gap-6 min-w-0">
+                <section className="bg-[#161b22] border border-[#263042] rounded-2xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-xl">
+                  <div className="flex items-center gap-5 min-w-0">
                     {getChannelLogoUrl(activeChannel) ? (
-                      <img src={getChannelLogoUrl(activeChannel)} alt={activeChannel.name} className="w-20 h-20 rounded-xl object-cover border border-outline-variant flex-shrink-0" />
+                      <img src={getChannelLogoUrl(activeChannel)} alt={activeChannel.name} className="w-20 h-20 rounded-2xl object-cover border border-[#2b374d] shadow-lg flex-shrink-0" />
                     ) : (
-                      <div className="w-20 h-20 rounded-xl bg-surface-container-high border border-outline-variant flex items-center justify-center text-primary-container font-bold text-2xl flex-shrink-0">
+                      <div className="w-20 h-20 rounded-2xl bg-gradient-to-tr from-[#004c66] to-[#007f99] text-[#c2e8ff] font-black text-2xl flex items-center justify-center border border-[#00c2ff]/40 flex-shrink-0 shadow-lg">
                         {activeChannel.name.slice(0, 2).toUpperCase()}
                       </div>
                     )}
                     <div className="min-w-0">
-                      <h1 className="font-display-lg text-display-lg text-on-surface truncate">{activeChannel.name}</h1>
-                      <div className="flex items-center gap-4 text-on-surface-variant font-body-md">
-                        <span>Niche: <strong>{activeChannel.niche}</strong></span>
+                      <h1 className="text-2xl font-extrabold text-white truncate">{activeChannel.name}</h1>
+                      <div className="flex items-center gap-3 text-slate-400 text-xs font-medium mt-1">
+                        <span>Niche: <strong className="text-white">{activeChannel.niche}</strong></span>
                         <span>•</span>
-                        <span className="font-mono-label text-mono-label">ID: {activeChannel.id.slice(0, 8)}...</span>
+                        <span className="font-mono">ID: {activeChannel.id.slice(0, 8)}</span>
                       </div>
                       {(() => {
                         const s = getChannelStatusInfo(activeChannel);
-                        return <span className={`inline-block mt-2 px-2.5 py-1 rounded-md text-[11px] font-mono-label font-bold uppercase ${s.className}`}>{s.label}</span>;
+                        return <span className={`inline-block mt-2.5 px-3 py-1 rounded-lg text-[11px] font-mono font-bold uppercase tracking-wider ${s.className}`}>{s.label}</span>;
                       })()}
                     </div>
                   </div>
@@ -1038,31 +1103,31 @@ export default function App() {
                   <div className="flex items-center gap-3 flex-shrink-0">
                     <button
                       onClick={(e) => openEditWizard(activeChannel, e)}
-                      className="px-4 py-2.5 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-label-bold hover:bg-surface-variant transition-colors flex items-center gap-2"
+                      className="px-4 py-2.5 bg-[#1b2230] text-white rounded-xl font-bold text-xs hover:bg-[#252f42] transition-colors flex items-center gap-2 border border-[#2b374d]"
                     >
                       <span className="material-symbols-outlined text-[18px]">edit</span>
-                      Modifier
+                      Modifier le Pipeline
                     </button>
                     <button
                       onClick={() => setShowSubmitModal(true)}
-                      className="px-5 py-2.5 bg-primary-container text-on-primary-container rounded-xl font-label-bold text-label-bold hover:bg-primary transition-colors flex items-center gap-2 shadow-lg shadow-primary-container/20"
+                      className="px-5 py-2.5 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center gap-2 shadow-lg shadow-[#00c2ff]/20"
                     >
-                      <span className="material-symbols-outlined text-[18px]" style={{ fontVariationSettings: "'FILL' 1" }}>add</span>
+                      <span className="material-symbols-outlined text-[18px]">add</span>
                       Nouvelle Vidéo
                     </button>
                   </div>
                 </section>
 
-                <section>
-                  <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Vidéos de la Chaîne</h3>
+                <section className="space-y-4">
+                  <h3 className="text-lg font-bold text-white">Vidéos de la Chaîne ({channelVideos.length})</h3>
                   {channelVideos.length === 0 ? (
-                    <div className="bg-level-1 rounded-xl p-10 text-center">
-                      <span className="material-symbols-outlined text-[40px] text-on-surface-variant mb-2">description</span>
-                      <h4 className="font-title-sm text-title-sm text-on-surface mb-1">Aucune vidéo soumise</h4>
-                      <p className="text-on-surface-variant mb-4">Soumettez votre premier sujet (texte de script ou fichiers audio).</p>
+                    <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-10 text-center">
+                      <span className="material-symbols-outlined text-[40px] text-slate-500 mb-2">description</span>
+                      <h4 className="text-base font-bold text-white mb-1">Aucune vidéo soumise</h4>
+                      <p className="text-xs text-slate-400 mb-5">Soumettez votre premier sujet (texte de script ou fichiers audio).</p>
                       <button 
                         onClick={() => setShowSubmitModal(true)}
-                        className="bg-primary-container text-on-primary-container px-5 py-2.5 rounded-xl font-label-bold hover:bg-primary transition-colors"
+                        className="bg-[#00c2ff] text-slate-950 px-5 py-2.5 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all"
                       >
                         Soumettre un sujet de vidéo
                       </button>
@@ -1070,22 +1135,22 @@ export default function App() {
                   ) : (
                     <div className="space-y-3">
                       {channelVideos.map(vid => (
-                        <div key={vid.id} className="bg-level-1 rounded-xl p-5 flex justify-between items-center border border-surface-container-highest">
-                          <div className="space-y-1 max-w-[70%]">
+                        <div key={vid.id} className="bg-[#161b22] rounded-2xl p-5 flex justify-between items-center border border-[#263042]">
+                          <div className="space-y-1.5 max-w-[70%]">
                             <div className="flex items-center gap-3">
-                              <span className={`px-2.5 py-1 rounded-md text-[11px] font-mono-label font-bold uppercase ${
+                              <span className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold uppercase ${
                                 vid.status === 'done' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
                                 vid.status === 'rendering' ? 'bg-blue-950 text-blue-300 border border-blue-800 animate-pulse' :
-                                vid.status === 'failed' ? 'bg-red-950 text-red-300 border border-red-800' :
-                                'bg-yellow-950 text-yellow-300 border border-yellow-800'
+                                vid.status === 'failed' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
+                                'bg-amber-950 text-amber-300 border border-amber-800'
                               }`}>
                                 {vid.status}
                               </span>
-                              <span className="text-xs text-on-surface-variant font-mono-label">
+                              <span className="text-xs text-slate-400 font-mono">
                                 Mode: {vid.input_type === 'audio' ? 'Audio importé' : 'Texte Izivoice'}
                               </span>
                             </div>
-                            <p className="text-on-surface text-sm line-clamp-1 italic font-semibold">
+                            <p className="text-white text-sm line-clamp-1 italic font-medium">
                               "{vid.script_text}"
                             </p>
                           </div>
@@ -1094,7 +1159,7 @@ export default function App() {
                             {vid.status === 'done' && (
                               <button 
                                 onClick={() => setSelectedVideo(vid)}
-                                className="px-4 py-2 bg-primary-container text-on-primary-container rounded-xl font-label-bold text-xs hover:bg-primary transition-colors flex items-center gap-1.5"
+                                className="px-4 py-2 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center gap-1.5"
                               >
                                 <span className="material-symbols-outlined text-[16px]">play_circle</span> Voir Vidéo
                               </button>
@@ -1102,7 +1167,7 @@ export default function App() {
                             {vid.status === 'failed' && (
                               <button 
                                 onClick={() => handleRetryVideo(vid.id)}
-                                className="px-4 py-2 bg-surface-container-high text-on-surface rounded-xl font-label-bold text-xs hover:bg-surface-variant transition-colors flex items-center gap-1.5"
+                                className="px-4 py-2 bg-[#1b2230] text-white rounded-xl font-bold text-xs hover:bg-[#252f42] transition-all flex items-center gap-1.5 border border-[#2b374d]"
                               >
                                 <span className="material-symbols-outlined text-[16px]">refresh</span> Relancer
                               </button>
@@ -1116,556 +1181,809 @@ export default function App() {
               </div>
             )}
 
-            {/* REFINED AUTHENTICATION MODAL */}
-            {showAuthModal && (
-              <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
-                <div className="bg-level-1 rounded-xl p-8 max-w-[440px] w-full border border-surface-container-highest shadow-2xl">
-                  <div className="flex justify-between items-center mb-6">
-                    <h3 className="font-headline-md text-headline-md text-on-surface">
-                      {authTab === 'login' && 'Connexion'}
-                      {authTab === 'register' && 'Inscription'}
-                      {authTab === 'forgot' && 'Mot de passe oublié'}
-                    </h3>
-                    <button onClick={() => setShowAuthModal(false)} className="text-on-surface-variant hover:text-on-surface p-1">
-                      <span className="material-symbols-outlined">close</span>
-                    </button>
+            {/* VIEW 5: CHANNEL WIZARD (CREATE / EDIT) */}
+            {view === 'wizard' && (
+              <div className="max-w-[900px] mx-auto bg-[#161b22] border border-[#263042] rounded-3xl p-8 shadow-2xl space-y-8">
+                {/* Wizard Header Stepper */}
+                <div className="flex items-center justify-between border-b border-[#263042] pb-6">
+                  <div>
+                    <h2 className="text-xl font-extrabold text-white">
+                      {wizardMode === 'edit' ? 'Modifier le Pipeline de la Chaîne' : 'Assistant de Configuration de Chaîne'}
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-1">Étape {wizardStep} sur 5</p>
                   </div>
-
-                  {resetSuccessMsg && (
-                    <div className="mb-4 p-3 bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs rounded-xl">
-                      {resetSuccessMsg}
-                    </div>
-                  )}
-
-                  {/* Mode Tabs */}
-                  <div className="grid grid-cols-2 gap-2 bg-surface-container-lowest p-1.5 rounded-xl mb-6 border border-surface-container-highest">
-                    <button 
-                      onClick={() => { setAuthTab('login'); setResetSuccessMsg(''); }}
-                      className={`py-2 rounded-lg text-xs font-label-bold transition-all ${authTab === 'login' ? 'bg-primary-container text-on-primary-container font-bold shadow' : 'text-on-surface-variant'}`}
-                    >
-                      Se connecter
-                    </button>
-                    <button 
-                      onClick={() => { setAuthTab('register'); setResetSuccessMsg(''); }}
-                      className={`py-2 rounded-lg text-xs font-label-bold transition-all ${authTab === 'register' ? 'bg-primary-container text-on-primary-container font-bold shadow' : 'text-on-surface-variant'}`}
-                    >
-                      S'inscrire
-                    </button>
-                  </div>
-
-                  {/* Google OAuth Button */}
-                  <button 
-                    onClick={handleGoogleAuth}
-                    type="button"
-                    className="w-full py-3 mb-4 bg-surface hover:bg-surface-container-high text-on-surface border border-surface-container-highest rounded-xl text-xs font-label-bold flex items-center justify-center gap-3 transition-colors shadow-sm"
-                  >
-                    <svg className="w-4 h-4" viewBox="0 0 24 24">
-                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
-                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.15C3.26 21.3 7.31 24 12 24z"/>
-                      <path fill="#FBBC05" d="M5.28 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.39l3.99-3.15z"/>
-                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.61l3.99 3.15c.95-2.85 3.6-4.96 6.72-4.96z"/>
-                    </svg>
-                    Continuer avec Google
+                  <button onClick={() => setView('channels')} className="text-slate-400 hover:text-white p-2">
+                    <span className="material-symbols-outlined">close</span>
                   </button>
+                </div>
 
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="flex-1 h-[1px] bg-surface-container-highest"></div>
-                    <span className="text-[11px] text-on-surface-variant uppercase font-mono">ou email</span>
-                    <div className="flex-1 h-[1px] bg-surface-container-highest"></div>
-                  </div>
+                {/* Steps Timeline Indicator */}
+                <div className="grid grid-cols-5 gap-2">
+                  {['Identité', 'Sous-titres', 'Branding', 'Musique', 'Visuels & IA'].map((label, idx) => {
+                    const stepNum = idx + 1;
+                    const isActive = wizardStep === stepNum;
+                    const isPassed = wizardStep > stepNum;
+                    return (
+                      <button
+                        key={stepNum}
+                        onClick={() => setWizardStep(stepNum)}
+                        className={`py-2 px-1 text-center rounded-xl text-xs font-bold transition-all ${
+                          isActive ? 'bg-[#00c2ff] text-slate-950 shadow-md' :
+                          isPassed ? 'bg-[#00c2ff]/20 text-[#00c2ff] border border-[#00c2ff]/40' :
+                          'bg-[#1b2230] text-slate-400'
+                        }`}
+                      >
+                        {stepNum}. {label}
+                      </button>
+                    );
+                  })}
+                </div>
 
-                  <form onSubmit={handleAuthSubmit} className="space-y-4">
+                {/* STEP 1: INFORMATIONS GÉNÉRALES */}
+                {wizardStep === 1 && (
+                  <div className="space-y-6">
+                    <h3 className="text-base font-bold text-white">1. Informations Générales & Niche</h3>
+                    
                     <div>
-                      <label className="block font-label-bold text-on-surface-variant mb-1 text-xs">Adresse Email</label>
-                      <input 
-                        type="email"
-                        required
-                        value={authForm.email}
-                        onChange={e => setAuthForm({ ...authForm, email: e.target.value })}
-                        className="w-full bg-surface border border-surface-container-highest rounded-xl p-3 text-sm text-on-surface focus:border-primary-container outline-none"
-                        placeholder="nom@exemple.com"
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Photo / Logo de la chaîne</label>
+                      <div className="flex items-center gap-5">
+                        <div
+                          onClick={() => logoInputRef.current && logoInputRef.current.click()}
+                          className="w-24 h-24 rounded-2xl bg-[#1b2230] border-2 border-dashed border-[#2b374d] hover:border-[#00c2ff] cursor-pointer flex items-center justify-center overflow-hidden flex-shrink-0 transition-colors group"
+                        >
+                          {logoPreviewUrl ? (
+                            <img src={logoPreviewUrl} alt="Logo" className="w-full h-full object-cover" />
+                          ) : (
+                            <span className="material-symbols-outlined text-slate-400 group-hover:text-[#00c2ff] text-[32px]">add_a_photo</span>
+                          )}
+                        </div>
+                        <div>
+                          <input
+                            type="file"
+                            ref={logoInputRef}
+                            accept="image/*"
+                            onChange={handleLogoFileSelect}
+                            className="hidden"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => logoInputRef.current && logoInputRef.current.click()}
+                            className="px-4 py-2.5 bg-[#1b2230] text-white rounded-xl font-bold text-xs hover:bg-[#252f42] transition-colors border border-[#2b374d]"
+                          >
+                            {logoPreviewUrl ? "Changer l'image" : "Sélectionner un logo"}
+                          </button>
+                          <p className="text-[11px] text-slate-400 mt-2">Format conseillé: PNG ou JPG carré (512x512)</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Nom de la chaîne YouTube / TikTok</label>
+                      <input
+                        value={newChannel.name}
+                        onChange={e => setNewChannel({ ...newChannel, name: e.target.value })}
+                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
+                        placeholder="Ex: Stoic Mind Daily"
                       />
                     </div>
 
                     <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <label className="block font-label-bold text-on-surface-variant text-xs">
-                          {authTab === 'forgot' ? 'Nouveau mot de passe' : 'Mot de passe'}
-                        </label>
-                        {authTab === 'login' && (
-                          <button 
-                            type="button" 
-                            onClick={() => setAuthTab('forgot')}
-                            className="text-[11px] text-primary-container hover:underline"
-                          >
-                            Mot de passe oublié ?
-                          </button>
-                        )}
-                      </div>
-                      <div className="relative">
-                        <input 
-                          type={showPassword ? "text" : "password"}
-                          required
-                          value={authForm.password}
-                          onChange={e => setAuthForm({ ...authForm, password: e.target.value })}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl p-3 pr-10 text-sm text-on-surface focus:border-primary-container outline-none"
-                          placeholder="••••••••"
-                        />
-                        <button 
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface"
-                        >
-                          <span className="material-symbols-outlined text-[18px]">
-                            {showPassword ? 'visibility_off' : 'visibility'}
-                          </span>
-                        </button>
-                      </div>
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Niche de contenu</label>
+                      <select 
+                        value={newChannel.niche}
+                        onChange={e => setNewChannel({ ...newChannel, niche: e.target.value })}
+                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
+                      >
+                        <option value="Philosophie & Stoïcisme">Philosophie & Stoïcisme</option>
+                        <option value="Spiritualité & Méditation">Spiritualité & Méditation</option>
+                        <option value="Religion & Récits Antiquité">Religion & Récits Antiquité</option>
+                        <option value="Développement Personnel">Développement Personnel</option>
+                        <option value="Histoires & Récits Captivants">Histoires & Récits Captivants</option>
+                      </select>
                     </div>
-
-                    <button 
-                      type="submit"
-                      disabled={loading}
-                      className="w-full py-3 bg-primary-container text-on-primary-container rounded-xl font-label-bold hover:bg-primary transition-colors flex items-center justify-center gap-2 mt-6 shadow-md"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">lock_open</span>
-                      {loading ? "Chargement..." : authTab === 'register' ? "Créer mon compte" : authTab === 'forgot' ? "Réinitialiser" : "Se connecter"}
-                    </button>
-                  </form>
-                </div>
-              </div>
-            )}
-
-            {/* REFINED PROFILE & SETTINGS MODAL (With Supabase VPS Service Status Section) */}
-            {showProfileModal && currentUser && (
-              <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
-                <div className="bg-level-1 rounded-xl p-8 max-w-[600px] w-full max-h-[90vh] overflow-y-auto border border-surface-container-highest shadow-2xl">
-                  <div className="flex justify-between items-center mb-6">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-base">
-                        {currentUser.name.slice(0, 1).toUpperCase()}
-                      </div>
-                      <div>
-                        <h3 className="font-headline-md text-headline-md text-on-surface">{currentUser.name}</h3>
-                        <p className="text-xs text-on-surface-variant">{currentUser.email}</p>
-                      </div>
-                    </div>
-                    <button onClick={() => setShowProfileModal(false)} className="text-on-surface-variant hover:text-on-surface p-1">
-                      <span className="material-symbols-outlined">close</span>
-                    </button>
                   </div>
+                )}
 
-                  {/* Profile Tabs */}
-                  <div className="grid grid-cols-3 gap-2 bg-surface-container-lowest p-1.5 rounded-xl mb-6 border border-surface-container-highest">
-                    <button 
-                      onClick={() => setProfileTab('database')}
-                      className={`py-2 rounded-lg text-xs font-label-bold flex items-center justify-center gap-1.5 transition-all ${profileTab === 'database' ? 'bg-primary-container text-on-primary-container font-bold shadow' : 'text-on-surface-variant'}`}
-                    >
-                      <span className="material-symbols-outlined text-[16px]">database</span>
-                      Base Supabase
-                    </button>
-                    <button 
-                      onClick={() => setProfileTab('security')}
-                      className={`py-2 rounded-lg text-xs font-label-bold flex items-center justify-center gap-1.5 transition-all ${profileTab === 'security' ? 'bg-primary-container text-on-primary-container font-bold shadow' : 'text-on-surface-variant'}`}
-                    >
-                      <span className="material-symbols-outlined text-[16px]">shield</span>
-                      Sécurité
-                    </button>
-                    <button 
-                      onClick={() => setProfileTab('appearance')}
-                      className={`py-2 rounded-lg text-xs font-label-bold flex items-center justify-center gap-1.5 transition-all ${profileTab === 'appearance' ? 'bg-primary-container text-on-primary-container font-bold shadow' : 'text-on-surface-variant'}`}
-                    >
-                      <span className="material-symbols-outlined text-[16px]">palette</span>
-                      Apparence
-                    </button>
-                  </div>
-
-                  {/* TAB 1: Base de Données Supabase Status */}
-                  {profileTab === 'database' && (
-                    <div className="space-y-4">
-                      <div className="bg-emerald-950/40 p-5 rounded-xl border border-emerald-800/80 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <div className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse"></div>
-                            <h4 className="font-title-sm text-emerald-300 font-bold">Service Supabase PostgreSQL (Actif 🟢)</h4>
-                          </div>
-                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono bg-emerald-900 text-emerald-200 border border-emerald-700">Self-Hosted VPS</span>
-                        </div>
-
-                        <div className="space-y-2 text-xs text-on-surface-variant pt-2 border-t border-emerald-900">
-                          <div className="flex justify-between">
-                            <span>Service :</span>
-                            <strong className="text-on-surface font-mono">{dbInfo.service_name}</strong>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Hôte Serveur VPS :</span>
-                            <strong className="text-emerald-300 font-mono">{dbInfo.database_host}</strong>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>URL Supabase API :</span>
-                            <strong className="text-primary-container font-mono">{dbInfo.supabase_url}</strong>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Tables Système Initialisées :</span>
-                            <strong className="text-on-surface font-mono">users, channels, videos</strong>
-                          </div>
-                        </div>
-                      </div>
+                {/* STEP 2: SOUS-TITRES & KARAOKÉ ASS (ENHANCED PERSONALIZATION & LIVE PREVIEW) */}
+                {wizardStep === 2 && (
+                  <div className="space-y-6">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-base font-bold text-white">2. Personnalisation Avancée des Sous-Titres Karaoké</h3>
+                      <span className="text-xs font-mono text-[#00c2ff] bg-[#00c2ff]/10 px-2.5 py-1 rounded-lg">Fichier ASS Ultra-Fluid</span>
                     </div>
-                  )}
 
-                  {/* TAB 2: Security & Password Change */}
-                  {profileTab === 'security' && (
-                    <div className="space-y-6">
-                      <form onSubmit={handleChangePasswordSubmit} className="space-y-4 bg-surface p-4 rounded-xl border border-surface-container-highest">
-                        <h4 className="font-title-sm text-on-surface font-semibold flex items-center gap-2">
-                          <span className="material-symbols-outlined text-primary-container text-[18px]">key</span>
-                          Changer le mot de passe
-                        </h4>
-
-                        <div>
-                          <label className="block text-xs font-label-bold text-on-surface-variant mb-1">Ancien mot de passe</label>
-                          <input 
-                            type="password"
-                            required
-                            value={passwordForm.old_password}
-                            onChange={e => setPasswordForm({ ...passwordForm, old_password: e.target.value })}
-                            className="w-full bg-surface-container border border-surface-container-highest rounded-xl p-2.5 text-xs text-on-surface outline-none focus:border-primary-container"
-                            placeholder="••••••••"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-xs font-label-bold text-on-surface-variant mb-1">Nouveau mot de passe</label>
-                          <input 
-                            type="password"
-                            required
-                            value={passwordForm.new_password}
-                            onChange={e => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
-                            className="w-full bg-surface-container border border-surface-container-highest rounded-xl p-2.5 text-xs text-on-surface outline-none focus:border-primary-container"
-                            placeholder="••••••••"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-xs font-label-bold text-on-surface-variant mb-1">Confirmer le nouveau mot de passe</label>
-                          <input 
-                            type="password"
-                            required
-                            value={passwordForm.confirm_password}
-                            onChange={e => setPasswordForm({ ...passwordForm, confirm_password: e.target.value })}
-                            className="w-full bg-surface-container border border-surface-container-highest rounded-xl p-2.5 text-xs text-on-surface outline-none focus:border-primary-container"
-                            placeholder="••••••••"
-                          />
-                        </div>
-
-                        <button 
-                          type="submit"
-                          disabled={loading}
-                          className="px-4 py-2 bg-primary-container text-on-primary-container rounded-xl text-xs font-label-bold hover:bg-primary transition-colors flex items-center gap-1.5"
-                        >
-                          <span className="material-symbols-outlined text-[16px]">save</span>
-                          Mettre à jour le mot de passe
-                        </button>
-                      </form>
-
-                      {/* 2FA Security Switch */}
-                      <div className="bg-surface p-4 rounded-xl border border-surface-container-highest flex justify-between items-center">
-                        <div>
-                          <h4 className="font-title-sm text-on-surface font-semibold">Authentification à deux facteurs (2FA)</h4>
-                          <p className="text-xs text-on-surface-variant mt-0.5">Sécurisez votre compte avec un code d'authentification.</p>
-                        </div>
-                        <button 
-                          onClick={() => setEnable2FA(!enable2FA)}
-                          className={`w-12 h-6 rounded-full transition-colors relative p-1 ${enable2FA ? 'bg-primary-container' : 'bg-surface-container-high'}`}
-                        >
-                          <div className={`w-4 h-4 rounded-full bg-white transition-transform ${enable2FA ? 'translate-x-6' : 'translate-x-0'}`}></div>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* TAB 3: Appearance & Theme Switch */}
-                  {profileTab === 'appearance' && (
-                    <div className="space-y-4">
-                      <div className="bg-surface p-4 rounded-xl border border-surface-container-highest space-y-3">
-                        <h4 className="font-title-sm text-on-surface font-semibold">Thème d'affichage</h4>
-                        <div className="grid grid-cols-2 gap-3">
-                          <button 
-                            onClick={() => setThemeMode('dark')}
-                            className={`p-4 rounded-xl border flex flex-col items-center gap-2 transition-all ${themeMode === 'dark' ? 'border-primary-container bg-primary-container/10 text-primary-container' : 'border-surface-container-highest text-on-surface-variant hover:bg-surface-container-high'}`}
-                          >
-                            <span className="material-symbols-outlined text-[28px]">dark_mode</span>
-                            <span className="text-xs font-bold">Mode Sombre 🌙</span>
-                          </button>
-                          <button 
-                            onClick={() => setThemeMode('light')}
-                            className={`p-4 rounded-xl border flex flex-col items-center gap-2 transition-all ${themeMode === 'light' ? 'border-primary-container bg-primary-container/10 text-primary-container' : 'border-surface-container-highest text-on-surface-variant hover:bg-surface-container-high'}`}
-                          >
-                            <span className="material-symbols-outlined text-[28px]">light_mode</span>
-                            <span className="text-xs font-bold">Mode Clair ☀️</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Logout Button */}
-                  <div className="mt-8 pt-4 border-t border-surface-container-highest flex justify-end">
-                    <button 
-                      onClick={handleLogout}
-                      className="px-5 py-2.5 bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-800 rounded-xl text-xs font-label-bold flex items-center gap-2 transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-[16px]">logout</span>
-                      Déconnexion du compte
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* CHANNEL PICKER MODAL — used by "Nouvelle Vidéo" when no channel context is implied */}
-            {showChannelPickerModal && (
-              <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
-                <div className="bg-level-1 rounded-xl p-8 max-w-[720px] w-full max-h-[85vh] overflow-y-auto border border-surface-container-highest shadow-2xl">
-                  <div className="flex justify-between items-center mb-6">
+                    {/* Presets Grid */}
                     <div>
-                      <h3 className="font-headline-md text-headline-md text-on-surface">Choisir une chaîne</h3>
-                      <p className="text-on-surface-variant text-sm mt-1">Sur quelle chaîne voulez-vous générer cette vidéo ?</p>
-                    </div>
-                    <button onClick={() => setShowChannelPickerModal(false)} className="text-on-surface-variant hover:text-on-surface p-1">
-                      <span className="material-symbols-outlined">close</span>
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {channels.map(chan => {
-                      const logoUrl = getChannelLogoUrl(chan);
-                      return (
-                        <button
-                          key={chan.id}
-                          onClick={() => {
-                            setActiveChannel(chan);
-                            fetchChannelVideos(chan.id);
-                            setShowChannelPickerModal(false);
-                            setShowSubmitModal(true);
-                          }}
-                          className="flex items-center gap-3 bg-surface p-4 rounded-xl border border-surface-container-highest hover:border-primary-container hover:bg-surface-container-high transition-colors text-left"
-                        >
-                          {logoUrl ? (
-                            <img src={logoUrl} alt={chan.name} className="w-12 h-12 rounded-xl object-cover border border-surface-container-highest flex-shrink-0" />
-                          ) : (
-                            <div className="w-12 h-12 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold flex-shrink-0">
-                              {chan.name.slice(0, 2).toUpperCase()}
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <div className="font-title-sm text-title-sm text-on-surface truncate">{chan.name}</div>
-                            <div className="font-label-bold text-label-bold text-on-surface-variant truncate">{chan.niche}</div>
-                          </div>
-                        </button>
-                      );
-                    })}
-
-                    <button
-                      onClick={() => { setShowChannelPickerModal(false); openCreateWizard(); }}
-                      className="flex items-center justify-center gap-2 border-2 border-dashed border-surface-container-highest hover:border-primary-container hover:bg-surface rounded-xl p-4 text-on-surface-variant hover:text-primary-container transition-all"
-                    >
-                      <span className="material-symbols-outlined">add</span>
-                      <span className="font-label-bold text-label-bold">Nouvelle chaîne</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* VIDEO SUBMISSION MODAL */}
-            {showSubmitModal && activeChannel && (
-              <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
-                <div className="bg-level-1 rounded-xl p-8 max-w-[760px] w-full max-h-[90vh] overflow-y-auto border border-surface-container-highest shadow-2xl">
-                  <div className="flex justify-between items-start mb-6">
-                    <h3 className="font-headline-md text-headline-md text-on-surface">Nouvelle vidéo</h3>
-                    <button onClick={() => setShowSubmitModal(false)} className="text-on-surface-variant hover:text-on-surface p-1">
-                      <span className="material-symbols-outlined">close</span>
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-4 bg-surface-container-lowest p-4 rounded-xl border border-surface-container-highest mb-6">
-                    {getChannelLogoUrl(activeChannel) ? (
-                      <img src={getChannelLogoUrl(activeChannel)} alt={activeChannel.name} className="w-14 h-14 rounded-xl object-cover border border-surface-container-highest flex-shrink-0" />
-                    ) : (
-                      <div className="w-14 h-14 rounded-xl bg-[#004c66] text-[#c2e8ff] flex items-center justify-center font-bold text-lg flex-shrink-0">
-                        {activeChannel.name.slice(0, 2).toUpperCase()}
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Presets de style sous-titre recommandés</label>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        {SUBTITLE_PRESETS.map(preset => (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => {
+                              setNewChannel(prev => ({
+                                ...prev,
+                                subtitle_style: {
+                                  ...prev.subtitle_style,
+                                  font: preset.font,
+                                  size: preset.size,
+                                  color: preset.color,
+                                  outline_color: preset.outline_color,
+                                  outline_width: preset.outline_width,
+                                  box_color: preset.box_color
+                                }
+                              }));
+                            }}
+                            className="p-3 bg-[#1b2230] hover:bg-[#252f42] border border-[#2b374d] rounded-xl text-left transition-all hover:border-[#00c2ff]"
+                          >
+                            <div className="text-xs font-bold text-white">{preset.name}</div>
+                            <div className="text-[10px] text-slate-400 mt-1 font-mono">{preset.font} • {preset.size}px</div>
+                          </button>
+                        ))}
                       </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="font-title-sm text-title-sm text-on-surface truncate">{activeChannel.name}</div>
-                      <div className="font-label-bold text-label-bold text-on-surface-variant truncate">{activeChannel.niche}</div>
                     </div>
-                    {channels.length > 1 && (
-                      <button
-                        onClick={() => { setShowSubmitModal(false); setShowChannelPickerModal(true); }}
-                        className="px-3 py-1.5 bg-surface-container-high text-on-surface-variant hover:text-on-surface rounded-lg text-xs font-label-bold flex-shrink-0 transition-colors"
-                      >
-                        Changer
-                      </button>
-                    )}
-                  </div>
 
-                  <div className="grid grid-cols-2 gap-3 bg-surface-container-lowest p-2 rounded-xl mb-6 border border-surface-container-highest">
-                    <button 
-                      onClick={() => setSubmitMode('text')}
-                      className={`py-3 rounded-lg text-sm font-label-bold flex items-center justify-center gap-2 transition-all ${submitMode === 'text' ? 'bg-primary-container text-on-primary-container font-bold shadow-md' : 'text-on-surface-variant hover:bg-surface-container-high'}`}
-                    >
-                      <span className="material-symbols-outlined text-[18px]">description</span>
-                      Script Texte
-                    </button>
-
-                    <button 
-                      onClick={() => setSubmitMode('audio_upload')}
-                      className={`py-3 rounded-lg text-sm font-label-bold flex items-center justify-center gap-2 transition-all ${submitMode === 'audio_upload' ? 'bg-primary-container text-on-primary-container font-bold shadow-md' : 'text-on-surface-variant hover:bg-surface-container-high'}`}
-                    >
-                      <span className="material-symbols-outlined text-[18px]">cloud_upload</span>
-                      Audio déjà prêt
-                    </button>
-                  </div>
-
-                  {submitMode === 'text' && (
-                    <div className="space-y-4">
+                    {/* Custom Controls */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div>
-                        <label className="block font-label-bold text-on-surface-variant mb-2">Texte du script de la vidéo</label>
-                        <textarea
-                          value={singleScriptText}
-                          onChange={e => setSingleScriptText(e.target.value)}
-                          rows={12}
-                          style={{ minHeight: '280px' }}
-                          className="w-full bg-surface border border-surface-container-highest rounded-xl p-4 text-sm text-on-surface focus:border-primary-container outline-none resize-y"
-                          placeholder="Collez ici le script texte complet de votre vidéo. L'API d'Izivoice générera la voix-off et les sous-titres..."
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Police (Font)</label>
+                        <select 
+                          value={newChannel.subtitle_style.font}
+                          onChange={e => setNewChannel({ ...newChannel, subtitle_style: { ...newChannel.subtitle_style, font: e.target.value } })}
+                          className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2.5 text-xs text-white focus:border-[#00c2ff] outline-none"
+                        >
+                          <option value="Montserrat">Montserrat (Modern Heavy)</option>
+                          <option value="Inter">Inter (Clean Bold)</option>
+                          <option value="Impact">Impact (TikTok Heavy)</option>
+                          <option value="Bebas Neue">Bebas Neue (Tall Display)</option>
+                          <option value="Oswald">Oswald (Condensed)</option>
+                          <option value="Arial">Arial (Classic)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Taille du Texte ({newChannel.subtitle_style.size}px)</label>
+                        <input 
+                          type="range"
+                          min="28"
+                          max="64"
+                          value={newChannel.subtitle_style.size}
+                          onChange={e => setNewChannel({ ...newChannel, subtitle_style: { ...newChannel.subtitle_style, size: parseInt(e.target.value) || 44 } })}
+                          className="w-full accent-[#00c2ff]"
                         />
                       </div>
-                      <div className="flex justify-end pt-2">
-                        <button 
-                          onClick={handleSubjectSubmit}
-                          disabled={loading}
-                          className="px-6 py-3 bg-primary-container text-on-primary-container rounded-xl font-label-bold hover:bg-primary transition-colors flex items-center gap-2 shadow-md"
-                        >
-                          <span className="material-symbols-outlined">rocket_launch</span>
-                          {loading ? "Traitement..." : "Générer la vidéo via Izivoice"}
-                        </button>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Couleur Principale</label>
+                        <div className="flex items-center gap-2">
+                          <input 
+                            type="color"
+                            value={newChannel.subtitle_style.color.startsWith('#') ? newChannel.subtitle_style.color : '#FFD700'}
+                            onChange={e => setNewChannel({ ...newChannel, subtitle_style: { ...newChannel.subtitle_style, color: e.target.value } })}
+                            className="w-10 h-10 rounded-xl bg-[#1b2230] border border-[#2b374d] cursor-pointer"
+                          />
+                          <span className="text-xs font-mono text-slate-300">{newChannel.subtitle_style.color}</span>
+                        </div>
                       </div>
                     </div>
-                  )}
 
-                  {submitMode === 'audio_upload' && (
-                    <div className="space-y-4">
-                      <div 
-                        onDragOver={handleDragOver}
-                        onDragLeave={handleDragLeave}
-                        onDrop={handleDrop}
-                        onClick={() => fileInputRef.current && fileInputRef.current.click()}
-                        className={`w-full p-8 rounded-xl border-2 border-dashed transition-all text-center cursor-pointer flex flex-col items-center justify-center gap-3 ${
-                          isDragging ? 'border-primary-container bg-primary-container/10' : 'border-surface-container-highest bg-surface hover:border-outline'
-                        }`}
-                      >
-                        <input 
-                          type="file" 
-                          ref={fileInputRef}
-                          multiple
-                          accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.aac,.flac,.ogg"
-                          onChange={handleFileSelect}
-                          className="hidden"
-                        />
-                        <div className="w-14 h-14 rounded-full bg-surface-container-high flex items-center justify-center text-primary-container">
-                          <span className="material-symbols-outlined text-[32px]">cloud_upload</span>
-                        </div>
-                        <div>
-                          <p className="font-title-sm text-on-surface font-semibold">Glissez-déposez vos fichiers audio ici</p>
-                          <p className="text-xs text-on-surface-variant mt-1">Formats acceptés : MP3, WAV, M4A, MP4, AAC, FLAC, OGG</p>
-                          <p className="text-xs text-primary-container font-mono mt-1">Vous pouvez sélectionner un ou plusieurs fichiers à la fois</p>
-                        </div>
-                      </div>
-
-                      {audioFilesList.length > 0 && (
-                        <div className="space-y-2 max-h-[180px] overflow-y-auto bg-surface-container-lowest p-3 rounded-xl border border-surface-container-highest">
-                          <div className="text-xs font-label-bold text-on-surface-variant mb-2">Fichiers audio sélectionnés ({audioFilesList.length}) :</div>
-                          {audioFilesList.map((file, idx) => (
-                            <div key={idx} className="flex justify-between items-center bg-surface-container p-2.5 rounded-lg border border-surface-container-high text-xs">
-                              <div className="flex items-center gap-2 truncate max-w-[85%]">
-                                <span className="material-symbols-outlined text-primary-container text-[16px]">audiotrack</span>
-                                <span className="text-on-surface font-mono truncate">{file.name}</span>
-                                <span className="text-on-surface-variant text-[10px]">({(file.size / (1024 * 1024)).toFixed(2)} MB)</span>
-                              </div>
-                              <button 
-                                onClick={(e) => { e.stopPropagation(); removeAudioFile(idx); }}
-                                className="text-error hover:text-red-400 p-1"
-                              >
-                                <span className="material-symbols-outlined text-[16px]">close</span>
-                              </button>
-                            </div>
+                    {/* Interactive Animated Preview Box */}
+                    <div className="mt-4">
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Aperçu vidéo & Karaoké en temps réel</label>
+                      <div className="w-full h-52 rounded-2xl bg-gradient-to-b from-[#0e131d] to-[#05070a] border border-[#263042] relative flex flex-col items-center justify-end pb-8 overflow-hidden shadow-inner">
+                        {/* Fake video background lighting */}
+                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,194,255,0.15),transparent_70%)]"></div>
+                        
+                        {/* Subtitle Box Render */}
+                        <div 
+                          style={{
+                            backgroundColor: newChannel.subtitle_style.box_color || 'transparent',
+                            padding: '10px 20px',
+                            borderRadius: '12px'
+                          }}
+                          className="relative z-10 flex flex-wrap justify-center items-center gap-2 px-6 text-center max-w-[90%]"
+                        >
+                          {sampleWords.map((wordObj, i) => (
+                            <span
+                              key={i}
+                              style={{
+                                fontFamily: newChannel.subtitle_style.font,
+                                fontSize: `${(newChannel.subtitle_style.size || 44) * 0.45}px`,
+                                fontWeight: '900',
+                                color: wordObj.highlight ? (newChannel.subtitle_style.color || '#FFD700') : '#FFFFFF',
+                                textShadow: wordObj.highlight 
+                                  ? `0 0 16px ${newChannel.subtitle_style.color || '#FFD700'}, 0 2px 4px rgba(0,0,0,0.9)`
+                                  : '0 2px 6px rgba(0,0,0,0.9)',
+                                transform: wordObj.highlight ? 'scale(1.1)' : 'scale(1)',
+                                transition: 'all 0.15s ease-in-out'
+                              }}
+                              className="inline-block"
+                            >
+                              {wordObj.text}
+                            </span>
                           ))}
                         </div>
-                      )}
-
-                      <div className="flex justify-end pt-2">
-                        <button 
-                          onClick={handleSubjectSubmit}
-                          disabled={loading || audioFilesList.length === 0}
-                          className="px-6 py-3 bg-primary-container text-on-primary-container rounded-xl font-label-bold hover:bg-primary transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
-                        >
-                          <span className="material-symbols-outlined">movie_filter</span>
-                          {loading ? "Téléversement..." : `Lancer le montage des audios (${audioFilesList.length} fichier(s))`}
-                        </button>
                       </div>
                     </div>
-                  )}
-
-                </div>
-              </div>
-            )}
-
-            {/* VIDEO RESULT MODAL */}
-            {selectedVideo && (
-              <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-6">
-                <div className="bg-level-1 rounded-xl p-8 max-w-[800px] w-full max-h-[90vh] overflow-y-auto border border-surface-container-highest">
-                  <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-headline-md text-headline-md text-on-surface">Lecteur Vidéo MP4</h3>
-                    <button onClick={() => setSelectedVideo(null)} className="text-on-surface-variant hover:text-on-surface">
-                      <span className="material-symbols-outlined">close</span>
-                    </button>
                   </div>
+                )}
 
-                  <div className="rounded-xl overflow-hidden bg-black mb-6">
-                    <video 
-                      controls 
-                      autoPlay 
-                      className="w-full max-h-[420px]" 
-                      src={`${STORAGE_BASE}/${selectedVideo.output_path?.replace('storage/', '')}`} 
-                    />
-                  </div>
+                {/* STEP 3: BRANDING & OVERLAY OPTIONS (STREAMLINED & DUPES REMOVED) */}
+                {wizardStep === 3 && (
+                  <div className="space-y-6">
+                    <h3 className="text-base font-bold text-white">3. Branding & Filigrane Overlay</h3>
+                    <p className="text-xs text-slate-400">Ajoutez un filigrane de votre handle ou logo pour protéger vos vidéos sur TikTok et YouTube Shorts.</p>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-surface p-4 rounded-xl border border-surface-container-highest">
-                      <div className="font-label-bold text-on-surface-variant mb-1">Dossier Source Archive</div>
-                      <div className="font-mono text-xs text-on-surface truncate">{selectedVideo.source_assets_path}</div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Texte Filigrane (@Handle / Marque)</label>
+                      <input 
+                        value={newChannel.branding.channel_name_text}
+                        onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, channel_name_text: e.target.value } })}
+                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
+                        placeholder="ex: @StoicMindDaily"
+                      />
                     </div>
 
-                    <div className="bg-surface p-4 rounded-xl border border-surface-container-highest flex items-center justify-center">
-                      <a 
-                        href={`${STORAGE_BASE}/${selectedVideo.output_path?.replace('storage/', '')}`} 
-                        download 
-                        className="bg-primary-container text-on-primary-container px-4 py-2 rounded-xl font-label-bold text-sm hover:bg-primary transition-colors inline-flex items-center gap-2"
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Position du Filigrane</label>
+                        <select
+                          value={newChannel.branding.watermark_position || 'top_right'}
+                          onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, watermark_position: e.target.value } })}
+                          className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2.5 text-xs text-white focus:border-[#00c2ff] outline-none"
+                        >
+                          <option value="top_right">Haut Droite</option>
+                          <option value="bottom_right">Bas Droite</option>
+                          <option value="top_left">Haut Gauche</option>
+                          <option value="bottom_left">Bas Gauche</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Opacité ({Math.round((newChannel.branding.watermark_opacity || 0.85) * 100)}%)</label>
+                        <input
+                          type="range"
+                          min="0.2"
+                          max="1.0"
+                          step="0.05"
+                          value={newChannel.branding.watermark_opacity || 0.85}
+                          onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, watermark_opacity: parseFloat(e.target.value) } })}
+                          className="w-full accent-[#00c2ff]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* STEP 4: MUSIQUE DE FOND & AUTO-DUCKING */}
+                {wizardStep === 4 && (
+                  <div className="space-y-6">
+                    <h3 className="text-base font-bold text-white">4. Musique de Fond Ambiante & Auto-Ducking</h3>
+                    
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Ambiance Musicale</label>
+                      <select 
+                        value={newChannel.music_preference.track_id_or_style}
+                        onChange={e => setNewChannel({ ...newChannel, music_preference: { ...newChannel.music_preference, track_id_or_style: e.target.value } })}
+                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
                       >
-                        <span className="material-symbols-outlined">download</span> Télécharger MP4
-                      </a>
+                        <option value="ambient">Zen & Méditation (Ambiant Relax)</option>
+                        <option value="dramatic">Dark Ambient Stoïcien & Profond</option>
+                        <option value="cinematic">Cinématique Épique & Émotionnel</option>
+                        <option value="lofi">Lo-Fi Chill & Focus</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-2">Volume Musique ({Math.round((newChannel.music_preference.volume || 0.15) * 100)}%)</label>
+                      <input 
+                        type="range"
+                        min="0.05"
+                        max="0.5"
+                        step="0.01"
+                        value={newChannel.music_preference.volume || 0.15}
+                        onChange={e => setNewChannel({ ...newChannel, music_preference: { ...newChannel.music_preference, volume: parseFloat(e.target.value) } })}
+                        className="w-full accent-[#00c2ff]"
+                      />
                     </div>
                   </div>
+                )}
+
+                {/* STEP 5: STYLE VISUEL & SOURCES D'IMAGES (OPTION A, OPTION B, OPTION C HYBRIDE) */}
+                {wizardStep === 5 && (
+                  <div className="space-y-6">
+                    <div>
+                      <h3 className="text-base font-bold text-white">5. Source d'Images Visuelles & Mode de Génération</h3>
+                      <p className="text-xs text-slate-400 mt-1">Choisissez la provenance des visuels pour votre vidéo (Dossier local, IA intégrale, ou Mode Hybride).</p>
+                    </div>
+
+                    {/* 3 CARDS SELECTION GRID */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                      
+                      {/* OPTION A: DOSSIER IMAGES LOCALES */}
+                      <div 
+                        onClick={() => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: 'library' } })}
+                        className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
+                          newChannel.image_style.source === 'library'
+                            ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
+                            : 'bg-[#141923] border-[#263042] hover:border-slate-500'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2.5">
+                            <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">folder_open</span>
+                            <h4 className="font-bold text-white text-xs">Option A: Importer un dossier local</h4>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Sélectionnez un dossier complet contenant toutes les images de votre machine.
+                          </p>
+                        </div>
+
+                        {/* Folder Picker & Dropzone */}
+                        <div
+                          onDragOver={(e) => { e.preventDefault(); setIsFolderDragging(true); }}
+                          onDragLeave={() => setIsFolderDragging(false)}
+                          onDrop={handleFolderDrop}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (wizardFolderInputRef.current) wizardFolderInputRef.current.click();
+                          }}
+                          className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all ${
+                            isFolderDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-[#00c2ff] bg-[#0f1217]/60'
+                          }`}
+                        >
+                          <input
+                            type="file"
+                            ref={wizardFolderInputRef}
+                            webkitdirectory="true"
+                            directory="true"
+                            multiple
+                            onChange={handleLocalFolderSelect}
+                            className="hidden"
+                          />
+                          <span className="material-symbols-outlined text-slate-400 text-[28px] mb-1">drive_folder_upload</span>
+                          <div className="text-xs font-bold text-white">Choisir un dossier d'images</div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">ou glisser-déposer le dossier</div>
+                          
+                          {localImageFiles.length > 0 && (
+                            <div className="mt-2 px-2.5 py-1 bg-emerald-950 text-emerald-300 rounded-lg text-[10px] font-bold font-mono truncate">
+                              ✓ {selectedFolderName || 'Dossier'}: {localImageFiles.length} images
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* OPTION B: GÉNÉRATION IA AUTOMATIQUE */}
+                      <div 
+                        onClick={() => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: 'ai_generated' } })}
+                        className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
+                          newChannel.image_style.source === 'ai_generated'
+                            ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
+                            : 'bg-[#141923] border-[#263042] hover:border-slate-500'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2.5">
+                            <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">auto_awesome</span>
+                            <h4 className="font-bold text-white text-xs">Option B: Génération IA Automatique</h4>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            L'IA génère automatiquement les visuels pour chaque scène (style optionnel).
+                          </p>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">Style de prompt (Optionnel)</label>
+                          <textarea
+                            rows="2"
+                            value={newChannel.image_style.style_prompt}
+                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, style_prompt: e.target.value } })}
+                            className="w-full bg-[#0f1217] border border-[#2b374d] rounded-xl p-2.5 text-[11px] text-white focus:border-[#00c2ff] outline-none placeholder-slate-500"
+                            placeholder="Optionnel: cinematic lighting, stoic sculpture style..."
+                          />
+                        </div>
+                      </div>
+
+                      {/* OPTION C: MODE HYBRIDE (DOSSIER LOCAL + COMPLÉMENT IA) */}
+                      <div 
+                        onClick={() => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: 'hybrid' } })}
+                        className={`p-5 rounded-2xl border-2 transition-all cursor-pointer space-y-4 flex flex-col justify-between ${
+                          newChannel.image_style.source === 'hybrid'
+                            ? 'bg-[#1b2230] border-[#00c2ff] shadow-lg shadow-[#00c2ff]/10'
+                            : 'bg-[#141923] border-[#263042] hover:border-slate-500'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2.5">
+                            <span className="material-symbols-outlined text-[#00c2ff] text-[24px]">tune</span>
+                            <h4 className="font-bold text-white text-xs">Option C: Mode Hybride (Dossier + IA)</h4>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Utilise vos images locales et laisse l'IA proposer des suggestions complémentaires pour enrichir la vidéo.
+                          </p>
+                        </div>
+
+                        <div className="bg-[#0f1217]/60 p-3 rounded-xl border border-[#2b374d] text-[10px] text-slate-300 space-y-1">
+                          <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
+                            <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                            Dossier local prioritaire
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[#00c2ff] font-bold">
+                            <span className="material-symbols-outlined text-[14px]">sparkles</span>
+                            Complément d'images IA
+                          </div>
+                        </div>
+                      </div>
+
+                    </div>
+                  </div>
+                )}
+
+                {/* Wizard Footer Navigation */}
+                <div className="flex justify-between items-center pt-6 border-t border-[#263042]">
+                  {wizardStep > 1 ? (
+                    <button 
+                      onClick={() => setWizardStep(wizardStep - 1)}
+                      className="px-6 py-2.5 rounded-xl bg-[#1b2230] text-white font-bold text-xs hover:bg-[#252f42] transition-colors"
+                    >
+                      Retour
+                    </button>
+                  ) : <div></div>}
+
+                  {wizardStep < 5 ? (
+                    <button 
+                      onClick={() => setWizardStep(wizardStep + 1)}
+                      className="px-6 py-2.5 rounded-xl bg-[#00c2ff] text-slate-950 font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center gap-2 shadow-md"
+                    >
+                      Suivant <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSaveChannel}
+                      disabled={loading}
+                      className="px-8 py-3 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs hover:bg-emerald-400 transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/20"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">check</span>
+                      {loading ? "Enregistrement..." : (wizardMode === 'edit' ? "Enregistrer les modifications" : "Créer le Pipeline")}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
-
           </div>
         </div>
       </main>
+
+      {/* NOUVELLE VIDÉO MAIN ACTION MODAL */}
+      {showSubmitModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-6">
+          <div className="bg-[#161b22] border border-[#263042] rounded-3xl p-8 max-w-[620px] w-full shadow-2xl space-y-6">
+            <div className="flex justify-between items-center border-b border-[#263042] pb-4">
+              <div>
+                <h3 className="text-lg font-extrabold text-white flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[#00c2ff]">movie_filter</span>
+                  Générer une Nouvelle Vidéo
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">Sélectionnez le canal et le contenu pour lancer le montage.</p>
+              </div>
+              <button onClick={() => setShowSubmitModal(false)} className="text-slate-400 hover:text-white p-1">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            {/* Target Channel Selector */}
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-2">Chaîne Cible</label>
+              <select
+                value={activeChannel ? activeChannel.id : ''}
+                onChange={e => {
+                  const selected = channels.find(c => c.id === e.target.value);
+                  if (selected) setActiveChannel(selected);
+                }}
+                className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
+              >
+                {channels.map(c => (
+                  <option key={c.id} value={c.id}>{c.name} ({c.niche})</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Input Mode Selector */}
+            <div className="grid grid-cols-2 gap-3 bg-[#11151c] p-1.5 rounded-xl border border-[#202938]">
+              <button
+                type="button"
+                onClick={() => setSubmitMode('text')}
+                className={`py-2.5 rounded-lg text-xs font-bold transition-all ${
+                  submitMode === 'text' ? 'bg-[#00c2ff] text-slate-950 shadow-md' : 'text-slate-400'
+                }`}
+              >
+                Texte Script (Izivoice)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubmitMode('audio_upload')}
+                className={`py-2.5 rounded-lg text-xs font-bold transition-all ${
+                  submitMode === 'audio_upload' ? 'bg-[#00c2ff] text-slate-950 shadow-md' : 'text-slate-400'
+                }`}
+              >
+                Fichiers Audio Importés
+              </button>
+            </div>
+
+            {/* Voice Model Selection */}
+            {submitMode === 'text' && (
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-2">Modèle de Voix Off IA</label>
+                <select
+                  value={selectedVoice}
+                  onChange={e => setSelectedVoice(e.target.value)}
+                  className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2.5 text-xs text-white focus:border-[#00c2ff] outline-none"
+                >
+                  {VOICE_MODELS.map(v => (
+                    <option key={v.id} value={v.id}>{v.name} — {v.desc}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Content Input Area */}
+            {submitMode === 'text' ? (
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-2">Texte du Script</label>
+                <textarea
+                  rows="5"
+                  value={singleScriptText}
+                  onChange={e => setSingleScriptText(e.target.value)}
+                  className="w-full bg-[#1b2230] border border-[#2b374d] rounded-2xl p-4 text-xs text-white focus:border-[#00c2ff] outline-none placeholder-slate-500"
+                  placeholder="Collez ici le texte de votre vidéo. L'IA générera la voix off et calera les sous-titres karaoké..."
+                />
+              </div>
+            ) : (
+              <div
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                  isDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-slate-400 bg-[#11151c]'
+                }`}
+              >
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  multiple
+                  accept="audio/*"
+                  onChange={e => setAudioFilesList(prev => [...prev, ...Array.from(e.target.files)])}
+                  className="hidden"
+                />
+                <span className="material-symbols-outlined text-slate-400 text-[42px] mb-2">cloud_upload</span>
+                <div className="text-xs font-bold text-white">Glisser-déposer vos fichiers audio (.mp3, .wav)</div>
+                <div className="text-[11px] text-slate-400 mt-1">ou cliquez pour choisir des fichiers</div>
+                {audioFilesList.length > 0 && (
+                  <div className="mt-4 space-y-1">
+                    {audioFilesList.map((f, i) => (
+                      <div key={i} className="text-xs font-mono text-emerald-400 bg-emerald-950/60 p-2 rounded-lg border border-emerald-800">
+                        {f.name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Launch Action */}
+            <button
+              onClick={handleSubjectSubmit}
+              disabled={loading}
+              className="w-full py-3.5 bg-gradient-to-r from-[#00c2ff] to-[#0088ff] text-slate-950 font-bold text-sm rounded-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#00c2ff]/25"
+            >
+              <span className="material-symbols-outlined text-[20px]">rocket_launch</span>
+              {loading ? "Chargement & Lancement..." : "Lancer le Montage"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* VIDEO PLAYER MODAL */}
+      {selectedVideo && (
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-6">
+          <div className="bg-[#161b22] border border-[#263042] rounded-3xl p-6 max-w-[480px] w-full shadow-2xl space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-sm font-bold text-white">Aperçu Vidéo Rendu</h3>
+              <button onClick={() => setSelectedVideo(null)} className="text-slate-400 hover:text-white">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <div className="aspect-[9/16] bg-black rounded-2xl overflow-hidden border border-[#263042]">
+              <video
+                src={`${STORAGE_BASE}/${selectedVideo.output_video_path}`}
+                controls
+                autoPlay
+                className="w-full h-full object-cover"
+              />
+            </div>
+
+            <div className="flex justify-between items-center pt-2">
+              <a
+                href={`${STORAGE_BASE}/${selectedVideo.output_video_path}`}
+                download
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-3 bg-[#00c2ff] text-slate-950 font-bold text-xs rounded-xl text-center hover:bg-[#38d0ff] transition-all flex items-center justify-center gap-2"
+              >
+                <span className="material-symbols-outlined text-[18px]">download</span> Télécharger MP4
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* USER AUTH MODAL */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
+          <div className="bg-[#161b22] border border-[#263042] rounded-3xl p-8 max-w-[440px] w-full shadow-2xl space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-extrabold text-white">
+                {authTab === 'login' && 'Connexion'}
+                {authTab === 'register' && 'Inscription'}
+              </h3>
+              <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleAuthSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">Adresse Email</label>
+                <input 
+                  type="email"
+                  required
+                  value={authForm.email}
+                  onChange={e => setAuthForm({ ...authForm, email: e.target.value })}
+                  className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl p-3 text-xs text-white focus:border-[#00c2ff] outline-none"
+                  placeholder="nom@exemple.com"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1">Mot de passe</label>
+                <input 
+                  type="password"
+                  required
+                  value={authForm.password}
+                  onChange={e => setAuthForm({ ...authForm, password: e.target.value })}
+                  className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl p-3 text-xs text-white focus:border-[#00c2ff] outline-none"
+                  placeholder="••••••••"
+                />
+              </div>
+              <button 
+                type="submit"
+                className="w-full py-3 bg-[#00c2ff] text-slate-950 font-bold text-xs rounded-xl hover:bg-[#38d0ff] transition-all mt-4"
+              >
+                {authTab === 'register' ? "Créer mon compte" : "Se connecter"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* USER PROFILE & SETTINGS MODAL (INTEGRATED PARAMÈTRES & PROFIL) */}
+      {showProfileModal && currentUser && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-6">
+          <div className="bg-[#161b22] border border-[#263042] rounded-3xl p-8 max-w-[640px] w-full max-h-[90vh] overflow-y-auto shadow-2xl space-y-6">
+            <div className="flex justify-between items-center border-b border-[#263042] pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-[#00c2ff] text-slate-950 flex items-center justify-center font-extrabold text-lg shadow-md">
+                  {currentUser.name.slice(0, 1).toUpperCase()}
+                </div>
+                <div>
+                  <h3 className="text-lg font-extrabold text-white">{currentUser.name}</h3>
+                  <p className="text-xs text-slate-400">{currentUser.email}</p>
+                </div>
+              </div>
+              <button onClick={() => setShowProfileModal(false)} className="text-slate-400 hover:text-white p-1">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            {/* Settings Tabs */}
+            <div className="flex border-b border-[#263042] gap-4">
+              <button
+                onClick={() => setProfileTab('database')}
+                className={`pb-2.5 text-xs font-bold transition-all border-b-2 ${
+                  profileTab === 'database' ? 'border-[#00c2ff] text-[#00c2ff]' : 'border-transparent text-slate-400'
+                }`}
+              >
+                Base de données & VPS
+              </button>
+              <button
+                onClick={() => setProfileTab('security')}
+                className={`pb-2.5 text-xs font-bold transition-all border-b-2 ${
+                  profileTab === 'security' ? 'border-[#00c2ff] text-[#00c2ff]' : 'border-transparent text-slate-400'
+                }`}
+              >
+                Sécurité & Compte
+              </button>
+            </div>
+
+            {profileTab === 'database' && (
+              <div className="space-y-4">
+                <h4 className="text-sm font-bold text-white">Statut du Serveur Supabase VPS</h4>
+                <div className="bg-[#11151c] p-4 rounded-xl border border-[#202938] space-y-2 text-xs font-mono">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Statut:</span>
+                    <span className="text-emerald-400 font-bold">● Connecté</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Service:</span>
+                    <span className="text-white">{dbInfo.service_name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Hôte:</span>
+                    <span className="text-white">{dbInfo.database_host}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {profileTab === 'security' && (
+              <div className="space-y-4">
+                <h4 className="text-sm font-bold text-white font-mono">Informations du Compte</h4>
+                <div className="text-xs text-slate-400 space-y-1">
+                  <p>Nom: <strong className="text-white">{currentUser.name}</strong></p>
+                  <p>Email: <strong className="text-white">{currentUser.email}</strong></p>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-4 border-t border-[#263042] flex justify-between items-center">
+              <button
+                onClick={handleLogout}
+                className="px-4 py-2 bg-rose-950/70 text-rose-300 border border-rose-800 rounded-xl font-bold text-xs hover:bg-rose-900 transition-all flex items-center gap-2"
+              >
+                <span className="material-symbols-outlined text-[16px]">logout</span> Deconnexion
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CHANNEL PICKER MODAL (when Nouvelle Vidéo clicked without active channel preset) */}
+      {showChannelPickerModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-6">
+          <div className="bg-[#161b22] border border-[#263042] rounded-3xl p-8 max-w-[480px] w-full shadow-2xl space-y-6">
+            <div className="flex justify-between items-center border-b border-[#263042] pb-4">
+              <h3 className="text-base font-extrabold text-white">Choisir une chaîne pour la vidéo</h3>
+              <button onClick={() => setShowChannelPickerModal(false)} className="text-slate-400 hover:text-white">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+
+            <div className="space-y-3 max-h-[300px] overflow-y-auto">
+              {channels.map(chan => (
+                <div
+                  key={chan.id}
+                  onClick={() => {
+                    setActiveChannel(chan);
+                    setShowChannelPickerModal(false);
+                    setShowSubmitModal(true);
+                  }}
+                  className="p-4 bg-[#1b2230] hover:bg-[#252f42] border border-[#2b374d] rounded-2xl cursor-pointer flex items-center gap-4 transition-all"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-[#00c2ff] text-slate-950 flex items-center justify-center font-bold text-sm">
+                    {chan.name.slice(0, 2).toUpperCase()}
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-white">{chan.name}</h4>
+                    <p className="text-xs text-slate-400">{chan.niche}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

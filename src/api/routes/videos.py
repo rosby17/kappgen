@@ -85,6 +85,11 @@ async def submit_video_subject(
         background_tasks.add_task(process_single_queued_video)
         return [video.to_dict()]
 
+@router.get("")
+def list_all_videos(db: Session = Depends(get_db)):
+    videos = db.query(Video).order_by(Video.created_at.desc()).all()
+    return [v.to_dict() for v in videos]
+
 @router.get("/{video_id}")
 def get_video_status(video_id: str, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
