@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from src.db.session import get_db
-from src.db.models import Channel, Video
+from src.db.models import Channel, Video, User
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus
 from src.config import STORAGE_PATH
 
@@ -26,8 +26,14 @@ def list_channels(db: Session = Depends(get_db)):
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = Depends(get_db)):
+    valid_user_id = None
+    if user_id:
+        user_exists = db.query(User).filter(User.id == user_id).first()
+        if user_exists:
+            valid_user_id = user_id
+
     channel = Channel(
-        user_id=user_id,
+        user_id=valid_user_id,
         name=payload.name,
         niche=payload.niche,
         subtitle_style=payload.subtitle_style.model_dump(),
