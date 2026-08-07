@@ -480,6 +480,18 @@ export default function App() {
     }
   };
 
+  const handleDeleteVideo = async (videoId, e) => {
+    if (e) e.stopPropagation();
+    if (!confirm("Voulez-vous vraiment supprimer cette vidéo ?")) return;
+    try {
+      await fetch(`${API_BASE}/videos/${videoId}`, { method: 'DELETE' });
+      fetchAllVideos();
+      if (activeChannel) fetchChannelVideos(activeChannel.id);
+    } catch (err) {
+      console.error("Erreur lors de la suppression de la vidéo:", err);
+    }
+  };
+
   const handleDeleteChannel = async (channelId, e) => {
     e.stopPropagation();
     setOpenChannelMenuId(null);
@@ -942,7 +954,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Videos List Container */}
+                {/* Visual Video Cards Grid */}
                 {allVideos.length === 0 ? (
                   <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-12 text-center">
                     <span className="material-symbols-outlined text-[54px] text-slate-500 mb-3">movie</span>
@@ -963,54 +975,120 @@ export default function App() {
                     </button>
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                     {allVideos
                       .filter(v => videoFilterChannelId === 'all' || v.channel_id === videoFilterChannelId)
                       .map(vid => {
                         const channelObj = channels.find(c => c.id === vid.channel_id);
                         return (
-                          <div key={vid.id} className="bg-[#161b22] rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 border border-[#263042] hover:border-[#00c2ff]/30 transition-all">
-                            <div className="space-y-2 max-w-[70%]">
-                              <div className="flex items-center gap-3 flex-wrap">
-                                <span className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold uppercase ${
-                                  vid.status === 'done' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
-                                  vid.status === 'rendering' ? 'bg-blue-950 text-blue-300 border border-blue-800 animate-pulse' :
-                                  vid.status === 'failed' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
-                                  'bg-amber-950 text-amber-300 border border-amber-800'
+                          <div 
+                            key={vid.id} 
+                            className="bg-[#161b22] hover:bg-[#1c232e] border border-[#263042] hover:border-[#00c2ff]/40 rounded-2xl p-4 transition-all group flex flex-col justify-between shadow-lg relative card-warm-hover"
+                          >
+                            {/* Video Poster Frame (9:16 Aspect Ratio) */}
+                            <div 
+                              onClick={() => vid.status === 'done' && setSelectedVideo(vid)}
+                              className={`aspect-[9/16] bg-slate-950 rounded-xl relative overflow-hidden border border-[#2b374d] flex items-center justify-center ${vid.status === 'done' ? 'cursor-pointer group' : ''}`}
+                            >
+                              {vid.status === 'done' && vid.output_video_path ? (
+                                <>
+                                  <video 
+                                    src={`${STORAGE_BASE}/${vid.output_video_path}`}
+                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                    preload="metadata"
+                                  />
+                                  <div className="absolute inset-0 bg-black/40 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                                    <span className="material-symbols-outlined text-[48px] text-[#00c2ff] drop-shadow-lg group-hover:scale-110 transition-transform">play_circle</span>
+                                  </div>
+                                </>
+                              ) : vid.status === 'rendering' ? (
+                                <div className="p-4 text-center space-y-2">
+                                  <span className="material-symbols-outlined text-[36px] text-blue-400 animate-spin">progress_activity</span>
+                                  <div className="text-[11px] font-bold font-mono text-blue-300">Rendu en cours...</div>
+                                </div>
+                              ) : vid.status === 'failed' ? (
+                                <div className="p-4 text-center space-y-2">
+                                  <span className="material-symbols-outlined text-[36px] text-rose-400">warning</span>
+                                  <div className="text-[11px] font-bold font-mono text-rose-300">Échec du rendu</div>
+                                </div>
+                              ) : (
+                                <div className="p-4 text-center space-y-2">
+                                  <span className="material-symbols-outlined text-[36px] text-amber-400">hourglass_empty</span>
+                                  <div className="text-[11px] font-bold font-mono text-amber-300">En file d'attente</div>
+                                </div>
+                              )}
+
+                              {/* Status Badge Top Left */}
+                              <div className="absolute top-2 left-2 z-10">
+                                <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-mono font-bold uppercase tracking-wider ${
+                                  vid.status === 'done' ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-700/80' :
+                                  vid.status === 'rendering' ? 'bg-blue-950/90 text-blue-300 border border-blue-700/80 animate-pulse' :
+                                  vid.status === 'failed' ? 'bg-rose-950/90 text-rose-300 border border-rose-700/80' :
+                                  'bg-amber-950/90 text-amber-300 border border-amber-700/80'
                                 }`}>
-                                  {vid.status}
-                                </span>
-                                {channelObj && (
-                                  <span className="text-xs font-bold text-[#00c2ff] bg-[#00c2ff]/10 px-2.5 py-0.5 rounded-lg border border-[#00c2ff]/20">
-                                    {channelObj.name}
-                                  </span>
-                                )}
-                                <span className="text-xs text-slate-400 font-mono">
-                                  Mode: {vid.input_type === 'audio' ? 'Audio importé' : 'Texte Izivoice'}
+                                  {vid.status === 'done' ? 'Prête' : vid.status === 'rendering' ? 'Rendu...' : vid.status === 'failed' ? 'Échec' : 'En file'}
                                 </span>
                               </div>
-                              <p className="text-white text-sm line-clamp-2 italic font-medium">
-                                "{vid.script_text}"
-                              </p>
+
+                              {/* Delete Button Top Right */}
+                              <button
+                                onClick={(e) => handleDeleteVideo(vid.id, e)}
+                                className="absolute top-2 right-2 z-10 p-1.5 rounded-lg bg-slate-950/80 hover:bg-rose-950 text-slate-300 hover:text-rose-300 border border-slate-700/80 transition-colors shadow-md"
+                                title="Supprimer cette vidéo"
+                              >
+                                <span className="material-symbols-outlined text-[16px]">delete</span>
+                              </button>
                             </div>
 
-                            <div className="flex items-center gap-3 flex-shrink-0">
-                              {vid.status === 'done' && (
-                                <button 
-                                  onClick={() => setSelectedVideo(vid)}
-                                  className="px-4 py-2 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center gap-2 shadow-md shadow-[#00c2ff]/20"
+                            {/* Card Content Information */}
+                            <div className="mt-3 space-y-2 flex-1 flex flex-col justify-between">
+                              <div>
+                                {channelObj && (
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                    {getChannelLogoUrl(channelObj) ? (
+                                      <img src={getChannelLogoUrl(channelObj)} alt={channelObj.name} className="w-4 h-4 rounded-full object-cover" />
+                                    ) : (
+                                      <div className="w-4 h-4 rounded-full bg-[#00c2ff] text-slate-950 font-bold text-[8px] flex items-center justify-center">
+                                        {channelObj.name.slice(0, 1)}
+                                      </div>
+                                    )}
+                                    <span className="text-[11px] font-bold text-[#00c2ff] truncate">{channelObj.name}</span>
+                                  </div>
+                                )}
+
+                                <p className="text-white text-xs font-semibold line-clamp-2 italic">
+                                  "{vid.script_text}"
+                                </p>
+                              </div>
+
+                              {/* Card Action Buttons */}
+                              <div className="pt-2 border-t border-[#202938] flex items-center gap-2">
+                                {vid.status === 'done' && (
+                                  <button 
+                                    onClick={() => setSelectedVideo(vid)}
+                                    className="flex-1 py-1.5 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center justify-center gap-1 shadow-md shadow-[#00c2ff]/20"
+                                  >
+                                    <span className="material-symbols-outlined text-[16px]">play_circle</span> Voir
+                                  </button>
+                                )}
+
+                                {vid.status === 'failed' && (
+                                  <button 
+                                    onClick={() => handleRetryVideo(vid.id)}
+                                    className="flex-1 py-1.5 bg-[#1f2838] text-white rounded-xl font-bold text-xs hover:bg-[#2b384e] transition-all flex items-center justify-center gap-1 border border-[#2b374d]"
+                                  >
+                                    <span className="material-symbols-outlined text-[16px]">refresh</span> Relancer
+                                  </button>
+                                )}
+
+                                <button
+                                  onClick={(e) => handleDeleteVideo(vid.id, e)}
+                                  className="p-1.5 bg-[#1b2230] text-rose-400 hover:bg-rose-950 hover:text-rose-200 border border-[#2b374d] rounded-xl transition-colors"
+                                  title="Supprimer la vidéo"
                                 >
-                                  <span className="material-symbols-outlined text-[18px]">play_circle</span> Voir Vidéo
+                                  <span className="material-symbols-outlined text-[16px]">delete</span>
                                 </button>
-                              )}
-                              {vid.status === 'failed' && (
-                                <button 
-                                  onClick={() => handleRetryVideo(vid.id)}
-                                  className="px-4 py-2 bg-[#1f2838] text-white rounded-xl font-bold text-xs hover:bg-[#2b384e] transition-all flex items-center gap-2 border border-[#2b374d]"
-                                >
-                                  <span className="material-symbols-outlined text-[18px]">refresh</span> Relancer
-                                </button>
-                              )}
+                              </div>
                             </div>
                           </div>
                         );
@@ -1079,45 +1157,98 @@ export default function App() {
                       </button>
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                       {channelVideos.map(vid => (
-                        <div key={vid.id} className="bg-[#161b22] rounded-2xl p-5 flex justify-between items-center border border-[#263042]">
-                          <div className="space-y-1.5 max-w-[70%]">
-                            <div className="flex items-center gap-3">
-                              <span className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold uppercase ${
-                                vid.status === 'done' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
-                                vid.status === 'rendering' ? 'bg-blue-950 text-blue-300 border border-blue-800 animate-pulse' :
-                                vid.status === 'failed' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
-                                'bg-amber-950 text-amber-300 border border-amber-800'
+                        <div 
+                          key={vid.id} 
+                          className="bg-[#161b22] hover:bg-[#1c232e] border border-[#263042] hover:border-[#00c2ff]/40 rounded-2xl p-4 transition-all group flex flex-col justify-between shadow-lg relative card-warm-hover"
+                        >
+                          {/* Thumbnail Poster (9:16 Aspect Ratio) */}
+                          <div 
+                            onClick={() => vid.status === 'done' && setSelectedVideo(vid)}
+                            className={`aspect-[9/16] bg-slate-950 rounded-xl relative overflow-hidden border border-[#2b374d] flex items-center justify-center ${vid.status === 'done' ? 'cursor-pointer group' : ''}`}
+                          >
+                            {vid.status === 'done' && vid.output_video_path ? (
+                              <>
+                                <video 
+                                  src={`${STORAGE_BASE}/${vid.output_video_path}`}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                  preload="metadata"
+                                />
+                                <div className="absolute inset-0 bg-black/40 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                                  <span className="material-symbols-outlined text-[48px] text-[#00c2ff] drop-shadow-lg group-hover:scale-110 transition-transform">play_circle</span>
+                                </div>
+                              </>
+                            ) : vid.status === 'rendering' ? (
+                              <div className="p-4 text-center space-y-2">
+                                <span className="material-symbols-outlined text-[36px] text-blue-400 animate-spin">progress_activity</span>
+                                <div className="text-[11px] font-bold font-mono text-blue-300">Rendu...</div>
+                              </div>
+                            ) : vid.status === 'failed' ? (
+                              <div className="p-4 text-center space-y-2">
+                                <span className="material-symbols-outlined text-[36px] text-rose-400">warning</span>
+                                <div className="text-[11px] font-bold font-mono text-rose-300">Échec</div>
+                              </div>
+                            ) : (
+                              <div className="p-4 text-center space-y-2">
+                                <span className="material-symbols-outlined text-[36px] text-amber-400">hourglass_empty</span>
+                                <div className="text-[11px] font-bold font-mono text-amber-300">En file</div>
+                              </div>
+                            )}
+
+                            {/* Status Badge */}
+                            <div className="absolute top-2 left-2 z-10">
+                              <span className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold uppercase tracking-wider ${
+                                vid.status === 'done' ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-700/80' :
+                                vid.status === 'rendering' ? 'bg-blue-950/90 text-blue-300 border border-blue-700/80 animate-pulse' :
+                                vid.status === 'failed' ? 'bg-rose-950/90 text-rose-300 border border-rose-700/80' :
+                                'bg-amber-950/90 text-amber-300 border border-amber-700/80'
                               }`}>
-                                {vid.status}
-                              </span>
-                              <span className="text-xs text-slate-400 font-mono">
-                                Mode: {vid.input_type === 'audio' ? 'Audio importé' : 'Texte Izivoice'}
+                                {vid.status === 'done' ? 'Prête' : vid.status === 'rendering' ? 'Rendu...' : vid.status === 'failed' ? 'Échec' : 'En file'}
                               </span>
                             </div>
-                            <p className="text-white text-sm line-clamp-1 italic font-medium">
-                              "{vid.script_text}"
-                            </p>
+
+                            {/* Delete Button */}
+                            <button
+                              onClick={(e) => handleDeleteVideo(vid.id, e)}
+                              className="absolute top-2 right-2 z-10 p-1.5 rounded-lg bg-slate-950/80 hover:bg-rose-950 text-slate-300 hover:text-rose-300 border border-slate-700/80 transition-colors shadow-md"
+                              title="Supprimer cette vidéo"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">delete</span>
+                            </button>
                           </div>
 
-                          <div className="flex gap-2">
-                            {vid.status === 'done' && (
-                              <button 
-                                onClick={() => setSelectedVideo(vid)}
-                                className="px-4 py-2 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center gap-1.5"
+                          {/* Info & Title */}
+                          <div className="mt-3 space-y-2 flex-1 flex flex-col justify-between">
+                            <p className="text-white text-xs font-semibold line-clamp-2 italic">
+                              "{vid.script_text}"
+                            </p>
+
+                            <div className="pt-2 border-t border-[#202938] flex items-center gap-2">
+                              {vid.status === 'done' && (
+                                <button 
+                                  onClick={() => setSelectedVideo(vid)}
+                                  className="flex-1 py-1.5 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-all flex items-center justify-center gap-1 shadow-md shadow-[#00c2ff]/20"
+                                >
+                                  <span className="material-symbols-outlined text-[16px]">play_circle</span> Voir
+                                </button>
+                              )}
+                              {vid.status === 'failed' && (
+                                <button 
+                                  onClick={() => handleRetryVideo(vid.id)}
+                                  className="flex-1 py-1.5 bg-[#1f2838] text-white rounded-xl font-bold text-xs hover:bg-[#2b384e] transition-all flex items-center justify-center gap-1 border border-[#2b374d]"
+                                >
+                                  <span className="material-symbols-outlined text-[16px]">refresh</span> Relancer
+                                </button>
+                              )}
+                              <button
+                                onClick={(e) => handleDeleteVideo(vid.id, e)}
+                                className="p-1.5 bg-[#1b2230] text-rose-400 hover:bg-rose-950 hover:text-rose-200 border border-[#2b374d] rounded-xl transition-colors"
+                                title="Supprimer la vidéo"
                               >
-                                <span className="material-symbols-outlined text-[16px]">play_circle</span> Voir Vidéo
+                                <span className="material-symbols-outlined text-[16px]">delete</span>
                               </button>
-                            )}
-                            {vid.status === 'failed' && (
-                              <button 
-                                onClick={() => handleRetryVideo(vid.id)}
-                                className="px-4 py-2 bg-[#1b2230] text-white rounded-xl font-bold text-xs hover:bg-[#252f42] transition-all flex items-center gap-1.5 border border-[#2b374d]"
-                              >
-                                <span className="material-symbols-outlined text-[16px]">refresh</span> Relancer
-                              </button>
-                            )}
+                            </div>
                           </div>
                         </div>
                       ))}
