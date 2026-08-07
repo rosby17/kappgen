@@ -56,13 +56,23 @@ def health_check():
 
 @app.get("/api/db-status")
 def get_db_status():
-    from src.config import DATABASE_URL, SUPABASE_URL
+    from src.config import DATABASE_URL
+    from urllib.parse import urlparse
+
     is_postgres = "postgresql" in DATABASE_URL or "postgres" in DATABASE_URL
+    if is_postgres:
+        parsed = urlparse(DATABASE_URL)
+        db_name = parsed.path.lstrip('/') or "nichecut"
+        host = f"{parsed.hostname}:{parsed.port}" if parsed.port else (parsed.hostname or "VPS")
+        service = f"PostgreSQL Dedicated ({db_name})"
+    else:
+        host = "data/app.db"
+        service = "Local SQLite"
+
     return {
         "status": "connected",
         "engine": "postgresql" if is_postgres else "sqlite",
-        "service_name": "Supabase PostgreSQL (Self-Hosted VPS rooseveltvps)" if is_postgres else "Local SQLite",
-        "supabase_url": SUPABASE_URL or "https://bd.izivoice.app",
-        "database_host": "31.97.118.192:5432" if is_postgres else "local file data/app.db",
+        "service_name": service,
+        "database_host": host,
         "tables": ["users", "channels", "videos"]
     }
