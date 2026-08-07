@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Env secrets
+.env
+
+# Local SQLite DB
+data/*.db
+data/*.db-journal
+
+# Generated media / user uploads (kept locally, not versioned)
+storage/uploads/*
+storage/channels/*
+storage/test_phase0_output/
+!storage/uploads/.gitkeep
+!storage/channels/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store

@@ -1,0 +1,47 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+body {
+  background-color: #131313;
+  color: #e5e2e1;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.bg-level-1 {
+  background-color: #1c1b1b;
+  border: 1px solid #2a2a2a;
+}
+
+.bg-level-2 {
+  background-color: #201f1f;
+  border: 1px solid #353534;
+}
+
+.glass-panel {
+  background-color: #201f1f;
+  border: 1px solid #353534;
+}
+
+.focus-glow:focus-within {
+  box-shadow: 0 0 0 2px rgba(146, 217, 255, 0.2);
+  border-color: #92d9ff;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #131313;
+}
+::-webkit-scrollbar-thumb {
+  background: #353534;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #474746;
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}

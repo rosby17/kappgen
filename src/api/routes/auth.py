@@ -1,0 +1,61 @@
+import hashlib
+import os
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from src.db.session import get_db
+from src.db.models import User
+from src.models.project import UserCreate, UserLogin, UserResponse
+
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return f"{salt.hex()}:{key.hex()}"
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        parts = hashed_password.split(':')
+        if len(parts) != 2:
+            return False
+        salt_hex, key_hex = parts[0], parts[1]
+        salt = bytes.fromhex(salt_hex)
+        key = hashlib.pbkdf2_hmac('sha256', plain_password.encode('utf-8'), salt, 100000)
+        return key.hex() == key_hex
+    except Exception:
+        return False
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register_user(payload: UserCreate, db: Session = Depends(get_db)):
+    email_clean = payload.email.strip().lower()
+    if not email_clean:
+        raise HTTPException(status_code=400, detail="L'adresse email est requise.")
+        
+    existing = db.query(User).filter(User.email == email_clean).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Un compte existe déjà avec cette adresse email.")
+        
+    user = User(
+        email=email_clean,
+        name=payload.name.strip() if payload.name else "Créateur NicheCut",
+        hashed_password=hash_password(payload.password)
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user.to_dict()
+
+@router.post("/login")
+def login_user(payload: UserLogin, db: Session = Depends(get_db)):
+    email_clean = payload.email.strip().lower()
+    user = db.query(User).filter(User.email == email_clean).first()
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect.")
+    return user.to_dict()
+
+@router.get("/me/{user_id}")
+def get_user_profile(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
+    return user.to_dict()
