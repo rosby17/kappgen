@@ -985,15 +985,15 @@ export default function App() {
                             key={vid.id} 
                             className="bg-[#161b22] hover:bg-[#1c232e] border border-[#263042] hover:border-[#00c2ff]/40 rounded-2xl p-4 transition-all group flex flex-col justify-between shadow-lg relative card-warm-hover"
                           >
-                            {/* Video Poster Frame (9:16 Aspect Ratio) */}
+                            {/* Video Poster Frame (16:9 Aspect Ratio) */}
                             <div 
                               onClick={() => vid.status === 'done' && setSelectedVideo(vid)}
-                              className={`aspect-[9/16] bg-slate-950 rounded-xl relative overflow-hidden border border-[#2b374d] flex items-center justify-center ${vid.status === 'done' ? 'cursor-pointer group' : ''}`}
+                              className={`aspect-[16/9] bg-slate-950 rounded-xl relative overflow-hidden border border-[#2b374d] flex items-center justify-center ${vid.status === 'done' ? 'cursor-pointer group' : ''}`}
                             >
-                              {vid.status === 'done' && vid.output_video_path ? (
+                              {vid.status === 'done' && vid.output_path ? (
                                 <>
                                   <video 
-                                    src={`${STORAGE_BASE}/${vid.output_video_path}`}
+                                    src={`${STORAGE_BASE}/${vid.output_path?.replace('storage/', '')}`}
                                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                                     preload="metadata"
                                   />
@@ -1163,15 +1163,15 @@ export default function App() {
                           key={vid.id} 
                           className="bg-[#161b22] hover:bg-[#1c232e] border border-[#263042] hover:border-[#00c2ff]/40 rounded-2xl p-4 transition-all group flex flex-col justify-between shadow-lg relative card-warm-hover"
                         >
-                          {/* Thumbnail Poster (9:16 Aspect Ratio) */}
+                          {/* Thumbnail Poster (16:9 Aspect Ratio) */}
                           <div 
                             onClick={() => vid.status === 'done' && setSelectedVideo(vid)}
-                            className={`aspect-[9/16] bg-slate-950 rounded-xl relative overflow-hidden border border-[#2b374d] flex items-center justify-center ${vid.status === 'done' ? 'cursor-pointer group' : ''}`}
+                            className={`aspect-[16/9] bg-slate-950 rounded-xl relative overflow-hidden border border-[#2b374d] flex items-center justify-center ${vid.status === 'done' ? 'cursor-pointer group' : ''}`}
                           >
-                            {vid.status === 'done' && vid.output_video_path ? (
+                            {vid.status === 'done' && vid.output_path ? (
                               <>
                                 <video 
-                                  src={`${STORAGE_BASE}/${vid.output_video_path}`}
+                                  src={`${STORAGE_BASE}/${vid.output_path?.replace('storage/', '')}`}
                                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                                   preload="metadata"
                                 />
