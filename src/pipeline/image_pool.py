@@ -82,18 +82,33 @@ def generate_fallback_image(path: Path, index: int, label: str = "Nichecut Scene
     img.save(path, quality=95)
     logger.info(f"Generated artistic fallback image: {path}")
 
-def get_image_pool(image_dir: Path, required_count: int) -> List[Path]:
+def get_image_pool(image_dir: Path, required_count: int, custom_library_path: str = None) -> List[Path]:
     """
-    Retrieves available images from `image_dir` or assets library. If insufficient, generates artistic fallback images.
-    Returns a shuffled list of images matching required_count.
+    Retrieves available images from (in priority order): the client-provided local
+    image folder (`custom_library_path`, set per-channel in image_style.library_path),
+    the current render's own image dir, or the shared assets library. If none have
+    images, generates artistic fallback images. Returns a shuffled list of images
+    matching required_count.
     """
     image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
     existing_images = []
-    
+
+    # Client-provided local image folder (highest priority — this is "their own" library)
+    if custom_library_path:
+        custom_dir = Path(custom_library_path).expanduser()
+        if custom_dir.is_dir():
+            custom_images = [f for f in custom_dir.iterdir() if f.suffix.lower() in image_extensions]
+            if custom_images:
+                existing_images.extend(custom_images)
+            else:
+                logger.warning(f"Configured library_path '{custom_dir}' contains no supported images ({image_extensions}).")
+        else:
+            logger.warning(f"Configured library_path '{custom_dir}' does not exist or is not a directory.")
+
     # Check custom channel image dir
     if image_dir.exists():
-        existing_images = [f for f in image_dir.iterdir() if f.suffix.lower() in image_extensions and not f.name.startswith("subtitled_")]
-        
+        existing_images.extend([f for f in image_dir.iterdir() if f.suffix.lower() in image_extensions and not f.name.startswith("subtitled_")])
+
     # Check general assets library directory
     library_dir = ASSETS_PATH / "images" / "library"
     if library_dir.exists():

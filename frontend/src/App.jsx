@@ -234,9 +234,11 @@ export default function App() {
     const rendering = channel.rendering_count || 0;
     const queued = channel.queued_count || 0;
     const done = channel.done_count || 0;
+    const failed = channel.failed_count || 0;
     if (rendering > 0) return { label: 'Rendu en cours', className: 'bg-blue-950 text-blue-300 border border-blue-800 animate-pulse' };
     if (queued > 0) return { label: 'En file d\'attente', className: 'bg-yellow-950 text-yellow-300 border border-yellow-800' };
     if (done > 0) return { label: 'Prêt', className: 'bg-emerald-950 text-emerald-300 border border-emerald-800' };
+    if (failed > 0) return { label: 'Échec de rendu', className: 'bg-red-950 text-red-300 border border-red-800' };
     return { label: 'Aucune vidéo', className: 'bg-surface-container-high text-on-surface-variant border border-surface-container-highest' };
   };
 
@@ -371,11 +373,11 @@ export default function App() {
             Home
           </button>
 
-          <button 
+          <button
             onClick={() => setView('dashboard')}
-            className={`w-full flex items-center gap-3 px-4 py-3 cursor-pointer rounded-xl transition-all ${view === 'channel_detail' ? 'bg-primary-container text-on-primary-container font-bold' : 'text-on-surface-variant hover:bg-surface-container-high'}`}
+            className={`w-full flex items-center gap-3 px-4 py-3 cursor-pointer rounded-xl transition-all ${(view === 'dashboard' || view === 'channel_detail') ? 'bg-primary-container text-on-primary-container font-bold' : 'text-on-surface-variant hover:bg-surface-container-high'}`}
           >
-            <span className="material-symbols-outlined" style={{ fontVariationSettings: view === 'channel_detail' ? "'FILL' 1" : "'FILL' 0" }}>subscriptions</span>
+            <span className="material-symbols-outlined" style={{ fontVariationSettings: (view === 'dashboard' || view === 'channel_detail') ? "'FILL' 1" : "'FILL' 0" }}>subscriptions</span>
             Mes Chaînes
           </button>
 
@@ -808,15 +810,39 @@ export default function App() {
                       <h3 className="font-headline-md text-headline-md text-on-surface mb-4">Style Visuel & Effets</h3>
                       <div>
                         <label className="block font-label-bold text-on-surface-variant mb-2">Source d'Images</label>
-                        <select 
+                        <select
                           value={newChannel.image_style.source}
                           onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, source: e.target.value } })}
                           className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
                         >
-                          <option value="library">Bibliothèque / Banques d'Images Locales</option>
-                          <option value="ai_generated">Génération IA Automatique (Prompts per-segment)</option>
+                          <option value="library">Dossier Local (mes propres images)</option>
+                          <option value="ai_generated">Génération IA Automatique (payant, par segment)</option>
                         </select>
                       </div>
+
+                      {newChannel.image_style.source === 'library' ? (
+                        <div>
+                          <label className="block font-label-bold text-on-surface-variant mb-2">Chemin du dossier d'images local</label>
+                          <input
+                            value={newChannel.image_style.library_path || ''}
+                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, library_path: e.target.value } })}
+                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none font-mono text-sm"
+                            placeholder="/Users/moi/Images/ma-chaine"
+                          />
+                          <p className="text-xs text-on-surface-variant mt-2">Chemin absolu, sur la machine qui exécute NicheCut, vers un dossier contenant vos images (JPG, PNG, WEBP). Laissez vide pour utiliser la bibliothèque par défaut.</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block font-label-bold text-on-surface-variant mb-2">Style / ambiance des images générées</label>
+                          <input
+                            value={newChannel.image_style.style_prompt || ''}
+                            onChange={e => setNewChannel({ ...newChannel, image_style: { ...newChannel.image_style, style_prompt: e.target.value } })}
+                            className="w-full bg-surface border border-surface-container-highest rounded-xl px-4 py-3 text-on-surface focus:border-primary-container outline-none"
+                            placeholder="cinematic dramatic lighting, high detail"
+                          />
+                          <p className="text-xs text-on-surface-variant mt-2">Chaque image de la vidéo est générée automatiquement via IA (ai33.pro) — des crédits sont consommés à chaque vidéo générée.</p>
+                        </div>
+                      )}
                     </div>
                   )}
 
