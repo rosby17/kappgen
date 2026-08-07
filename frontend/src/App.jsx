@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const API_BASE = "http://localhost:8000/api";
-const STORAGE_BASE = "http://localhost:8000/storage";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000/api";
+const STORAGE_BASE = import.meta.env.VITE_STORAGE_BASE || "http://localhost:8000/storage";
 
 // Preset Subtitle Styles
 const SUBTITLE_PRESETS = [
