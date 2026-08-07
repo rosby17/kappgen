@@ -81,6 +81,17 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [videoFilterChannelId, setVideoFilterChannelId] = useState('all');
+  const [toast, setToast] = useState(null); // { message, type: 'success' | 'error' }
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+  };
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   // Karaoke Animation Preview Index
   const [previewWordIndex, setPreviewWordIndex] = useState(0);
@@ -114,9 +125,6 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [resetSuccessMsg, setResetSuccessMsg] = useState('');
 
-  // Profile Settings Form State
-  const [profileTab, setProfileTab] = useState('database');
-  const [passwordForm, setPasswordForm] = useState({ old_password: '', new_password: '', confirm_password: '' });
 
   // Submission Form State (Nouvelle Vidéo)
   const [submitMode, setSubmitMode] = useState('text'); // 'text' | 'audio_upload'
@@ -450,13 +458,13 @@ export default function App() {
         fetchChannelVideos(activeChannel.id);
         fetchChannels();
         fetchAllVideos();
-        alert("Vidéo soumise avec succès ! Le montage et le rendu sont lancés.");
+        showToast("Vidéo soumise avec succès — le montage et le rendu sont lancés.", "success");
       } else {
         const err = await res.json();
-        alert(err.detail || "Erreur lors de l'envoi.");
+        showToast(err.detail || "Erreur lors de l'envoi.", "error");
       }
     } catch (e) {
-      alert("Erreur réseau: " + e.message);
+      showToast("Erreur réseau: " + e.message, "error");
     } finally {
       setLoading(false);
     }
@@ -709,7 +717,7 @@ export default function App() {
                       Générateur de Vidéo Automatisé
                     </h3>
                     <p className="text-sm text-slate-400">
-                      Générez une vidéo Shorts / TikTok / Reels complète avec sous-titres karaoké, voix off IA et montage visuel en 1 clic.
+                      Générez une vidéo YouTube longue durée (16:9) complète avec sous-titres karaoké, voix off IA et montage visuel en 1 clic.
                     </p>
                   </div>
                   <button
@@ -858,18 +866,6 @@ export default function App() {
                                     <span className="material-symbols-outlined text-[16px] text-[#00c2ff]">edit</span>
                                     Modifier la chaîne
                                   </button>
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setOpenChannelMenuId(null);
-                                      setActiveChannel(chan);
-                                      setShowSubmitModal(true);
-                                    }}
-                                    className="w-full text-left px-4 py-2.5 text-xs text-slate-200 hover:bg-[#2c394e] hover:text-white flex items-center gap-2 font-medium"
-                                  >
-                                    <span className="material-symbols-outlined text-[16px] text-emerald-400">add_circle</span>
-                                    Nouvelle vidéo
-                                  </button>
                                   <div className="h-[1px] bg-[#2d3a52] my-1"></div>
                                   <button
                                     onClick={(e) => handleDeleteChannel(chan.id, e)}
@@ -902,17 +898,20 @@ export default function App() {
                             </div>
                           </div>
 
-                          {/* Action Footer */}
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setActiveChannel(chan); setShowSubmitModal(true); }}
-                            className="mt-4 w-full py-2.5 bg-[#1f2736] text-white rounded-xl font-bold text-xs hover:bg-[#00c2ff] hover:text-slate-950 transition-all flex items-center justify-center gap-2 border border-[#2b374d]"
-                          >
-                            <span className="material-symbols-outlined text-[16px]">video_call</span>
-                            Générer une Vidéo
-                          </button>
                         </div>
                       );
                     })}
+
+                    {/* Add Channel Card — single entry point to create a channel */}
+                    <button
+                      onClick={openCreateWizard}
+                      className="rounded-2xl p-5 border-2 border-dashed border-[#2b374d] hover:border-[#00c2ff] hover:bg-[#161b22] transition-all flex flex-col items-center justify-center gap-3 min-h-[220px] text-slate-400 hover:text-[#00c2ff] group"
+                    >
+                      <div className="w-14 h-14 rounded-full bg-[#1b2230] group-hover:bg-[#00c2ff]/10 flex items-center justify-center transition-colors">
+                        <span className="material-symbols-outlined text-[28px]">add</span>
+                      </div>
+                      <span className="font-bold text-sm">Ajouter une Chaîne</span>
+                    </button>
                   </div>
                 )}
               </section>
@@ -1531,31 +1530,33 @@ export default function App() {
                   </div>
                 )}
 
-                {/* STEP 5: APERÇU FINAL DU DESIGN VIDÉO (LIVE 9:16 MOCKUP PREVIEW) */}
+                {/* STEP 5: APERÇU FINAL DU DESIGN VIDÉO (LIVE 16:9 LANDSCAPE PREVIEW) */}
                 {wizardStep === 5 && (
                   <div className="space-y-6">
                     <div className="flex justify-between items-center">
                       <div>
                         <h3 className="text-base font-bold text-white">5. Aperçu Final du Layout & Design Vidéo</h3>
-                        <p className="text-xs text-slate-400 mt-0.5">Voici le rendu final simulé du format vertical 9:16 Shorts / Reels / TikTok.</p>
+                        <p className="text-xs text-slate-400 mt-0.5">Voici le rendu final simulé — format vidéo longue durée 16:9 (YouTube).</p>
                       </div>
-                      <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/80 px-3 py-1 rounded-lg border border-emerald-800">Format 9:16 Vertical</span>
+                      <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/80 px-3 py-1 rounded-lg border border-emerald-800">Format 16:9 Paysage</span>
                     </div>
 
-                    {/* Live 9:16 Vertical Smartphone Mockup Preview */}
+                    {/* Live 16:9 Landscape Video Mockup Preview */}
                     <div className="flex justify-center">
-                      <div className="w-[280px] h-[500px] bg-slate-950 rounded-[32px] border-4 border-[#2b374d] relative overflow-hidden shadow-2xl flex flex-col justify-between p-4">
-                        
-                        {/* Background Scene Visual (Simulated Stoic/Ancient background scene) */}
-                        <div className="absolute inset-0 bg-gradient-to-b from-slate-900 via-sky-950 to-slate-950 flex items-center justify-center">
-                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,194,255,0.2),transparent_70%)]"></div>
-                          <div className="text-center opacity-30">
-                            <span className="material-symbols-outlined text-[96px] text-[#00c2ff]">image</span>
-                            <div className="text-xs font-mono text-white mt-1">
-                              {newChannel.image_style.source === 'library' ? (selectedFolderName ? `Dossier: ${selectedFolderName}` : 'Images Locales') :
-                               newChannel.image_style.source === 'hybrid' ? 'Mode Hybride (Dossier + IA)' : 'Scènes générées par IA'}
-                            </div>
-                          </div>
+                      <div className="w-full max-w-[640px] aspect-[16/9] bg-slate-950 rounded-2xl border-4 border-[#2b374d] relative overflow-hidden shadow-2xl flex flex-col justify-between p-5">
+
+                        {/* Background Scene Visual — real example of a generated/library image */}
+                        <div className="absolute inset-0">
+                          <img
+                            src={`${STORAGE_BASE}/examples/example_scene.png`}
+                            alt="Exemple de scène générée"
+                            className="w-full h-full object-cover opacity-80"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30"></div>
+                        </div>
+                        <div className="absolute top-3 left-3 z-20 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-lg text-[10px] font-mono text-slate-300 border border-white/10">
+                          Exemple: {newChannel.image_style.source === 'library' ? (selectedFolderName ? `Dossier: ${selectedFolderName}` : 'Images Locales') :
+                           newChannel.image_style.source === 'hybrid' ? 'Mode Hybride (Dossier + IA)' : 'Scènes générées par IA'}
                         </div>
 
                         {/* Top Header Bar inside Mockup */}
@@ -1568,12 +1569,12 @@ export default function App() {
                                 {newChannel.name ? newChannel.name.slice(0, 1) : 'N'}
                               </div>
                             )}
-                            <span className="font-bold text-[11px] truncate max-w-[100px]">{newChannel.name || 'Nom Chaîne'}</span>
+                            <span className="font-bold text-[11px] truncate max-w-[160px]">{newChannel.name || 'Nom Chaîne'}</span>
                           </div>
 
                           {/* Watermark Tag Overlay */}
                           {newChannel.branding.channel_name_text && (
-                            <div 
+                            <div
                               style={{ opacity: newChannel.branding.watermark_opacity || 0.85 }}
                               className="bg-black/60 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-slate-200 border border-white/20"
                             >
@@ -1583,10 +1584,10 @@ export default function App() {
                         </div>
 
                         {/* Bottom Section: Karaoke Subtitles & Music Badge inside Mockup */}
-                        <div className="relative z-20 space-y-4 mb-2">
-                          
+                        <div className="relative z-20 space-y-3">
+
                           {/* Animated Karaoké Subtitle Rendering */}
-                          <div 
+                          <div
                             style={{
                               backgroundColor: newChannel.subtitle_style.box_color || 'transparent',
                               padding: '8px 12px',
@@ -1599,10 +1600,10 @@ export default function App() {
                                 key={i}
                                 style={{
                                   fontFamily: newChannel.subtitle_style.font,
-                                  fontSize: `${(newChannel.subtitle_style.size || 44) * 0.35}px`,
+                                  fontSize: `${(newChannel.subtitle_style.size || 44) * 0.45}px`,
                                   fontWeight: '900',
                                   color: wordObj.highlight ? (newChannel.subtitle_style.color || '#FFD700') : '#FFFFFF',
-                                  textShadow: wordObj.highlight 
+                                  textShadow: wordObj.highlight
                                     ? `0 0 12px ${newChannel.subtitle_style.color || '#FFD700'}, 0 2px 4px rgba(0,0,0,0.9)`
                                     : '0 2px 4px rgba(0,0,0,0.9)',
                                   transform: wordObj.highlight ? 'scale(1.08)' : 'scale(1)',
@@ -1896,55 +1897,13 @@ export default function App() {
               </button>
             </div>
 
-            {/* Settings Tabs */}
-            <div className="flex border-b border-[#263042] gap-4">
-              <button
-                onClick={() => setProfileTab('database')}
-                className={`pb-2.5 text-xs font-bold transition-all border-b-2 ${
-                  profileTab === 'database' ? 'border-[#00c2ff] text-[#00c2ff]' : 'border-transparent text-slate-400'
-                }`}
-              >
-                Base de données & VPS
-              </button>
-              <button
-                onClick={() => setProfileTab('security')}
-                className={`pb-2.5 text-xs font-bold transition-all border-b-2 ${
-                  profileTab === 'security' ? 'border-[#00c2ff] text-[#00c2ff]' : 'border-transparent text-slate-400'
-                }`}
-              >
-                Sécurité & Compte
-              </button>
+            <div className="space-y-4">
+              <h4 className="text-sm font-bold text-white font-mono">Informations du Compte</h4>
+              <div className="text-xs text-slate-400 space-y-1">
+                <p>Nom: <strong className="text-white">{currentUser.name}</strong></p>
+                <p>Email: <strong className="text-white">{currentUser.email}</strong></p>
+              </div>
             </div>
-
-            {profileTab === 'database' && (
-              <div className="space-y-4">
-                <h4 className="text-sm font-bold text-white">Statut du Serveur Supabase VPS</h4>
-                <div className="bg-[#11151c] p-4 rounded-xl border border-[#202938] space-y-2 text-xs font-mono">
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Statut:</span>
-                    <span className="text-emerald-400 font-bold">● Connecté</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Service:</span>
-                    <span className="text-white">{dbInfo.service_name}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Hôte:</span>
-                    <span className="text-white">{dbInfo.database_host}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {profileTab === 'security' && (
-              <div className="space-y-4">
-                <h4 className="text-sm font-bold text-white font-mono">Informations du Compte</h4>
-                <div className="text-xs text-slate-400 space-y-1">
-                  <p>Nom: <strong className="text-white">{currentUser.name}</strong></p>
-                  <p>Email: <strong className="text-white">{currentUser.email}</strong></p>
-                </div>
-              </div>
-            )}
 
             <div className="pt-4 border-t border-[#263042] flex justify-between items-center">
               <button
@@ -1990,6 +1949,25 @@ export default function App() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* TOAST NOTIFICATION */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-[100] animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <div className={`flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-2xl border max-w-md ${
+            toast.type === 'error'
+              ? 'bg-rose-950 border-rose-800 text-rose-200'
+              : 'bg-emerald-950 border-emerald-800 text-emerald-200'
+          }`}>
+            <span className="material-symbols-outlined text-[20px]">
+              {toast.type === 'error' ? 'error' : 'check_circle'}
+            </span>
+            <span className="text-sm font-medium">{toast.message}</span>
+            <button onClick={() => setToast(null)} className="ml-2 opacity-70 hover:opacity-100">
+              <span className="material-symbols-outlined text-[16px]">close</span>
+            </button>
           </div>
         </div>
       )}
