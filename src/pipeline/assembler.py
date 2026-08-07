@@ -81,21 +81,32 @@ def assemble_final_video(
     else:
         cmd.extend(["-vf", vf_string, "-map", "0:v", "-map", "1:a"])
 
+    # Encode to a temp file first and atomically rename into place only on success.
+    # Prevents a killed/crashed process (e.g. server restart mid-render) from leaving
+    # a truncated MP4 (missing moov atom) sitting at output_path with status "done".
+    temp_output_path = output_path.with_name(f".{output_path.stem}.part.mp4")
+
     cmd.extend([
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "20",
         "-c:a", "aac",
         "-b:a", "192k",
+        "-movflags", "+faststart",
         "-shortest",
-        str(output_path)
+        str(temp_output_path)
     ])
-    
+
     logger.info("Assembling final MP4 video with FFmpeg...")
-    run_ffmpeg(cmd)
-    
+    try:
+        run_ffmpeg(cmd)
+        os.replace(temp_output_path, output_path)
+    finally:
+        if temp_output_path.exists():
+            temp_output_path.unlink()
+
     if concat_list_file.exists():
         concat_list_file.unlink()
-        
+
     logger.info(f"Final video successfully generated: {output_path}")
     return output_path

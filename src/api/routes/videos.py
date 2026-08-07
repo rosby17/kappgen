@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Form, File, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import Channel, Video
@@ -117,6 +118,22 @@ def retry_video(video_id: str, background_tasks: BackgroundTasks, db: Session = 
     db.refresh(video)
     
     background_tasks.add_task(process_single_queued_video)
+    return video.to_dict()
+
+class VideoRename(BaseModel):
+    title: str
+
+@router.patch("/{video_id}")
+def rename_video(video_id: str, payload: VideoRename, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Le titre ne peut pas être vide.")
+    video.script_text = title
+    db.commit()
+    db.refresh(video)
     return video.to_dict()
 
 @router.delete("/{video_id}")
