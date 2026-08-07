@@ -1199,7 +1199,7 @@ export default function App() {
 
                 {/* Steps Timeline Indicator */}
                 <div className="grid grid-cols-5 gap-2">
-                  {['Identité', 'Sous-titres', 'Branding', 'Musique', 'Visuels & IA'].map((label, idx) => {
+                  {['Identité', 'Sous-titres', 'Musique', 'Visuels', 'Aperçu Final'].map((label, idx) => {
                     const stepNum = idx + 1;
                     const isActive = wizardStep === stepNum;
                     const isPassed = wizardStep > stepNum;
@@ -1219,10 +1219,10 @@ export default function App() {
                   })}
                 </div>
 
-                {/* STEP 1: INFORMATIONS GÉNÉRALES */}
+                {/* STEP 1: INFORMATIONS GÉNÉRALES & IDENTITÉ (CONTIENT LOGO, NOM & FILIGRANE) */}
                 {wizardStep === 1 && (
                   <div className="space-y-6">
-                    <h3 className="text-base font-bold text-white">1. Informations Générales & Niche</h3>
+                    <h3 className="text-base font-bold text-white">1. Identité de la Chaîne & Filigrane</h3>
                     
                     <div>
                       <label className="block text-xs font-bold text-slate-300 mb-2">Photo / Logo de la chaîne</label>
@@ -1257,34 +1257,77 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div>
-                      <label className="block text-xs font-bold text-slate-300 mb-2">Nom de la chaîne YouTube / TikTok</label>
-                      <input
-                        value={newChannel.name}
-                        onChange={e => setNewChannel({ ...newChannel, name: e.target.value })}
-                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
-                        placeholder="Ex: Stoic Mind Daily"
-                      />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Nom de la chaîne YouTube / TikTok</label>
+                        <input
+                          value={newChannel.name}
+                          onChange={e => setNewChannel({ ...newChannel, name: e.target.value })}
+                          className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
+                          placeholder="Ex: Stoic Mind Daily"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-300 mb-2">Niche de contenu</label>
+                        <select 
+                          value={newChannel.niche}
+                          onChange={e => setNewChannel({ ...newChannel, niche: e.target.value })}
+                          className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
+                        >
+                          <option value="Philosophie & Stoïcisme">Philosophie & Stoïcisme</option>
+                          <option value="Spiritualité & Méditation">Spiritualité & Méditation</option>
+                          <option value="Religion & Récits Antiquité">Religion & Récits Antiquité</option>
+                          <option value="Développement Personnel">Développement Personnel</option>
+                          <option value="Histoires & Récits Captivants">Histoires & Récits Captivants</option>
+                        </select>
+                      </div>
                     </div>
 
-                    <div>
-                      <label className="block text-xs font-bold text-slate-300 mb-2">Niche de contenu</label>
-                      <select 
-                        value={newChannel.niche}
-                        onChange={e => setNewChannel({ ...newChannel, niche: e.target.value })}
-                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
-                      >
-                        <option value="Philosophie & Stoïcisme">Philosophie & Stoïcisme</option>
-                        <option value="Spiritualité & Méditation">Spiritualité & Méditation</option>
-                        <option value="Religion & Récits Antiquité">Religion & Récits Antiquité</option>
-                        <option value="Développement Personnel">Développement Personnel</option>
-                        <option value="Histoires & Récits Captivants">Histoires & Récits Captivants</option>
-                      </select>
+                    {/* Branding Filigrane Integrated in Step 1 */}
+                    <div className="pt-4 border-t border-[#263042] space-y-4">
+                      <label className="block text-xs font-bold text-[#00c2ff]">Filigrane de Marque / Watermark Overlay</label>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-300 mb-1">Texte Filigrane (@Handle)</label>
+                          <input 
+                            value={newChannel.branding.channel_name_text}
+                            onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, channel_name_text: e.target.value } })}
+                            className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-3 py-2 text-xs text-white focus:border-[#00c2ff] outline-none"
+                            placeholder="ex: @StoicMindDaily"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-300 mb-1">Position</label>
+                          <select
+                            value={newChannel.branding.watermark_position || 'top_right'}
+                            onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, watermark_position: e.target.value } })}
+                            className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-3 py-2 text-xs text-white focus:border-[#00c2ff] outline-none"
+                          >
+                            <option value="top_right">Haut Droite</option>
+                            <option value="bottom_right">Bas Droite</option>
+                            <option value="top_left">Haut Gauche</option>
+                            <option value="bottom_left">Bas Gauche</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-300 mb-1">Opacité ({Math.round((newChannel.branding.watermark_opacity || 0.85) * 100)}%)</label>
+                          <input
+                            type="range"
+                            min="0.2"
+                            max="1.0"
+                            step="0.05"
+                            value={newChannel.branding.watermark_opacity || 0.85}
+                            onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, watermark_opacity: parseFloat(e.target.value) } })}
+                            className="w-full accent-[#00c2ff]"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
 
-                {/* STEP 2: SOUS-TITRES & KARAOKÉ ASS (ENHANCED PERSONALIZATION & LIVE PREVIEW) */}
+                {/* STEP 2: SOUS-TITRES & KARAOKÉ ASS */}
                 {wizardStep === 2 && (
                   <div className="space-y-6">
                     <div className="flex justify-between items-center">
@@ -1366,99 +1409,13 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-
-                    {/* Interactive Animated Preview Box */}
-                    <div className="mt-4">
-                      <label className="block text-xs font-bold text-slate-300 mb-2">Aperçu vidéo & Karaoké en temps réel</label>
-                      <div className="w-full h-52 rounded-2xl bg-gradient-to-b from-[#0e131d] to-[#05070a] border border-[#263042] relative flex flex-col items-center justify-end pb-8 overflow-hidden shadow-inner">
-                        {/* Fake video background lighting */}
-                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,194,255,0.15),transparent_70%)]"></div>
-                        
-                        {/* Subtitle Box Render */}
-                        <div 
-                          style={{
-                            backgroundColor: newChannel.subtitle_style.box_color || 'transparent',
-                            padding: '10px 20px',
-                            borderRadius: '12px'
-                          }}
-                          className="relative z-10 flex flex-wrap justify-center items-center gap-2 px-6 text-center max-w-[90%]"
-                        >
-                          {sampleWords.map((wordObj, i) => (
-                            <span
-                              key={i}
-                              style={{
-                                fontFamily: newChannel.subtitle_style.font,
-                                fontSize: `${(newChannel.subtitle_style.size || 44) * 0.45}px`,
-                                fontWeight: '900',
-                                color: wordObj.highlight ? (newChannel.subtitle_style.color || '#FFD700') : '#FFFFFF',
-                                textShadow: wordObj.highlight 
-                                  ? `0 0 16px ${newChannel.subtitle_style.color || '#FFD700'}, 0 2px 4px rgba(0,0,0,0.9)`
-                                  : '0 2px 6px rgba(0,0,0,0.9)',
-                                transform: wordObj.highlight ? 'scale(1.1)' : 'scale(1)',
-                                transition: 'all 0.15s ease-in-out'
-                              }}
-                              className="inline-block"
-                            >
-                              {wordObj.text}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
                   </div>
                 )}
 
-                {/* STEP 3: BRANDING & OVERLAY OPTIONS (STREAMLINED & DUPES REMOVED) */}
+                {/* STEP 3: MUSIQUE DE FOND & AUDIO */}
                 {wizardStep === 3 && (
                   <div className="space-y-6">
-                    <h3 className="text-base font-bold text-white">3. Branding & Filigrane Overlay</h3>
-                    <p className="text-xs text-slate-400">Ajoutez un filigrane de votre handle ou logo pour protéger vos vidéos sur TikTok et YouTube Shorts.</p>
-
-                    <div>
-                      <label className="block text-xs font-bold text-slate-300 mb-2">Texte Filigrane (@Handle / Marque)</label>
-                      <input 
-                        value={newChannel.branding.channel_name_text}
-                        onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, channel_name_text: e.target.value } })}
-                        className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
-                        placeholder="ex: @StoicMindDaily"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-xs font-bold text-slate-300 mb-2">Position du Filigrane</label>
-                        <select
-                          value={newChannel.branding.watermark_position || 'top_right'}
-                          onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, watermark_position: e.target.value } })}
-                          className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2.5 text-xs text-white focus:border-[#00c2ff] outline-none"
-                        >
-                          <option value="top_right">Haut Droite</option>
-                          <option value="bottom_right">Bas Droite</option>
-                          <option value="top_left">Haut Gauche</option>
-                          <option value="bottom_left">Bas Gauche</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-bold text-slate-300 mb-2">Opacité ({Math.round((newChannel.branding.watermark_opacity || 0.85) * 100)}%)</label>
-                        <input
-                          type="range"
-                          min="0.2"
-                          max="1.0"
-                          step="0.05"
-                          value={newChannel.branding.watermark_opacity || 0.85}
-                          onChange={e => setNewChannel({ ...newChannel, branding: { ...newChannel.branding, watermark_opacity: parseFloat(e.target.value) } })}
-                          className="w-full accent-[#00c2ff]"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* STEP 4: MUSIQUE DE FOND & AUTO-DUCKING */}
-                {wizardStep === 4 && (
-                  <div className="space-y-6">
-                    <h3 className="text-base font-bold text-white">4. Musique de Fond Ambiante & Auto-Ducking</h3>
+                    <h3 className="text-base font-bold text-white">3. Musique de Fond Ambiante & Auto-Ducking</h3>
                     
                     <div>
                       <label className="block text-xs font-bold text-slate-300 mb-2">Ambiance Musicale</label>
@@ -1489,11 +1446,11 @@ export default function App() {
                   </div>
                 )}
 
-                {/* STEP 5: STYLE VISUEL & SOURCES D'IMAGES (OPTION A, OPTION B, OPTION C HYBRIDE) */}
-                {wizardStep === 5 && (
+                {/* STEP 4: VISUELS & SOURCES D'IMAGES (OPTION A, OPTION B, OPTION C HYBRIDE) */}
+                {wizardStep === 4 && (
                   <div className="space-y-6">
                     <div>
-                      <h3 className="text-base font-bold text-white">5. Source d'Images Visuelles & Mode de Génération</h3>
+                      <h3 className="text-base font-bold text-white">4. Source d'Images Visuelles & Mode de Génération</h3>
                       <p className="text-xs text-slate-400 mt-1">Choisissez la provenance des visuels pour votre vidéo (Dossier local, IA intégrale, ou Mode Hybride).</p>
                     </div>
 
@@ -1519,19 +1476,16 @@ export default function App() {
                           </p>
                         </div>
 
-                        {/* Folder Picker & Dropzone */}
+                        {/* Folder Picker & File Fallback Dropzone */}
                         <div
                           onDragOver={(e) => { e.preventDefault(); setIsFolderDragging(true); }}
                           onDragLeave={() => setIsFolderDragging(false)}
                           onDrop={handleFolderDrop}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (wizardFolderInputRef.current) wizardFolderInputRef.current.click();
-                          }}
                           className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all ${
                             isFolderDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-[#00c2ff] bg-[#0f1217]/60'
                           }`}
                         >
+                          {/* Folder Input - NO accept attribute so OS folder picker works reliably! */}
                           <input
                             type="file"
                             ref={wizardFolderInputRef}
@@ -1542,11 +1496,22 @@ export default function App() {
                             className="hidden"
                           />
                           <span className="material-symbols-outlined text-slate-400 text-[28px] mb-1">drive_folder_upload</span>
-                          <div className="text-xs font-bold text-white">Choisir un dossier d'images</div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">ou glisser-déposer le dossier</div>
+                          
+                          <div className="flex flex-col gap-2 mt-1">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (wizardFolderInputRef.current) wizardFolderInputRef.current.click();
+                              }}
+                              className="px-3 py-1.5 bg-[#00c2ff] text-slate-950 rounded-lg text-xs font-bold hover:bg-[#38d0ff] transition-all"
+                            >
+                              📁 Choisir un dossier d'images
+                            </button>
+                          </div>
                           
                           {localImageFiles.length > 0 && (
-                            <div className="mt-2 px-2.5 py-1 bg-emerald-950 text-emerald-300 rounded-lg text-[10px] font-bold font-mono truncate">
+                            <div className="mt-3 px-2.5 py-1 bg-emerald-950 text-emerald-300 rounded-lg text-[10px] font-bold font-mono truncate">
                               ✓ {selectedFolderName || 'Dossier'}: {localImageFiles.length} images
                             </div>
                           )}
@@ -1615,6 +1580,104 @@ export default function App() {
                         </div>
                       </div>
 
+                    </div>
+                  </div>
+                )}
+
+                {/* STEP 5: APERÇU FINAL DU DESIGN VIDÉO (LIVE 9:16 MOCKUP PREVIEW) */}
+                {wizardStep === 5 && (
+                  <div className="space-y-6">
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <h3 className="text-base font-bold text-white">5. Aperçu Final du Layout & Design Vidéo</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">Voici le rendu final simulé du format vertical 9:16 Shorts / Reels / TikTok.</p>
+                      </div>
+                      <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/80 px-3 py-1 rounded-lg border border-emerald-800">Format 9:16 Vertical</span>
+                    </div>
+
+                    {/* Live 9:16 Vertical Smartphone Mockup Preview */}
+                    <div className="flex justify-center">
+                      <div className="w-[280px] h-[500px] bg-slate-950 rounded-[32px] border-4 border-[#2b374d] relative overflow-hidden shadow-2xl flex flex-col justify-between p-4">
+                        
+                        {/* Background Scene Visual (Simulated Stoic/Ancient background scene) */}
+                        <div className="absolute inset-0 bg-gradient-to-b from-slate-900 via-sky-950 to-slate-950 flex items-center justify-center">
+                          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,194,255,0.2),transparent_70%)]"></div>
+                          <div className="text-center opacity-30">
+                            <span className="material-symbols-outlined text-[96px] text-[#00c2ff]">image</span>
+                            <div className="text-xs font-mono text-white mt-1">
+                              {newChannel.image_style.source === 'library' ? (selectedFolderName ? `Dossier: ${selectedFolderName}` : 'Images Locales') :
+                               newChannel.image_style.source === 'hybrid' ? 'Mode Hybride (Dossier + IA)' : 'Scènes générées par IA'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Top Header Bar inside Mockup */}
+                        <div className="relative z-20 flex justify-between items-center text-xs text-white">
+                          <div className="flex items-center gap-2 bg-slate-900/80 backdrop-blur-md px-2.5 py-1 rounded-full border border-slate-700">
+                            {logoPreviewUrl ? (
+                              <img src={logoPreviewUrl} alt="Logo" className="w-5 h-5 rounded-full object-cover" />
+                            ) : (
+                              <div className="w-5 h-5 rounded-full bg-[#00c2ff] text-slate-950 font-bold flex items-center justify-center text-[10px]">
+                                {newChannel.name ? newChannel.name.slice(0, 1) : 'N'}
+                              </div>
+                            )}
+                            <span className="font-bold text-[11px] truncate max-w-[100px]">{newChannel.name || 'Nom Chaîne'}</span>
+                          </div>
+
+                          {/* Watermark Tag Overlay */}
+                          {newChannel.branding.channel_name_text && (
+                            <div 
+                              style={{ opacity: newChannel.branding.watermark_opacity || 0.85 }}
+                              className="bg-black/60 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-mono text-slate-200 border border-white/20"
+                            >
+                              {newChannel.branding.channel_name_text}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Bottom Section: Karaoke Subtitles & Music Badge inside Mockup */}
+                        <div className="relative z-20 space-y-4 mb-2">
+                          
+                          {/* Animated Karaoké Subtitle Rendering */}
+                          <div 
+                            style={{
+                              backgroundColor: newChannel.subtitle_style.box_color || 'transparent',
+                              padding: '8px 12px',
+                              borderRadius: '10px'
+                            }}
+                            className="flex flex-wrap justify-center items-center gap-1.5 text-center"
+                          >
+                            {sampleWords.map((wordObj, i) => (
+                              <span
+                                key={i}
+                                style={{
+                                  fontFamily: newChannel.subtitle_style.font,
+                                  fontSize: `${(newChannel.subtitle_style.size || 44) * 0.35}px`,
+                                  fontWeight: '900',
+                                  color: wordObj.highlight ? (newChannel.subtitle_style.color || '#FFD700') : '#FFFFFF',
+                                  textShadow: wordObj.highlight 
+                                    ? `0 0 12px ${newChannel.subtitle_style.color || '#FFD700'}, 0 2px 4px rgba(0,0,0,0.9)`
+                                    : '0 2px 4px rgba(0,0,0,0.9)',
+                                  transform: wordObj.highlight ? 'scale(1.08)' : 'scale(1)',
+                                  transition: 'all 0.15s ease-in-out'
+                                }}
+                                className="inline-block"
+                              >
+                                {wordObj.text}
+                              </span>
+                            ))}
+                          </div>
+
+                          {/* Music Preference Indicator Badge */}
+                          <div className="flex justify-center">
+                            <div className="bg-black/60 backdrop-blur-md px-3 py-1 rounded-full text-[10px] text-slate-300 font-mono flex items-center gap-1.5 border border-white/10">
+                              <span className="material-symbols-outlined text-[12px] text-[#00c2ff] animate-spin">music_note</span>
+                              Musique: {newChannel.music_preference.track_id_or_style || 'Ambiant'} ({Math.round((newChannel.music_preference.volume || 0.15) * 100)}%)
+                            </div>
+                          </div>
+                        </div>
+
+                      </div>
                     </div>
                   </div>
                 )}
