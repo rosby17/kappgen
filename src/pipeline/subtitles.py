@@ -4,6 +4,31 @@ from typing import Dict, Any, List
 from PIL import Image, ImageDraw, ImageFont
 from src.utils.logger import logger
 
+def to_ass_color(color: str, default: str = "&H00FFFFFF") -> str:
+    """
+    Converts a web hex color ("#RRGGBB" or "#RGB", as produced by an HTML
+    <input type="color">) to ASS's &HAABBGGRR format. Values already in ASS
+    format (starting with &H) pass through unchanged.
+    """
+    if not color:
+        return default
+    color = color.strip()
+    if color.upper().startswith("&H"):
+        return color
+    if color.startswith("#"):
+        hex_part = color[1:]
+        if len(hex_part) == 3:
+            hex_part = "".join(c * 2 for c in hex_part)
+        if len(hex_part) == 6:
+            try:
+                r, g, b = hex_part[0:2], hex_part[2:4], hex_part[4:6]
+                int(r + g + b, 16)  # validates it's real hex
+                return f"&H00{b}{g}{r}".upper()
+            except ValueError:
+                pass
+    return default
+
+
 def format_ass_time(seconds: float) -> str:
     """Formats float seconds to ASS timestamp format (H:MM:SS.cs)."""
     hrs = int(seconds // 3600)
@@ -24,8 +49,8 @@ def generate_ass_subtitles(
     """
     font_name = style_config.get("font", "Arial")
     font_size = style_config.get("size", 44)
-    primary_color = style_config.get("color", "&H00FFFFFF")  # White
-    outline_color = style_config.get("outline_color", "&H00000000") # Black
+    primary_color = to_ass_color(style_config.get("color"), "&H00FFFFFF")  # White
+    outline_color = to_ass_color(style_config.get("outline_color"), "&H00000000")  # Black
     outline_width = style_config.get("outline_width", 3)
     position = style_config.get("position", "bottom")
     karaoke = style_config.get("karaoke", True)
