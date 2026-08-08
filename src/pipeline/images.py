@@ -8,7 +8,7 @@ from src.utils.logger import logger
 from src.pipeline.image_pool import generate_fallback_image, get_image_pool
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
-TASK_POLL_TIMEOUT_SECONDS = 180
+TASK_POLL_TIMEOUT_SECONDS = 300
 
 
 def _ai33_headers() -> Dict[str, str]:
@@ -16,12 +16,25 @@ def _ai33_headers() -> Dict[str, str]:
 
 
 def _poll_ai33_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
-    """Polls GET /v1/task/{task_id} until status is 'done' or 'error' (or timeout)."""
+    """Polls GET /v1/task/{task_id} until status is 'done' or 'error' (or timeout).
+    Transient 5xx responses from ai33.pro (observed under load) are retried rather
+    than treated as a hard failure, since the underlying task is still processing."""
     elapsed = 0.0
     while elapsed < TASK_POLL_TIMEOUT_SECONDS:
-        resp = client.get(f"{AI_IMAGE_PROVIDER_ENDPOINT}/v1/task/{task_id}", headers=_ai33_headers(), timeout=30.0)
-        resp.raise_for_status()
-        task = resp.json()
+        try:
+            resp = client.get(f"{AI_IMAGE_PROVIDER_ENDPOINT}/v1/task/{task_id}", headers=_ai33_headers(), timeout=30.0)
+            if resp.status_code >= 500:
+                logger.warning(f"ai33.pro poll for task {task_id} returned {resp.status_code}, retrying...")
+                time.sleep(TASK_POLL_INTERVAL_SECONDS)
+                elapsed += TASK_POLL_INTERVAL_SECONDS
+                continue
+            resp.raise_for_status()
+            task = resp.json()
+        except httpx.TransportError as e:
+            logger.warning(f"ai33.pro poll for task {task_id} transport error ({e}), retrying...")
+            time.sleep(TASK_POLL_INTERVAL_SECONDS)
+            elapsed += TASK_POLL_INTERVAL_SECONDS
+            continue
         status = task.get("status")
         if status == "done":
             return task
