@@ -82,6 +82,96 @@ const VOICE_MODELS = [
   { id: 'fr-FR-Claire', name: 'Claire — Douce & Inspirante', lang: 'fr-FR', desc: 'Idéal pour développement personnel' }
 ];
 
+// Custom video player styled to match the app's dark/cyan design, replacing native browser controls.
+function VideoPlayer({ src, autoPlay, className }) {
+  const videoRef = useRef(null);
+  const [isPlaying, setIsPlaying] = useState(!!autoPlay);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+
+  const togglePlay = (e) => {
+    e.stopPropagation();
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); setIsPlaying(true); } else { v.pause(); setIsPlaying(false); }
+  };
+
+  const handleSeek = (e) => {
+    e.stopPropagation();
+    const v = videoRef.current;
+    if (!v || !duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    v.currentTime = pct * duration;
+  };
+
+  const toggleMute = (e) => {
+    e.stopPropagation();
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setIsMuted(v.muted);
+  };
+
+  const toggleFullscreen = (e) => {
+    e.stopPropagation();
+    videoRef.current?.requestFullscreen?.();
+  };
+
+  const formatTime = (t) => {
+    if (!t || isNaN(t)) return '0:00';
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <div className={`relative bg-black ${className || ''}`} onClick={(e) => e.stopPropagation()}>
+      <video
+        ref={videoRef}
+        src={src}
+        autoPlay={autoPlay}
+        onClick={togglePlay}
+        onTimeUpdate={(e) => { setCurrentTime(e.target.currentTime); setProgress(e.target.duration ? (e.target.currentTime / e.target.duration) * 100 : 0); }}
+        onLoadedMetadata={(e) => setDuration(e.target.duration)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => setIsPlaying(false)}
+        className="w-full h-full object-contain cursor-pointer"
+      />
+
+      {/* Custom controls bar */}
+      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-3 pt-8 pb-2 pointer-events-none">
+        <div className="pointer-events-auto">
+          <div onClick={handleSeek} className="w-full h-1.5 bg-white/20 rounded-full cursor-pointer mb-2 group/seek">
+            <div className="h-full bg-[#00c2ff] rounded-full relative" style={{ width: `${progress}%` }}>
+              <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-[#00c2ff] rounded-full shadow-md opacity-0 group-hover/seek:opacity-100 transition-opacity"></div>
+            </div>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <button onClick={togglePlay} className="text-white hover:text-[#00c2ff] transition-colors">
+                <span className="material-symbols-outlined text-[22px]">{isPlaying ? 'pause' : 'play_arrow'}</span>
+              </button>
+              <span className="text-[10px] font-mono text-white/80">{formatTime(currentTime)} / {formatTime(duration)}</span>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <button onClick={toggleMute} className="text-white hover:text-[#00c2ff] transition-colors">
+                <span className="material-symbols-outlined text-[18px]">{isMuted ? 'volume_off' : 'volume_up'}</span>
+              </button>
+              <button onClick={toggleFullscreen} className="text-white hover:text-[#00c2ff] transition-colors">
+                <span className="material-symbols-outlined text-[18px]">fullscreen</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [channels, setChannels] = useState([]);
   const [activeChannel, setActiveChannel] = useState(null);
@@ -98,6 +188,11 @@ export default function App() {
   const [openChannelMenuId, setOpenChannelMenuId] = useState(null);
   const [openVideoMenuId, setOpenVideoMenuId] = useState(null);
   const [playingVideoId, setPlayingVideoId] = useState(null);
+  const [submitStep, setSubmitStep] = useState(1); // 1 = form, 2 = confirm/preview before launch
+
+  useEffect(() => {
+    if (showSubmitModal) setSubmitStep(1);
+  }, [showSubmitModal]);
 
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -305,6 +400,17 @@ export default function App() {
   const openCreateWizard = () => {
     resetWizardState();
     setView('wizard');
+  };
+
+  const openNewVideoFlow = () => {
+    if (channels.length === 0) {
+      openCreateWizard();
+    } else if (channels.length === 1) {
+      setActiveChannel(channels[0]);
+      setShowSubmitModal(true);
+    } else {
+      setShowChannelPickerModal(true);
+    }
   };
 
   const openEditWizard = (channel, e) => {
@@ -658,56 +764,21 @@ export default function App() {
               <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: view === 'videos' ? "'FILL' 1" : "'FILL' 0" }}>movie</span>
               Mes Vidéos
             </button>
-
-            {/* Main Action: Create Video Button */}
-            <div className="pt-4 px-1">
-              <button
-                onClick={() => {
-                  if (channels.length === 0) {
-                    openCreateWizard();
-                  } else if (channels.length === 1) {
-                    setActiveChannel(channels[0]);
-                    setShowSubmitModal(true);
-                  } else {
-                    setShowChannelPickerModal(true);
-                  }
-                }}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 cursor-pointer rounded-xl transition-all bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg shadow-emerald-500/25"
-              >
-                <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: "'FILL' 1" }}>add_circle</span>
-                Nouvelle Vidéo
-              </button>
-            </div>
           </div>
         </div>
 
-        {/* Bottom Sidebar User Profile Card (Paramètres & Profil integrated directly here) */}
-        <div className="px-3">
-          {currentUser ? (
-            <div 
-              onClick={() => setShowProfileModal(true)}
-              className="p-3 bg-[#1b2230] hover:bg-[#252f42] rounded-xl border border-[#2b374d] cursor-pointer flex items-center gap-3 transition-all group shadow-sm"
-              title="Cliquez pour ouvrir les Paramètres & Profil"
-            >
-              <div className="w-9 h-9 rounded-xl bg-[#00c2ff] text-slate-950 flex items-center justify-center font-bold text-sm flex-shrink-0 shadow-md">
-                {currentUser.name.slice(0, 1).toUpperCase()}
-              </div>
-              <div className="truncate flex-1">
-                <div className="text-xs text-white font-bold truncate group-hover:text-[#00c2ff] transition-colors">{currentUser.name}</div>
-                <div className="text-[10px] text-slate-400 truncate">{currentUser.email}</div>
-              </div>
-              <span className="material-symbols-outlined text-[18px] text-slate-400 group-hover:text-white transition-colors">settings</span>
-            </div>
-          ) : (
-            <button 
+        {/* Sidebar footer: only shown when logged out (logged-in profile now lives top-right) */}
+        {!currentUser && (
+          <div className="px-3">
+            <button
               onClick={() => setShowAuthModal(true)}
               className="w-full py-3 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-colors flex items-center justify-center gap-2 shadow-md"
             >
               <span className="material-symbols-outlined text-[18px]">account_circle</span>
               Connexion / Inscription
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </nav>
 
       {/* MAIN CONTENT AREA */}
@@ -736,6 +807,28 @@ export default function App() {
               />
             </div>
 
+            {/* Profile widget — top right */}
+            {currentUser ? (
+              <div
+                onClick={() => setShowProfileModal(true)}
+                className="flex items-center gap-2.5 pl-2 pr-3 py-1.5 bg-[#1b2230] hover:bg-[#252f42] rounded-xl border border-[#2b374d] cursor-pointer transition-all group shadow-sm"
+                title="Paramètres & Profil"
+              >
+                <div className="w-8 h-8 rounded-lg bg-[#00c2ff] text-slate-950 flex items-center justify-center font-bold text-sm flex-shrink-0 shadow-md">
+                  {currentUser.name.slice(0, 1).toUpperCase()}
+                </div>
+                <span className="text-xs text-white font-bold truncate max-w-[120px] group-hover:text-[#00c2ff] transition-colors">{currentUser.name}</span>
+                <span className="material-symbols-outlined text-[16px] text-slate-400 group-hover:text-white transition-colors">settings</span>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="py-2 px-4 bg-[#00c2ff] text-slate-950 rounded-xl font-bold text-xs hover:bg-[#38d0ff] transition-colors flex items-center gap-2 shadow-md flex-shrink-0"
+              >
+                <span className="material-symbols-outlined text-[18px]">account_circle</span>
+                Connexion
+              </button>
+            )}
           </div>
         </div>
 
@@ -810,14 +903,7 @@ export default function App() {
                     </p>
                   </div>
                   <button
-                    onClick={() => {
-                      if (channels.length > 0) {
-                        setActiveChannel(channels[0]);
-                        setShowSubmitModal(true);
-                      } else {
-                        openCreateWizard();
-                      }
-                    }}
+                    onClick={openNewVideoFlow}
                     className="px-6 py-3 bg-[#00c2ff] hover:bg-[#38d0ff] text-slate-950 font-bold text-sm rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-[#00c2ff]/20 flex-shrink-0"
                   >
                     <span className="material-symbols-outlined text-[20px]">videocam</span>
@@ -1014,10 +1100,9 @@ export default function App() {
                     <h2 className="text-xl font-extrabold text-white">Bibliothèque de Vidéos</h2>
                     <p className="text-xs text-slate-400 mt-1">Historique de tous les sujets de vidéos rendus ou en cours de traitement.</p>
                   </div>
-                  
-                  {/* Channel Filter Selector */}
+
                   <div className="flex items-center gap-3">
-                    <label className="text-xs text-slate-400 font-bold">Filtrer par chaîne:</label>
+                    {/* Channel Filter Selector */}
                     <select
                       value={videoFilterChannelId}
                       onChange={e => setVideoFilterChannelId(e.target.value)}
@@ -1028,6 +1113,14 @@ export default function App() {
                         <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
+
+                    <button
+                      onClick={openNewVideoFlow}
+                      className="px-4 py-2 bg-[#00c2ff] hover:bg-[#38d0ff] text-slate-950 font-bold text-xs rounded-xl transition-all flex items-center gap-2 shadow-md shadow-[#00c2ff]/20 flex-shrink-0"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">add</span>
+                      Nouvelle Vidéo
+                    </button>
                   </div>
                 </div>
 
@@ -1036,16 +1129,9 @@ export default function App() {
                   <div className="bg-[#161b22] border border-[#263042] rounded-2xl p-12 text-center">
                     <span className="material-symbols-outlined text-[54px] text-slate-500 mb-3">movie</span>
                     <h3 className="text-base font-bold text-white mb-1">Aucune vidéo dans l'historique</h3>
-                    <p className="text-xs text-slate-400 mb-5">Lancez une nouvelle génération depuis la barre latérale ou la liste des chaînes.</p>
+                    <p className="text-xs text-slate-400 mb-5">Lancez votre première génération de vidéo.</p>
                     <button
-                      onClick={() => {
-                        if (channels.length > 0) {
-                          setActiveChannel(channels[0]);
-                          setShowSubmitModal(true);
-                        } else {
-                          openCreateWizard();
-                        }
-                      }}
+                      onClick={openNewVideoFlow}
                       className="px-5 py-2.5 bg-[#00c2ff] text-slate-950 font-bold text-xs rounded-xl"
                     >
                       + Nouvelle Vidéo
@@ -1070,12 +1156,10 @@ export default function App() {
                             >
                               {vid.status === 'done' && vid.output_path ? (
                                 playingVideoId === vid.id ? (
-                                  <video
+                                  <VideoPlayer
                                     src={getVideoUrl(vid.output_path)}
-                                    className="w-full h-full object-cover"
-                                    controls
+                                    className="w-full h-full"
                                     autoPlay
-                                    onClick={(e) => e.stopPropagation()}
                                   />
                                 ) : (
                                   <>
@@ -1288,12 +1372,10 @@ export default function App() {
                           >
                             {vid.status === 'done' && vid.output_path ? (
                               playingVideoId === vid.id ? (
-                                <video
+                                <VideoPlayer
                                   src={getVideoUrl(vid.output_path)}
-                                  className="w-full h-full object-cover"
-                                  controls
+                                  className="w-full h-full"
                                   autoPlay
-                                  onClick={(e) => e.stopPropagation()}
                                 />
                               ) : (
                                 <>
@@ -1975,131 +2057,189 @@ export default function App() {
       </main>
 
       {/* NOUVELLE VIDÉO MAIN ACTION MODAL */}
-      {showSubmitModal && (
+      {showSubmitModal && activeChannel && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-6">
           <div className="bg-[#161b22] border border-[#263042] rounded-3xl p-8 max-w-[620px] w-full shadow-2xl space-y-6">
             <div className="flex justify-between items-center border-b border-[#263042] pb-4">
               <div>
                 <h3 className="text-lg font-extrabold text-white flex items-center gap-2">
                   <span className="material-symbols-outlined text-[#00c2ff]">movie_filter</span>
-                  Générer une Nouvelle Vidéo
+                  {submitStep === 1 ? 'Générer une Nouvelle Vidéo' : 'Aperçu avant lancement'}
                 </h3>
-                <p className="text-xs text-slate-400 mt-1">Sélectionnez le canal et le contenu pour lancer le montage.</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  {submitStep === 1 ? 'Choisissez le contenu pour lancer le montage.' : 'Vérifiez que tout est correct avant de lancer le montage.'}
+                </p>
               </div>
               <button onClick={() => setShowSubmitModal(false)} className="text-slate-400 hover:text-white p-1">
                 <span className="material-symbols-outlined">close</span>
               </button>
             </div>
 
-            {/* Target Channel Selector */}
-            <div>
-              <label className="block text-xs font-bold text-slate-300 mb-2">Chaîne Cible</label>
-              <select
-                value={activeChannel ? activeChannel.id : ''}
-                onChange={e => {
-                  const selected = channels.find(c => c.id === e.target.value);
-                  if (selected) setActiveChannel(selected);
-                }}
-                className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-3 text-sm text-white focus:border-[#00c2ff] outline-none"
-              >
-                {channels.map(c => (
-                  <option key={c.id} value={c.id}>{c.name} ({c.niche})</option>
-                ))}
-              </select>
+            {/* Active Channel (read-only — already chosen before opening this modal) */}
+            <div className="flex items-center gap-3 bg-[#11151c] border border-[#202938] rounded-2xl p-3">
+              {getChannelLogoUrl(activeChannel) ? (
+                <img src={getChannelLogoUrl(activeChannel)} alt={activeChannel.name} className="w-10 h-10 rounded-xl object-cover border border-[#2b374d]" />
+              ) : (
+                <div className="w-10 h-10 rounded-xl bg-[#00c2ff] text-slate-950 flex items-center justify-center font-bold text-sm">
+                  {activeChannel.name.slice(0, 2).toUpperCase()}
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-white truncate">{activeChannel.name}</div>
+                <div className="text-[11px] text-slate-400 truncate">{activeChannel.niche}</div>
+              </div>
             </div>
 
-            {/* Input Mode Selector */}
-            <div className="grid grid-cols-2 gap-3 bg-[#11151c] p-1.5 rounded-xl border border-[#202938]">
-              <button
-                type="button"
-                onClick={() => setSubmitMode('text')}
-                className={`py-2.5 rounded-lg text-xs font-bold transition-all ${
-                  submitMode === 'text' ? 'bg-[#00c2ff] text-slate-950 shadow-md' : 'text-slate-400'
-                }`}
-              >
-                Texte Script (Izivoice)
-              </button>
-              <button
-                type="button"
-                onClick={() => setSubmitMode('audio_upload')}
-                className={`py-2.5 rounded-lg text-xs font-bold transition-all ${
-                  submitMode === 'audio_upload' ? 'bg-[#00c2ff] text-slate-950 shadow-md' : 'text-slate-400'
-                }`}
-              >
-                Fichiers Audio Importés
-              </button>
-            </div>
+            {submitStep === 1 ? (
+              <>
+                {/* Input Mode Selector */}
+                <div className="grid grid-cols-2 gap-3 bg-[#11151c] p-1.5 rounded-xl border border-[#202938]">
+                  <button
+                    type="button"
+                    onClick={() => setSubmitMode('text')}
+                    className={`py-2.5 rounded-lg text-xs font-bold transition-all ${
+                      submitMode === 'text' ? 'bg-[#00c2ff] text-slate-950 shadow-md' : 'text-slate-400'
+                    }`}
+                  >
+                    Texte Script (IA)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSubmitMode('audio_upload')}
+                    className={`py-2.5 rounded-lg text-xs font-bold transition-all ${
+                      submitMode === 'audio_upload' ? 'bg-[#00c2ff] text-slate-950 shadow-md' : 'text-slate-400'
+                    }`}
+                  >
+                    Fichiers Audio Importés
+                  </button>
+                </div>
 
-            {/* Voice Model Selection */}
-            {submitMode === 'text' && (
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-2">Modèle de Voix Off IA</label>
-                <select
-                  value={selectedVoice}
-                  onChange={e => setSelectedVoice(e.target.value)}
-                  className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2.5 text-xs text-white focus:border-[#00c2ff] outline-none"
-                >
-                  {VOICE_MODELS.map(v => (
-                    <option key={v.id} value={v.id}>{v.name} — {v.desc}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {/* Content Input Area */}
-            {submitMode === 'text' ? (
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-2">Texte du Script</label>
-                <textarea
-                  rows="5"
-                  value={singleScriptText}
-                  onChange={e => setSingleScriptText(e.target.value)}
-                  className="w-full bg-[#1b2230] border border-[#2b374d] rounded-2xl p-4 text-xs text-white focus:border-[#00c2ff] outline-none placeholder-slate-500"
-                  placeholder="Collez ici le texte de votre vidéo. L'IA générera la voix off et calera les sous-titres karaoké..."
-                />
-              </div>
-            ) : (
-              <div
-                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current && fileInputRef.current.click()}
-                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
-                  isDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-slate-400 bg-[#11151c]'
-                }`}
-              >
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  multiple
-                  accept="audio/*"
-                  onChange={e => setAudioFilesList(prev => [...prev, ...Array.from(e.target.files)])}
-                  className="hidden"
-                />
-                <span className="material-symbols-outlined text-slate-400 text-[42px] mb-2">cloud_upload</span>
-                <div className="text-xs font-bold text-white">Glisser-déposer vos fichiers audio (.mp3, .wav)</div>
-                <div className="text-[11px] text-slate-400 mt-1">ou cliquez pour choisir des fichiers</div>
-                {audioFilesList.length > 0 && (
-                  <div className="mt-4 space-y-1">
-                    {audioFilesList.map((f, i) => (
-                      <div key={i} className="text-xs font-mono text-emerald-400 bg-emerald-950/60 p-2 rounded-lg border border-emerald-800">
-                        {f.name}
-                      </div>
-                    ))}
+                {/* Voice Model Selection */}
+                {submitMode === 'text' && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-2">Modèle de Voix Off IA</label>
+                    <select
+                      value={selectedVoice}
+                      onChange={e => setSelectedVoice(e.target.value)}
+                      className="w-full bg-[#1b2230] border border-[#2b374d] rounded-xl px-4 py-2.5 text-xs text-white focus:border-[#00c2ff] outline-none"
+                    >
+                      {VOICE_MODELS.map(v => (
+                        <option key={v.id} value={v.id}>{v.name} — {v.desc}</option>
+                      ))}
+                    </select>
                   </div>
                 )}
-              </div>
-            )}
 
-            {/* Launch Action */}
-            <button
-              onClick={handleSubjectSubmit}
-              disabled={loading}
-              className="w-full py-3.5 bg-gradient-to-r from-[#00c2ff] to-[#0088ff] text-slate-950 font-bold text-sm rounded-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#00c2ff]/25"
-            >
-              <span className="material-symbols-outlined text-[20px]">rocket_launch</span>
-              {loading ? "Chargement & Lancement..." : "Lancer le Montage"}
-            </button>
+                {/* Content Input Area */}
+                {submitMode === 'text' ? (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-2">Texte du Script</label>
+                    <textarea
+                      rows="5"
+                      value={singleScriptText}
+                      onChange={e => setSingleScriptText(e.target.value)}
+                      className="w-full bg-[#1b2230] border border-[#2b374d] rounded-2xl p-4 text-xs text-white focus:border-[#00c2ff] outline-none placeholder-slate-500"
+                      placeholder="Collez ici le texte de votre vidéo. L'IA générera la voix off et calera les sous-titres karaoké..."
+                    />
+                  </div>
+                ) : (
+                  <div
+                    onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                    onDragLeave={() => setIsDragging(false)}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                    className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                      isDragging ? 'border-[#00c2ff] bg-[#00c2ff]/10' : 'border-[#2b374d] hover:border-slate-400 bg-[#11151c]'
+                    }`}
+                  >
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      multiple
+                      accept="audio/*"
+                      onChange={e => setAudioFilesList(prev => [...prev, ...Array.from(e.target.files)])}
+                      className="hidden"
+                    />
+                    <span className="material-symbols-outlined text-slate-400 text-[42px] mb-2">cloud_upload</span>
+                    <div className="text-xs font-bold text-white">Glisser-déposer vos fichiers audio (.mp3, .wav)</div>
+                    <div className="text-[11px] text-slate-400 mt-1">ou cliquez pour choisir des fichiers</div>
+                    {audioFilesList.length > 0 && (
+                      <div className="mt-4 space-y-1">
+                        {audioFilesList.map((f, i) => (
+                          <div key={i} className="text-xs font-mono text-emerald-400 bg-emerald-950/60 p-2 rounded-lg border border-emerald-800">
+                            {f.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Go to preview step */}
+                <button
+                  onClick={() => {
+                    if (submitMode === 'text' && !singleScriptText.trim()) return showToast("Veuillez saisir le texte de votre script.", "error");
+                    if (submitMode === 'audio_upload' && audioFilesList.length === 0) return showToast("Veuillez ajouter au moins un fichier audio.", "error");
+                    setSubmitStep(2);
+                  }}
+                  className="w-full py-3.5 bg-gradient-to-r from-[#00c2ff] to-[#0088ff] text-slate-950 font-bold text-sm rounded-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#00c2ff]/25"
+                >
+                  Voir l'aperçu <span className="material-symbols-outlined text-[20px]">arrow_forward</span>
+                </button>
+              </>
+            ) : (
+              <>
+                {/* Confirmation / preview summary before launching the render */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between bg-[#11151c] border border-[#202938] rounded-xl p-3">
+                    <span className="text-xs text-slate-400">Mode</span>
+                    <span className="text-xs font-bold text-white">{submitMode === 'text' ? 'Texte Script (IA)' : 'Fichiers Audio Importés'}</span>
+                  </div>
+                  {submitMode === 'text' && (
+                    <div className="flex items-center justify-between bg-[#11151c] border border-[#202938] rounded-xl p-3">
+                      <span className="text-xs text-slate-400">Voix off</span>
+                      <span className="text-xs font-bold text-white">{VOICE_MODELS.find(v => v.id === selectedVoice)?.name || selectedVoice}</span>
+                    </div>
+                  )}
+                  <div className="bg-[#11151c] border border-[#202938] rounded-xl p-3">
+                    <div className="text-xs text-slate-400 mb-2">{submitMode === 'text' ? 'Aperçu du script' : `Fichiers audio (${audioFilesList.length})`}</div>
+                    {submitMode === 'text' ? (
+                      <p className="text-xs text-white italic line-clamp-4">"{singleScriptText}"</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {audioFilesList.map((f, i) => (
+                          <div key={i} className="text-xs font-mono text-emerald-400 bg-emerald-950/60 p-2 rounded-lg border border-emerald-800">
+                            {f.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-[#00c2ff]/10 border border-[#00c2ff]/30 rounded-xl p-3 flex items-start gap-2">
+                    <span className="material-symbols-outlined text-[#00c2ff] text-[18px]">info</span>
+                    <p className="text-[11px] text-slate-300">Le montage utilisera les réglages déjà configurés pour <strong className="text-white">{activeChannel.name}</strong> (sous-titres, musique, visuels). Vous pourrez suivre l'avancement dans "Mes Vidéos".</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setSubmitStep(1)}
+                    disabled={loading}
+                    className="flex-1 py-3 bg-[#1b2230] text-white rounded-xl font-bold text-sm hover:bg-[#252f42] transition-colors border border-[#2b374d]"
+                  >
+                    Modifier
+                  </button>
+                  <button
+                    onClick={handleSubjectSubmit}
+                    disabled={loading}
+                    className="flex-1 py-3 bg-gradient-to-r from-[#00c2ff] to-[#0088ff] text-slate-950 font-bold text-sm rounded-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#00c2ff]/25"
+                  >
+                    <span className="material-symbols-outlined text-[20px]">rocket_launch</span>
+                    {loading ? "Lancement..." : "Confirmer et Lancer"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -2115,12 +2255,11 @@ export default function App() {
               </button>
             </div>
 
-            <div className="aspect-[16/9] bg-black rounded-2xl overflow-hidden border border-[#263042]">
-              <video
+            <div className="aspect-[16/9] rounded-2xl overflow-hidden border border-[#263042]">
+              <VideoPlayer
                 src={getVideoUrl(selectedVideo.output_path)}
-                controls
+                className="w-full h-full"
                 autoPlay
-                className="w-full h-full object-contain"
               />
             </div>
 

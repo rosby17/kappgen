@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pathlib import Path
 import sys
 
@@ -10,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config import STORAGE_PATH, ASSETS_PATH
+from src.config import STORAGE_PATH
 from src.db.session import init_db
 from src.api.routes import channels, videos, auth
 
@@ -36,15 +35,6 @@ app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
 app.include_router(auth.router)
 app.include_router(channels.router)
 app.include_router(videos.router)
-
-# Mount frontend static build directory if present
-FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
-if FRONTEND_DIST.exists():
-    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="frontend_assets")
-
-    @app.get("/")
-    def serve_frontend_index():
-        return FileResponse(FRONTEND_DIST / "index.html")
 
 @app.on_event("startup")
 def on_startup():
