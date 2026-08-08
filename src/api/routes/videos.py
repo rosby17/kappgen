@@ -10,7 +10,7 @@ from src.db.session import get_db
 from src.db.models import Channel, Video
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file
-from src.config import STORAGE_PATH
+from src.config import STORAGE_PATH, AI_IMAGE_PROVIDER_API_KEY
 
 DOWNLOAD_RESOLUTIONS = {
     "sd": "854:480",
@@ -18,6 +18,36 @@ DOWNLOAD_RESOLUTIONS = {
 }
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+
+LIBRARY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+
+def validate_channel_visual_source(channel: Channel) -> None:
+    """Fail before TTS/queueing when the selected visual source cannot work."""
+    image_style = channel.image_style or {}
+    source = image_style.get("source", "library")
+    if source in {"ai_generated", "hybrid"} and not AI_IMAGE_PROVIDER_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="La génération d’images IA n’est pas configurée sur le serveur.",
+        )
+    if source in {"library", "hybrid"}:
+        library_path = str(image_style.get("library_path") or "")
+        expected_prefix = f"channels/{channel.id}/library"
+        library_dir = (STORAGE_PATH / library_path).resolve() if library_path else None
+        storage_root = STORAGE_PATH.resolve()
+        safe = library_dir is not None and (library_dir == storage_root or storage_root in library_dir.parents)
+        has_images = safe and library_path == expected_prefix and library_dir.is_dir() and any(
+            item.is_file() and item.suffix.lower() in LIBRARY_IMAGE_EXTENSIONS
+            for item in library_dir.iterdir()
+        )
+        if not has_images:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"La bibliothèque d’images de la chaîne « {channel.name} » n’est pas enregistrée sur le serveur. "
+                    "Modifiez cette chaîne et réimportez son dossier d’images avant de lancer la vidéo."
+                ),
+            )
 
 def clean_filename_title(filename: str) -> str:
     """Extracts clean video title from filename."""
@@ -36,6 +66,7 @@ async def submit_video_subject(
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    validate_channel_visual_source(channel)
         
     created_videos = []
     uploads_dir = STORAGE_PATH / "uploads"

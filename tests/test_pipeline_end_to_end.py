@@ -20,6 +20,16 @@ from src.config import STORAGE_PATH
 
 client = TestClient(app)
 
+def attach_test_library(channel_id: str, tmp_path: Path):
+    image_path = tmp_path / f"{channel_id}.png"
+    Image.new("RGB", (320, 180), "#123456").save(image_path)
+    with open(image_path, "rb") as image_file:
+        response = client.post(
+            f"/api/channels/{channel_id}/library-images",
+            files={"files": (image_path.name, image_file, "image/png")},
+        )
+    assert response.status_code == 200
+
 @pytest.fixture(autouse=True)
 def setup_database():
     init_db()
@@ -53,7 +63,7 @@ def test_user_registration_and_login():
     assert login_res.status_code == 200
     assert login_res.json()["id"] == user_id
 
-def test_channel_crud_flow():
+def test_channel_crud_flow(tmp_path):
     payload = {
         "name": "Chaîne Test Pytest",
         "niche": "Philosophie & Spiritualité",
@@ -75,6 +85,7 @@ def test_channel_crud_flow():
     assert create_res.status_code == 201
     chan_data = create_res.json()
     channel_id = chan_data["id"]
+    attach_test_library(channel_id, tmp_path)
 
     # Single video script submission
     vid_res = client.post("/api/videos", data={
@@ -94,6 +105,7 @@ def test_channel_crud_flow():
 def test_audio_upload_submission(tmp_path):
     chan_res = client.post("/api/channels", json={"name": "Audio Channel Test"})
     channel_id = chan_res.json()["id"]
+    attach_test_library(channel_id, tmp_path)
 
     dummy_audio = tmp_path / "test_voice.mp3"
     subprocess.run([
