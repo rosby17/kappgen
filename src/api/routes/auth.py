@@ -109,14 +109,21 @@ def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
     if not email_clean:
         raise HTTPException(status_code=400, detail="Aucun email associé à ce compte Google.")
 
+    picture_url = token_info.get("picture")
     user = db.query(User).filter(User.email == email_clean).first()
     if not user:
         user = User(
             email=email_clean,
             name=token_info.get("name") or email_clean.split('@')[0].capitalize(),
             hashed_password=hash_password(os.urandom(32).hex()),
+            picture_url=picture_url,
+            auth_provider="google",
         )
         db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif picture_url and user.picture_url != picture_url:
+        user.picture_url = picture_url
         db.commit()
         db.refresh(user)
     return user.to_dict()
@@ -127,4 +134,26 @@ def get_user_profile(user_id: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
+    return user.to_dict()
+
+
+class ProfileUpdate(BaseModel):
+    name: str | None = None
+    phone: str | None = None
+
+
+@router.patch("/me/{user_id}")
+def update_user_profile(user_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Le nom ne peut pas être vide.")
+        user.name = name
+    if payload.phone is not None:
+        user.phone = payload.phone.strip() or None
+    db.commit()
+    db.refresh(user)
     return user.to_dict()

@@ -12,18 +12,50 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False, default="Créateur NicheCut")
     hashed_password = Column(String(255), nullable=False)
+    picture_url = Column(String(1024), nullable=True)
+    phone = Column(String(50), nullable=True)
+    auth_provider = Column(String(50), nullable=False, default="password")  # "password" | "google"
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     channels = relationship("Channel", back_populates="user", cascade="all, delete-orphan")
+    api_keys = relationship("ApiKey", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
             "id": self.id,
             "email": self.email,
             "name": self.name,
+            "picture_url": self.picture_url,
+            "phone": self.phone,
+            "auth_provider": self.auth_provider,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "channel_count": len(self.channels) if self.channels else 0
+        }
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    name = Column(String(255), nullable=False, default="Clé API")
+    key_prefix = Column(String(16), nullable=False)  # shown in UI, e.g. "nck_ab12"
+    hashed_key = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked = Column(String(5), nullable=False, default="false")
+
+    user = relationship("User", back_populates="api_keys")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "key_prefix": self.key_prefix,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "revoked": self.revoked == "true"
         }
 
 class Channel(Base):

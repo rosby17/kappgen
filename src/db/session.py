@@ -34,12 +34,11 @@ def get_db():
         db.close()
 
 def init_db():
-    from src.db.models import User, Channel, Video, Folder  # ensure models are imported
+    from src.db.models import User, Channel, Video, Folder, ApiKey  # ensure models are imported
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration: create_all only adds missing tables, not missing
-    # columns on tables that already exist in production. Add folder_id to an
-    # already-deployed `videos` table if it predates the Folder feature.
+    # columns on tables that already exist in production.
     from sqlalchemy import inspect, text
     inspector = inspect(engine)
     if "videos" in inspector.get_table_names():
@@ -48,3 +47,16 @@ def init_db():
             logger.info("Migrating videos table: adding folder_id column.")
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE videos ADD COLUMN folder_id VARCHAR(36)"))
+
+    if "users" in inspector.get_table_names():
+        existing_user_columns = {col["name"] for col in inspector.get_columns("users")}
+        migrations = {
+            "picture_url": "ALTER TABLE users ADD COLUMN picture_url VARCHAR(1024)",
+            "phone": "ALTER TABLE users ADD COLUMN phone VARCHAR(50)",
+            "auth_provider": "ALTER TABLE users ADD COLUMN auth_provider VARCHAR(50) DEFAULT 'password'",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in migrations.items():
+                if col_name not in existing_user_columns:
+                    logger.info(f"Migrating users table: adding {col_name} column.")
+                    conn.execute(text(ddl))
