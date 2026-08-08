@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer
 from sqlalchemy.orm import relationship
 from src.db.session import Base
 from src.models.project import VideoStatus
@@ -132,6 +132,8 @@ class Video(Base):
     source_assets_path = Column(String(512), nullable=True)
     error_message = Column(Text, nullable=True)
     duration_seconds = Column(Float, nullable=True)
+    progress_stage = Column(String(255), nullable=True)
+    progress_percent = Column(Integer, nullable=False, default=0)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -152,5 +154,7 @@ class Video(Base):
             "output_path": self.output_path,
             "source_assets_path": self.source_assets_path,
             "error_message": self.error_message,
-            "duration_seconds": self.duration_seconds
+            "duration_seconds": self.duration_seconds,
+            "progress_stage": self.progress_stage,
+            "progress_percent": self.progress_percent or 0,
         }

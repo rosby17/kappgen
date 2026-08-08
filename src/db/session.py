@@ -46,6 +46,8 @@ def init_db():
         video_migrations = {
             "folder_id": "ALTER TABLE videos ADD COLUMN folder_id VARCHAR(36)",
             "duration_seconds": "ALTER TABLE videos ADD COLUMN duration_seconds FLOAT",
+            "progress_stage": "ALTER TABLE videos ADD COLUMN progress_stage VARCHAR(255)",
+            "progress_percent": "ALTER TABLE videos ADD COLUMN progress_percent INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():

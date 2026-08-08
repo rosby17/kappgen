@@ -1,11 +1,22 @@
 import pytest
+import os
+import subprocess
 from pathlib import Path
+
+# Tests must never touch the production Postgres database or paid AI services.
+os.environ["DATABASE_URL"] = "sqlite:////tmp/nichecut-pytest.db"
+os.environ["STORAGE_PATH"] = "/tmp/nichecut-pytest-storage"
+os.environ["IZIVOICE_API_KEY"] = ""
+os.environ["AI_IMAGE_PROVIDER_API_KEY"] = ""
+
 from fastapi.testclient import TestClient
+from PIL import Image
 from src.api.app import app
 from src.db.session import init_db, SessionLocal
 from src.db.models import User, Channel, Video
 from src.models.project import VideoStatus
 from src.pipeline.orchestrator import run_video_pipeline
+from src.config import STORAGE_PATH
 
 client = TestClient(app)
 
@@ -85,7 +96,10 @@ def test_audio_upload_submission(tmp_path):
     channel_id = chan_res.json()["id"]
 
     dummy_audio = tmp_path / "test_voice.mp3"
-    dummy_audio.write_bytes(b"ID3" + b"\x00" * 500)
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+        "-c:a", "libmp3lame", str(dummy_audio)
+    ], check=True, capture_output=True)
 
     with open(dummy_audio, "rb") as f:
         response = client.post(
@@ -104,11 +118,26 @@ def test_audio_upload_submission(tmp_path):
     assert data["audio_input_path"] is not None
     assert Path(data["audio_input_path"]).exists()
 
+    corrupt_audio = tmp_path / "corrupt.mp3"
+    corrupt_audio.write_bytes(b"this is not audio")
+    with open(corrupt_audio, "rb") as f:
+        rejected = client.post(
+            "/api/videos",
+            data={"channel_id": channel_id, "input_type": "audio"},
+            files={"audio_files": ("corrupt.mp3", f, "audio/mpeg")}
+        )
+    assert rejected.status_code == 400
+    assert "corrompu" in rejected.json()["detail"]
+
 def test_rendering_pipeline_isolated(tmp_path):
+    library_dir = STORAGE_PATH / "test-library"
+    library_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (1920, 1080), "#123456").save(library_dir / "scene.png")
     config = {
         "name": "Isolated Pipeline Test",
         "subtitle_style": {"font": "Arial", "size": 40, "karaoke": True},
-        "effects_config": {"color_grade": "warm", "grain": True}
+        "effects_config": {"color_grade": "warm", "grain": True},
+        "image_style": {"source": "library", "library_path": "test-library"},
     }
     script = "Le temps passe mais la sagesse demeure pour toujours."
     output_file = run_video_pipeline(config, script, tmp_path)

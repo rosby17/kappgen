@@ -2,15 +2,14 @@ import uuid
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Form, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import Channel, Video
 from src.models.project import VideoCreate, VideoStatus
-from src.worker.queue_runner import process_single_queued_video
-from src.utils.ffmpeg_runner import run_ffmpeg
+from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file
 from src.config import STORAGE_PATH
 
 DOWNLOAD_RESOLUTIONS = {
@@ -28,7 +27,6 @@ def clean_filename_title(filename: str) -> str:
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def submit_video_subject(
-    background_tasks: BackgroundTasks,
     channel_id: str = Form(...),
     input_type: str = Form("text"),                    # "text" | "audio"
     script_text: Optional[str] = Form(""),
@@ -54,7 +52,14 @@ async def submit_video_subject(
             dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
             
             contents = await audio_file.read()
+            if not contents:
+                raise HTTPException(status_code=400, detail=f"Le fichier {audio_file.filename} est vide.")
             dest_file.write_bytes(contents)
+            try:
+                validate_audio_file(dest_file)
+            except ValueError as exc:
+                dest_file.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=f"{audio_file.filename}: {exc}")
             
             auto_title = clean_filename_title(audio_file.filename)
             
@@ -71,7 +76,6 @@ async def submit_video_subject(
         db.commit()
         for v in created_videos:
             db.refresh(v)
-            background_tasks.add_task(process_single_queued_video)
             
         return [v.to_dict() for v in created_videos]
         
@@ -90,7 +94,6 @@ async def submit_video_subject(
         db.commit()
         db.refresh(video)
         
-        background_tasks.add_task(process_single_queued_video)
         return [video.to_dict()]
 
 @router.get("")
@@ -148,17 +151,18 @@ def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):
     return [v.to_dict() for v in videos]
 
 @router.post("/{video_id}/retry")
-def retry_video(video_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def retry_video(video_id: str, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
         
     video.status = VideoStatus.QUEUED.value
     video.error_message = None
+    video.progress_stage = "En attente du moteur de rendu"
+    video.progress_percent = 0
     db.commit()
     db.refresh(video)
     
-    background_tasks.add_task(process_single_queued_video)
     return video.to_dict()
 
 class VideoUpdate(BaseModel):

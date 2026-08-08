@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.config import AI_IMAGE_PROVIDER_API_KEY, AI_IMAGE_PROVIDER_ENDPOINT, AI_IMAGE_MODEL_ID
 from src.utils.logger import logger
-from src.pipeline.image_pool import generate_fallback_image, get_image_pool
+from src.pipeline.image_pool import get_image_pool
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
 TASK_POLL_TIMEOUT_SECONDS = 300
@@ -92,26 +92,49 @@ def fetch_or_generate_images(
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
 
-    if source_type == "ai_generated" and AI_IMAGE_PROVIDER_API_KEY:
-        logger.info(f"Generating {len(prompts)} images via ai33.pro (model={AI_IMAGE_MODEL_ID})...")
+    def generate_images(ai_prompts: List[str], prefix: str = "ai_img") -> List[Path]:
+        if not AI_IMAGE_PROVIDER_API_KEY:
+            raise RuntimeError("La génération d’images IA n’est pas configurée sur le serveur.")
+        logger.info(f"Generating {len(ai_prompts)} images via ai33.pro (model={AI_IMAGE_MODEL_ID})...")
         generated_paths = []
         with httpx.Client() as client:
-            for i, p in enumerate(prompts):
-                img_file = output_dir / f"ai_img_{i+1}.png"
+            for i, p in enumerate(ai_prompts):
+                img_file = output_dir / f"{prefix}_{i+1}.png"
                 full_prompt = f"{p}, {style_prompt}" if style_prompt else p
-                try:
-                    generate_ai_image(full_prompt, img_file, client)
-                    generated_paths.append(img_file)
-                except Exception as e:
-                    logger.warning(f"AI image generation failed for prompt '{p}': {e}. Using synthetic fallback.")
-                    generate_fallback_image(img_file, i, label=p[:20])
-                    generated_paths.append(img_file)
+                generate_ai_image(full_prompt, img_file, client)
+                generated_paths.append(img_file)
         return generated_paths
 
-    if source_type == "ai_generated" and not AI_IMAGE_PROVIDER_API_KEY:
-        logger.info("image_style.source is 'ai_generated' but AI_IMAGE_PROVIDER_API_KEY is not set. Falling back to local library images.")
+    if source_type == "ai_generated":
+        return generate_images(prompts)
+
+    if source_type == "hybrid":
+        local_count = (len(prompts) + 1) // 2
+        local_images = get_image_pool(
+            output_dir,
+            local_count,
+            custom_library_path=library_path,
+            require_custom_library=True,
+        )
+        ai_images = generate_images(prompts[local_count:], prefix="hybrid_ai")
+        combined = []
+        for index in range(max(len(local_images), len(ai_images))):
+            if index < len(local_images):
+                combined.append(local_images[index])
+            if index < len(ai_images):
+                combined.append(ai_images[index])
+        logger.info(f"Hybrid image mode prepared {len(local_images)} library and {len(ai_images)} AI images.")
+        return combined[:len(prompts)]
+
+    if source_type != "library":
+        raise ValueError(f"Mode d’images inconnu: {source_type}")
 
     # Library mode: use the client-provided local image folder if configured, else the
     # shared assets library / synthetic fallback artwork.
     logger.info(f"Using local image library for {len(prompts)} segments (library_path={library_path or 'none'}).")
-    return get_image_pool(output_dir, len(prompts), custom_library_path=library_path)
+    return get_image_pool(
+        output_dir,
+        len(prompts),
+        custom_library_path=library_path,
+        require_custom_library=True,
+    )

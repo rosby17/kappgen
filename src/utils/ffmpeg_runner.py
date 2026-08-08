@@ -66,3 +66,15 @@ def get_media_info(file_path: Path) -> Dict[str, Any]:
         except Exception:
             pass
     return {}
+
+def validate_audio_file(file_path: Path) -> Dict[str, Any]:
+    """Rejects renamed/corrupt files before they enter the render queue."""
+    info = get_media_info(file_path)
+    audio_streams = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if not audio_streams or duration <= 0:
+        raise ValueError("Le fichier envoyé ne contient pas de piste audio valide ou il est corrompu.")
+    return info

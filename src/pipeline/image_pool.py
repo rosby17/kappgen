@@ -82,7 +82,12 @@ def generate_fallback_image(path: Path, index: int, label: str = "Nichecut Scene
     img.save(path, quality=95)
     logger.info(f"Generated artistic fallback image: {path}")
 
-def get_image_pool(image_dir: Path, required_count: int, custom_library_path: str = None) -> List[Path]:
+def get_image_pool(
+    image_dir: Path,
+    required_count: int,
+    custom_library_path: str = None,
+    require_custom_library: bool = False,
+) -> List[Path]:
     """
     Retrieves available images from (in priority order): the client-provided local
     image folder (`custom_library_path`, set per-channel in image_style.library_path),
@@ -111,6 +116,12 @@ def get_image_pool(image_dir: Path, required_count: int, custom_library_path: st
                 logger.warning(f"Configured library_path '{custom_dir}' contains no supported images ({image_extensions}).")
         elif is_safe_path:
             logger.warning(f"Configured library_path '{custom_dir}' does not exist or is not a directory.")
+
+    if require_custom_library and not existing_images:
+        raise ValueError(
+            "La bibliothèque d’images de cette chaîne est absente ou vide. "
+            "Modifiez la chaîne et importez de nouveau le dossier d’images."
+        )
 
     # Check custom channel image dir
     if image_dir.exists():

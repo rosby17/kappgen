@@ -36,6 +36,7 @@ class ImageStyle(BaseModel):
     source: str = "library"             # "library" | "ai_generated"
     style_prompt: str = "cinematic, dramatic lighting, high detail, masterpiece"
     library_path: Optional[str] = None
+    library_image_count: int = 0
 
 class EffectsConfig(BaseModel):
     grain: bool = True

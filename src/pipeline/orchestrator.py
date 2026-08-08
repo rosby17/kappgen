@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 from src.utils.logger import logger
 from src.pipeline.voiceover import generate_voiceover, generate_transcript_for_audio
 from src.pipeline.pacing import calculate_pacing_segments
@@ -15,7 +15,8 @@ def run_video_pipeline(
     channel_config: Dict[str, Any],
     script_text: str,
     output_dir: Path,
-    pre_recorded_audio_path: Optional[Path] = None
+    pre_recorded_audio_path: Optional[Path] = None,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> Path:
     """
     Orchestrates the entire video generation pipeline for a given script/audio and channel configuration.
@@ -25,6 +26,10 @@ def run_video_pipeline(
     source_dir.mkdir(parents=True, exist_ok=True)
     images_dir = source_dir / "images"
     clips_dir = source_dir / "clips"
+
+    def progress(stage: str, percent: int):
+        if progress_callback:
+            progress_callback(stage, percent)
     
     # 1. Save Config Snapshot & Script
     (source_dir / "script.txt").write_text(script_text or "", encoding="utf-8")
@@ -34,6 +39,7 @@ def run_video_pipeline(
     raw_vo_path = source_dir / "voiceover.mp3"
     
     if pre_recorded_audio_path and pre_recorded_audio_path.exists():
+        progress("Préparation et transcription de l’audio", 8)
         logger.info(f"Step 1/7: Using pre-recorded audio file: {pre_recorded_audio_path}")
         # Copy pre-recorded audio or convert to MP3
         from src.utils.ffmpeg_runner import run_ffmpeg
@@ -45,6 +51,7 @@ def run_video_pipeline(
         # accurate subtitle text and word-level timing.
         transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré")
     else:
+        progress("Génération de la voix et transcription", 8)
         logger.info("Step 1/7: Generating voiceover audio via TTS...")
         _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path)
 
@@ -54,15 +61,18 @@ def run_video_pipeline(
     
     # 3. Calculate Pacing Segments
     logger.info("Step 2/7: Calculating dynamic image pacing...")
+    progress("Découpage du script en scènes", 25)
     segments = calculate_pacing_segments(total_duration)
     
     # 4. Fetch or Generate Images
     logger.info("Step 3/7: Preparing image pool...")
+    progress("Préparation des visuels", 35)
     prompts = [f"Scene for text section {i+1}" for i in range(len(segments))]
     image_paths = fetch_or_generate_images(prompts, images_dir, channel_config.get("image_style"))
     
     # 5. Generate Subtitles ASS file
     logger.info("Step 4/7: Formatting ASS subtitles...")
+    progress("Création des sous-titres", 55)
     subtitle_ass_path = source_dir / "subtitles.ass"
     generate_ass_subtitles(
         transcript_info=transcript_info,
@@ -92,6 +102,7 @@ def run_video_pipeline(
 
     # 6. Build Dynamic Motion Video Clips
     logger.info("Step 5/7: Rendering motion video clips (Ken Burns effect)...")
+    progress("Animation des scènes", 65)
     clip_paths = []
     zoom_min = channel_config.get("effects_config", {}).get("zoom_min_pct", 1.0)
     zoom_max = channel_config.get("effects_config", {}).get("zoom_max_pct", 1.12)
@@ -109,6 +120,7 @@ def run_video_pipeline(
         
     # 7. Mix Voiceover and Background Music
     logger.info("Step 6/7: Mixing audio tracks...")
+    progress("Mixage de la voix et de la musique", 82)
     music_pref = channel_config.get("music_preference", {})
     mixed_audio_path = source_dir / "mixed_audio.mp3"
     
@@ -128,6 +140,7 @@ def run_video_pipeline(
 
     # 8. Assemble Final Video Output
     logger.info("Step 7/7: Assembling final 1080p MP4...")
+    progress("Assemblage du MP4 final", 90)
     final_output_path = output_dir / "output.mp4"
     assemble_final_video(
         clip_paths=clip_paths,

@@ -22,6 +22,7 @@ def process_single_queued_video() -> bool:
             db.query(Video)
             .filter(Video.status == VideoStatus.QUEUED.value)
             .order_by(Video.created_at.asc())
+            .with_for_update(skip_locked=True)
             .first()
         )
         if not video:
@@ -31,6 +32,8 @@ def process_single_queued_video() -> bool:
         logger.info(f"Worker picked queued video ID: {video.id} (Channel: {video.channel_id})")
         video.status = VideoStatus.RENDERING.value
         video.started_at = datetime.utcnow()
+        video.progress_stage = "Démarrage du rendu"
+        video.progress_percent = 2
         db.commit()
 
         channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
@@ -44,13 +47,21 @@ def process_single_queued_video() -> bool:
             p = Path(video.audio_input_path)
             if p.exists():
                 pre_audio_path = p
+        if video.input_type == "audio" and pre_audio_path is None:
+            raise ValueError("Le fichier audio source est introuvable sur le serveur. Veuillez créer une nouvelle vidéo et le renvoyer.")
                 
         # Execute render pipeline
+        def update_progress(stage: str, percent: int):
+            video.progress_stage = stage
+            video.progress_percent = percent
+            db.commit()
+
         output_mp4 = run_video_pipeline(
             channel_config=channel.to_dict(),
             script_text=video.script_text,
             output_dir=video_dir,
-            pre_recorded_audio_path=pre_audio_path
+            pre_recorded_audio_path=pre_audio_path,
+            progress_callback=update_progress,
         )
 
         try:
@@ -63,6 +74,8 @@ def process_single_queued_video() -> bool:
         video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
         video.source_assets_path = str((video_dir / "source").relative_to(STORAGE_PATH) if STORAGE_PATH in (video_dir / "source").parents else (video_dir / "source"))
         video.error_message = None
+        video.progress_stage = "Vidéo prête"
+        video.progress_percent = 100
         db.commit()
         logger.info(f"Worker successfully finished rendering video ID: {video.id}")
         return True
@@ -75,6 +88,7 @@ def process_single_queued_video() -> bool:
                 video.status = VideoStatus.FAILED.value
                 video.finished_at = datetime.utcnow()
                 video.error_message = f"{str(e)}\n{traceback.format_exc()}"
+                video.progress_stage = "Échec du rendu"
                 db.commit()
             except Exception as db_err:
                 logger.error(f"Failed to update video failed status: {db_err}")
