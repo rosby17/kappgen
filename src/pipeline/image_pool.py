@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from src.utils.logger import logger
-from src.config import ASSETS_PATH
+from src.config import ASSETS_PATH, STORAGE_PATH
 
 def generate_fallback_image(path: Path, index: int, label: str = "Nichecut Scene"):
     """
@@ -93,16 +93,23 @@ def get_image_pool(image_dir: Path, required_count: int, custom_library_path: st
     image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
     existing_images = []
 
-    # Client-provided local image folder (highest priority — this is "their own" library)
+    # Client-uploaded image library (highest priority — this is "their own" library).
+    # library_path is stored as a path relative to STORAGE_PATH (e.g.
+    # "channels/{id}/library"), set by POST /api/channels/{id}/library-images —
+    # it is never a path on the end user's own machine/browser.
     if custom_library_path:
-        custom_dir = Path(custom_library_path).expanduser()
-        if custom_dir.is_dir():
+        storage_root = STORAGE_PATH.resolve()
+        custom_dir = (storage_root / custom_library_path).resolve()
+        is_safe_path = custom_dir == storage_root or storage_root in custom_dir.parents
+        if not is_safe_path:
+            logger.warning(f"Rejected library_path outside STORAGE_PATH: '{custom_dir}'.")
+        elif custom_dir.is_dir():
             custom_images = [f for f in custom_dir.iterdir() if f.suffix.lower() in image_extensions]
             if custom_images:
                 existing_images.extend(custom_images)
             else:
                 logger.warning(f"Configured library_path '{custom_dir}' contains no supported images ({image_extensions}).")
-        else:
+        elif is_safe_path:
             logger.warning(f"Configured library_path '{custom_dir}' does not exist or is not a directory.")
 
     # Check custom channel image dir

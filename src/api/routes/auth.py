@@ -1,6 +1,7 @@
 import hashlib
 import os
 import httpx
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -138,8 +139,8 @@ def get_user_profile(user_id: str, db: Session = Depends(get_db)):
 
 
 class ProfileUpdate(BaseModel):
-    name: str | None = None
-    phone: str | None = None
+    name: Optional[str] = None
+    phone: Optional[str] = None
 
 
 @router.patch("/me/{user_id}")

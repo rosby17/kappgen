@@ -10,6 +10,7 @@ from src.config import STORAGE_PATH
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+ALLOWED_LIBRARY_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(db: Session = Depends(get_db)):
@@ -107,6 +108,49 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     branding = dict(channel.branding or {})
     branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
     channel.branding = branding
+
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+@router.post("/{channel_id}/library-images")
+async def upload_channel_library_images(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+    library_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_files = []
+    for file in files:
+        ext = Path(file.filename or "").suffix.lower()
+        if ext not in ALLOWED_LIBRARY_EXTENSIONS:
+            continue
+        contents = await file.read()
+        if contents:
+            valid_files.append((ext, contents))
+
+    if not valid_files:
+        raise HTTPException(status_code=400, detail="Aucune image valide dans les fichiers envoyés.")
+
+    # Only replace the existing library after the new payload has been fully
+    # received and validated. A bad upload can no longer erase good assets.
+    for old_file in library_dir.iterdir():
+        if old_file.is_file():
+            old_file.unlink(missing_ok=True)
+
+    for index, (ext, contents) in enumerate(valid_files):
+        dest_file = library_dir / f"img_{index:04d}{ext}"
+        dest_file.write_bytes(contents)
+
+    saved = len(valid_files)
+
+    image_style = dict(channel.image_style or {})
+    image_style["source"] = "library"
+    image_style["library_path"] = f"channels/{channel.id}/library"
+    image_style["library_image_count"] = saved
+    channel.image_style = image_style
 
     db.commit()
     db.refresh(channel)

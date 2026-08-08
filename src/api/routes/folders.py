@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from typing import Optional
 from src.db.session import get_db
 from src.db.models import Folder, Video
 
@@ -9,7 +10,7 @@ router = APIRouter(prefix="/api/folders", tags=["folders"])
 
 class FolderCreate(BaseModel):
     name: str
-    user_id: str | None = None
+    user_id: Optional[str] = None
 
 
 class FolderRename(BaseModel):
