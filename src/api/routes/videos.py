@@ -120,18 +120,32 @@ def retry_video(video_id: str, background_tasks: BackgroundTasks, db: Session = 
     background_tasks.add_task(process_single_queued_video)
     return video.to_dict()
 
-class VideoRename(BaseModel):
-    title: str
+class VideoUpdate(BaseModel):
+    title: Optional[str] = None
+    folder_id: Optional[str] = None
+    clear_folder: bool = False
 
 @router.patch("/{video_id}")
-def rename_video(video_id: str, payload: VideoRename, db: Session = Depends(get_db)):
+def update_video(video_id: str, payload: VideoUpdate, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    title = payload.title.strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="Le titre ne peut pas être vide.")
-    video.script_text = title
+
+    if payload.title is not None:
+        title = payload.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="Le titre ne peut pas être vide.")
+        video.script_text = title
+
+    if payload.clear_folder:
+        video.folder_id = None
+    elif payload.folder_id is not None:
+        from src.db.models import Folder
+        folder = db.query(Folder).filter(Folder.id == payload.folder_id).first()
+        if not folder:
+            raise HTTPException(status_code=404, detail="Dossier introuvable.")
+        video.folder_id = folder.id
+
     db.commit()
     db.refresh(video)
     return video.to_dict()

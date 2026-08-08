@@ -11,7 +11,7 @@ if str(BASE_DIR) not in sys.path:
 
 from src.config import STORAGE_PATH
 from src.db.session import init_db
-from src.api.routes import channels, videos, auth
+from src.api.routes import channels, videos, auth, folders
 
 app = FastAPI(
     title="NicheCut SaaS API",
@@ -35,6 +35,7 @@ app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
 app.include_router(auth.router)
 app.include_router(channels.router)
 app.include_router(videos.router)
+app.include_router(folders.router)
 
 @app.on_event("startup")
 def on_startup():

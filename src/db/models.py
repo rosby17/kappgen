@@ -61,31 +61,54 @@ class Channel(Base):
             "video_count": len(self.videos) if self.videos else 0
         }
 
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    name = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    videos = relationship("Video", back_populates="folder")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "name": self.name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "video_count": len(self.videos) if self.videos else 0
+        }
+
+
 class Video(Base):
     __tablename__ = "videos"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False)
+    folder_id = Column(String(36), ForeignKey("folders.id"), nullable=True)
     input_type = Column(String(50), nullable=False, default="text")
     script_text = Column(Text, nullable=True, default="")
     audio_input_path = Column(String(512), nullable=True)
     status = Column(String(50), nullable=False, default=VideoStatus.QUEUED.value)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
-    
+
     output_path = Column(String(512), nullable=True)
     source_assets_path = Column(String(512), nullable=True)
     error_message = Column(Text, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
+    folder = relationship("Folder", back_populates="videos")
 
     def to_dict(self):
         return {
             "id": self.id,
             "channel_id": self.channel_id,
             "channel_name": self.channel.name if self.channel else None,
+            "folder_id": self.folder_id,
             "input_type": self.input_type,
             "script_text": self.script_text,
             "audio_input_path": self.audio_input_path,
