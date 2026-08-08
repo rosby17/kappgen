@@ -1,12 +1,19 @@
 import hashlib
 import os
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from src.config import GOOGLE_CLIENT_ID
 from src.db.session import get_db
 from src.db.models import User
 from src.models.project import UserCreate, UserLogin, ChangePasswordPayload, ResetPasswordPayload
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+class GoogleAuthPayload(BaseModel):
+    credential: str
 
 def hash_password(password: str) -> str:
     salt = os.urandom(16)
@@ -80,6 +87,40 @@ def reset_password(payload: ResetPasswordPayload, db: Session = Depends(get_db))
     user.hashed_password = hash_password(payload.new_password)
     db.commit()
     return {"message": "Mot de passe réinitialisé avec succès."}
+
+@router.post("/google")
+def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="La connexion Google n'est pas configurée sur le serveur.")
+
+    resp = httpx.get(
+        "https://oauth2.googleapis.com/tokeninfo",
+        params={"id_token": payload.credential},
+        timeout=15.0
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Jeton Google invalide ou expiré.")
+
+    token_info = resp.json()
+    if token_info.get("aud") != GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=401, detail="Jeton Google non destiné à cette application.")
+
+    email_clean = (token_info.get("email") or "").strip().lower()
+    if not email_clean:
+        raise HTTPException(status_code=400, detail="Aucun email associé à ce compte Google.")
+
+    user = db.query(User).filter(User.email == email_clean).first()
+    if not user:
+        user = User(
+            email=email_clean,
+            name=token_info.get("name") or email_clean.split('@')[0].capitalize(),
+            hashed_password=hash_password(os.urandom(32).hex()),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return user.to_dict()
+
 
 @router.get("/me/{user_id}")
 def get_user_profile(user_id: str, db: Session = Depends(get_db)):
