@@ -8,6 +8,7 @@ from src.models.project import VideoStatus
 from src.pipeline.orchestrator import run_video_pipeline
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
+from src.utils.ffmpeg_runner import get_audio_duration
 
 def process_single_queued_video() -> bool:
     """
@@ -52,6 +53,11 @@ def process_single_queued_video() -> bool:
             pre_recorded_audio_path=pre_audio_path
         )
 
+        try:
+            video.duration_seconds = get_audio_duration(output_mp4)
+        except Exception:
+            video.duration_seconds = None
+
         video.status = VideoStatus.DONE.value
         video.finished_at = datetime.utcnow()
         video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
@@ -76,11 +82,31 @@ def process_single_queued_video() -> bool:
     finally:
         db.close()
 
+def requeue_orphaned_videos():
+    """
+    On worker startup, any video still marked 'rendering' was orphaned by a
+    previous process being killed mid-render (e.g. a deployment restarting the
+    container) — nothing else would ever pick it back up since the picker only
+    looks at 'queued' videos. Reset those to 'queued' so they retry automatically.
+    """
+    db = SessionLocal()
+    try:
+        orphaned = db.query(Video).filter(Video.status == VideoStatus.RENDERING.value).all()
+        for video in orphaned:
+            logger.warning(f"Re-queuing orphaned video {video.id} (was stuck in 'rendering', likely from a restart mid-render).")
+            video.status = VideoStatus.QUEUED.value
+            video.started_at = None
+        if orphaned:
+            db.commit()
+    finally:
+        db.close()
+
 def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False):
     """
     Main loop for background worker polling SQLite for queued videos.
     """
     init_db()
+    requeue_orphaned_videos()
     logger.info("Starting Nichecut Background Queue Worker...")
     while True:
         processed = process_single_queued_video()

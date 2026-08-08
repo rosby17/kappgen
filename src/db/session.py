@@ -43,10 +43,15 @@ def init_db():
     inspector = inspect(engine)
     if "videos" in inspector.get_table_names():
         existing_columns = {col["name"] for col in inspector.get_columns("videos")}
-        if "folder_id" not in existing_columns:
-            logger.info("Migrating videos table: adding folder_id column.")
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE videos ADD COLUMN folder_id VARCHAR(36)"))
+        video_migrations = {
+            "folder_id": "ALTER TABLE videos ADD COLUMN folder_id VARCHAR(36)",
+            "duration_seconds": "ALTER TABLE videos ADD COLUMN duration_seconds FLOAT",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in video_migrations.items():
+                if col_name not in existing_columns:
+                    logger.info(f"Migrating videos table: adding {col_name} column.")
+                    conn.execute(text(ddl))
 
     if "users" in inspector.get_table_names():
         existing_user_columns = {col["name"] for col in inspector.get_columns("users")}
