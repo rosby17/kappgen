@@ -42,6 +42,23 @@ def _izivoice_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
 
 
+def _post_with_retry(client: httpx.Client, url: str, max_retries: int = 5, **kwargs) -> httpx.Response:
+    """POSTs with exponential backoff retry on 429/5xx (Izivoice rate-limits aggressively
+    when several videos render concurrently, since each one fires its own TTS/STT calls)."""
+    delay = 3.0
+    for attempt in range(max_retries + 1):
+        resp = client.post(url, **kwargs)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            if attempt == max_retries:
+                resp.raise_for_status()
+            logger.warning(f"Izivoice request to {url} returned {resp.status_code}, retrying in {delay:.0f}s...")
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+            continue
+        return resp
+    return resp
+
+
 def _poll_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     """Polls GET /tasks/{task_id} until status is 'done' or 'error' (or timeout)."""
     elapsed = 0.0
@@ -233,7 +250,8 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
                 with open(chunk_path, "rb") as f:
-                    resp = client.post(
+                    resp = _post_with_retry(
+                        client,
                         f"{IZIVOICE_BASE_URL}/speech-to-text",
                         headers=_izivoice_headers(),
                         files={"file": (chunk_path.name, f, "audio/mpeg")},
@@ -321,7 +339,8 @@ def generate_voiceover(script_text: str, output_audio_path: Path) -> Tuple[Path,
             voice_id = _get_default_voice_id(client)
 
             logger.info("Requesting voiceover from Izivoice /text-to-speech...")
-            resp = client.post(
+            resp = _post_with_retry(
+                client,
                 f"{IZIVOICE_BASE_URL}/text-to-speech",
                 headers=_izivoice_headers(),
                 json={"text": script_text, "voice_id": voice_id},
