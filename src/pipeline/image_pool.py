@@ -145,11 +145,18 @@ def get_image_pool(
                 generate_fallback_image(img_path, i)
             existing_images.append(img_path)
             
-    # Pool & cycle images to fulfill required count
+    # Pool & cycle images to fulfill required count. Each cycle is freshly
+    # shuffled (never a fixed seed), so the sequence — and therefore the whole
+    # montage — is different every render. When the count exceeds the library
+    # size and images must repeat, avoid placing the same image back-to-back
+    # across a cycle boundary so no two consecutive scenes ever match.
     pool = []
     while len(pool) < required_count:
         shuffled = list(existing_images)
         random.shuffle(shuffled)
+        if pool and shuffled and pool[-1] == shuffled[0] and len(shuffled) > 1:
+            swap_with = random.randint(1, len(shuffled) - 1)
+            shuffled[0], shuffled[swap_with] = shuffled[swap_with], shuffled[0]
         pool.extend(shuffled)
-        
+
     return pool[:required_count]

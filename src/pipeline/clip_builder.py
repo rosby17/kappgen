@@ -18,28 +18,39 @@ def build_image_clip(
     if total_frames < 1:
         total_frames = 1
         
-    # Alternate motion modes (zoom-in, zoom-out, pan left-to-right, pan right-to-left)
-    motion_types = ["zoom_in", "zoom_out", "pan_right", "pan_left"]
+    # Randomized Ken Burns motion: pure zoom, pure pan, and diagonal zoom+pan
+    # combos, so consecutive scenes rarely feel like the same move repeated.
+    motion_types = [
+        "zoom_in", "zoom_out", "pan_right", "pan_left",
+        "zoom_in_pan_right", "zoom_in_pan_left",
+        "zoom_out_pan_right", "zoom_out_pan_left",
+    ]
     motion = random.choice(motion_types)
-    
-    # Calculate zoom expression for FFmpeg zoompan filter
-    # z: current zoom level, d: duration in frames, x/y: pan coordinates
+    zoom_delta = zoom_max_pct - zoom_min_pct
+
+    zoom_in_expr = f"min(pzoom+{zoom_delta/total_frames:.6f},{zoom_max_pct})"
+    zoom_out_expr = f"max({zoom_max_pct}-(on/{total_frames})*{zoom_delta:.6f},{zoom_min_pct})"
+    pan_right_expr = "(on/{0})*(iw-iw/zoom)".format(total_frames)
+    pan_left_expr = "(1-(on/{0}))*(iw-iw/zoom)".format(total_frames)
+    center_x = "iw/2-(iw/zoom/2)"
+    center_y = "ih/2-(ih/zoom/2)"
+
     if motion == "zoom_in":
-        zoom_expr = f"min(pzoom+{(zoom_max_pct - zoom_min_pct)/total_frames:.6f},{zoom_max_pct})"
-        x_expr = "iw/2-(iw/zoom/2)"
-        y_expr = "ih/2-(ih/zoom/2)"
+        zoom_expr, x_expr, y_expr = zoom_in_expr, center_x, center_y
     elif motion == "zoom_out":
-        zoom_expr = f"max({zoom_max_pct}-(on/{total_frames})*{(zoom_max_pct - zoom_min_pct):.6f},{zoom_min_pct})"
-        x_expr = "iw/2-(iw/zoom/2)"
-        y_expr = "ih/2-(ih/zoom/2)"
+        zoom_expr, x_expr, y_expr = zoom_out_expr, center_x, center_y
     elif motion == "pan_right":
-        zoom_expr = f"{zoom_max_pct}"
-        x_expr = f"(on/{total_frames})*(iw-iw/zoom)"
-        y_expr = "ih/2-(ih/zoom/2)"
-    else: # pan_left
-        zoom_expr = f"{zoom_max_pct}"
-        x_expr = f"(1-(on/{total_frames}))*(iw-iw/zoom)"
-        y_expr = "ih/2-(ih/zoom/2)"
+        zoom_expr, x_expr, y_expr = f"{zoom_max_pct}", pan_right_expr, center_y
+    elif motion == "pan_left":
+        zoom_expr, x_expr, y_expr = f"{zoom_max_pct}", pan_left_expr, center_y
+    elif motion == "zoom_in_pan_right":
+        zoom_expr, x_expr, y_expr = zoom_in_expr, pan_right_expr, center_y
+    elif motion == "zoom_in_pan_left":
+        zoom_expr, x_expr, y_expr = zoom_in_expr, pan_left_expr, center_y
+    elif motion == "zoom_out_pan_right":
+        zoom_expr, x_expr, y_expr = zoom_out_expr, pan_right_expr, center_y
+    else: # zoom_out_pan_left
+        zoom_expr, x_expr, y_expr = zoom_out_expr, pan_left_expr, center_y
         
     filter_graph = (
         f"scale=1920:1080:force_original_aspect_ratio=increase,"
