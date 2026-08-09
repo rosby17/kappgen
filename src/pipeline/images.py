@@ -8,7 +8,7 @@ from src.utils.logger import logger
 from src.pipeline.image_pool import get_image_pool
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
-TASK_POLL_TIMEOUT_SECONDS = 300
+TASK_POLL_TIMEOUT_SECONDS = 90  # fail fast to a fallback image rather than stalling the whole render
 
 
 def _ai33_headers() -> Dict[str, str]:
@@ -97,12 +97,25 @@ def fetch_or_generate_images(
             raise RuntimeError("La génération d’images IA n’est pas configurée sur le serveur.")
         logger.info(f"Generating {len(ai_prompts)} images via ai33.pro (model={AI_IMAGE_MODEL_ID})...")
         generated_paths = []
+        failures = 0
         with httpx.Client() as client:
             for i, p in enumerate(ai_prompts):
                 img_file = output_dir / f"{prefix}_{i+1}.png"
                 full_prompt = f"{p}, {style_prompt}" if style_prompt else p
-                generate_ai_image(full_prompt, img_file, client)
-                generated_paths.append(img_file)
+                try:
+                    generate_ai_image(full_prompt, img_file, client)
+                    generated_paths.append(img_file)
+                except Exception as e:
+                    # ai33.pro is a third-party service that has proven unreliable
+                    # (slow/erroring under load) — one failed image shouldn't sink
+                    # an otherwise-ready render. Use a fallback asset instead.
+                    failures += 1
+                    logger.warning(f"AI image generation failed for prompt '{p[:60]}': {e}. Using fallback image instead.")
+                    fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
+                    if fallback:
+                        generated_paths.append(fallback[0])
+        if failures:
+            logger.warning(f"{failures}/{len(ai_prompts)} AI images fell back to library/synthetic assets due to provider errors.")
         return generated_paths
 
     if source_type == "ai_generated":
