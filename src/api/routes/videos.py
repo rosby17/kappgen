@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import Channel, Video
 from src.models.project import VideoCreate, VideoStatus
-from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file
+from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, AI_IMAGE_PROVIDER_API_KEY
 
 DOWNLOAD_RESOLUTIONS = {
@@ -93,13 +93,19 @@ async def submit_video_subject(
                 raise HTTPException(status_code=400, detail=f"{audio_file.filename}: {exc}")
             
             auto_title = clean_filename_title(audio_file.filename)
-            
+
+            try:
+                estimated_duration = get_audio_duration(dest_file)
+            except Exception:
+                estimated_duration = None
+
             video = Video(
                 channel_id=channel.id,
                 script_text=auto_title,
                 input_type="audio",
                 audio_input_path=str(dest_file),
-                status=VideoStatus.QUEUED.value
+                status=VideoStatus.QUEUED.value,
+                estimated_duration_seconds=estimated_duration,
             )
             db.add(video)
             created_videos.append(video)
@@ -114,12 +120,18 @@ async def submit_video_subject(
         if not (script_text and script_text.strip()):
             raise HTTPException(status_code=400, detail="Veuillez saisir un texte de script pour la génération TTS.")
             
+        # Rough speech-rate estimate (~150 wpm) so the queue can prioritize
+        # shorter jobs; corrected to the real duration once TTS runs.
+        word_count = len(script_text.split())
+        estimated_duration = max(3.0, word_count / 2.5)
+
         video = Video(
             channel_id=channel.id,
             script_text=script_text.strip(),
             input_type="text",
             audio_input_path=None,
-            status=VideoStatus.QUEUED.value
+            status=VideoStatus.QUEUED.value,
+            estimated_duration_seconds=estimated_duration,
         )
         db.add(video)
         db.commit()

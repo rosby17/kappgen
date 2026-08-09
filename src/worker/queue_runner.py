@@ -18,10 +18,15 @@ def process_single_queued_video() -> bool:
     db = SessionLocal()
     video = None
     try:
+        # Among everything currently waiting, shortest estimated video first —
+        # a long render in progress is never interrupted, but once the worker
+        # is free again it picks the shortest queued job so quick requests
+        # don't sit behind someone else's hour-long video. Ties (or unknown
+        # estimates) fall back to arrival order.
         video = (
             db.query(Video)
             .filter(Video.status == VideoStatus.QUEUED.value)
-            .order_by(Video.created_at.asc())
+            .order_by(Video.estimated_duration_seconds.asc().nullslast(), Video.created_at.asc())
             .with_for_update(skip_locked=True)
             .first()
         )

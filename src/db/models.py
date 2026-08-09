@@ -132,6 +132,7 @@ class Video(Base):
     source_assets_path = Column(String(512), nullable=True)
     error_message = Column(Text, nullable=True)
     duration_seconds = Column(Float, nullable=True)
+    estimated_duration_seconds = Column(Float, nullable=True)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
 
