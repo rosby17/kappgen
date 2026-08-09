@@ -8,6 +8,7 @@ from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel
 from src.models.project import VideoStatus
 from src.pipeline.orchestrator import run_video_pipeline
+from src.pipeline.transcode import try_ensure_sd_variant
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
@@ -89,6 +90,14 @@ def process_single_queued_video() -> bool:
         video.progress_percent = 100
         db.commit()
         logger.info(f"Worker successfully finished rendering video ID: {video.id}")
+
+        # Pre-generate the SD download variant now, while the video is fresh —
+        # by the time a user actually clicks "Télécharger (SD)" it's usually
+        # already sitting on disk instead of making them wait through a
+        # multi-minute live transcode. Runs after the DB commit above so
+        # "Vidéo prête" shows immediately regardless of how long this takes.
+        try_ensure_sd_variant(output_mp4)
+
         return True
 
     except Exception as e:

@@ -11,11 +11,7 @@ from src.db.models import Channel, Video
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY
-
-DOWNLOAD_RESOLUTIONS = {
-    "sd": "854:480",
-    "4k": "3840:2160",
-}
+from src.pipeline.transcode import ensure_sd_variant
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -164,29 +160,14 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found on disk")
 
-    if quality == "hd" or quality not in DOWNLOAD_RESOLUTIONS:
+    if quality != "sd":
         return FileResponse(source_path, media_type="video/mp4", filename=f"nichecut-{video_id}-hd.mp4")
 
-    target_res = DOWNLOAD_RESOLUTIONS[quality]
-    cached_path = source_path.with_name(f"{source_path.stem}_{quality}.mp4")
-    if not cached_path.exists():
-        temp_path = cached_path.with_name(f".{cached_path.stem}.part.mp4")
-        cmd = [
-            "ffmpeg", "-y", "-i", str(source_path),
-            "-vf", f"scale={target_res}:flags=lanczos",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-c:a", "copy", "-movflags", "+faststart",
-            str(temp_path)
-        ]
-        try:
-            run_ffmpeg(cmd)
-            import os
-            os.replace(temp_path, cached_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
-
-    return FileResponse(cached_path, media_type="video/mp4", filename=f"nichecut-{video_id}-{quality}.mp4")
+    # Normally already pre-generated right after the render finished (see
+    # queue_runner.py) so this resolves instantly; only actually transcodes
+    # here as a fallback if that background step hasn't completed yet.
+    cached_path = ensure_sd_variant(source_path)
+    return FileResponse(cached_path, media_type="video/mp4", filename=f"nichecut-{video_id}-sd.mp4")
 
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):
