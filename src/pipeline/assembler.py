@@ -86,9 +86,9 @@ def assemble_final_video(
         watermark_outline = sub_style.get("outline_color") or "#000000"
         wm_txt_escaped = str(watermark_txt_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
         watermark_filter = (
-            f"drawtext=font='{watermark_font}':textfile='{wm_txt_escaped}':fontsize=40:"
-            f"fontcolor={watermark_color}:borderw=2:bordercolor={watermark_outline}:"
-            f"x=w-tw-40:y=40"
+            f"drawtext=font='{watermark_font}':textfile='{wm_txt_escaped}':fontsize=26:"
+            f"fontcolor={watermark_color}:borderw=1.5:bordercolor={watermark_outline}:"
+            f"x=w-tw-40:y=52"
         )
 
     # Crossfade chain needs each clip's real duration to compute cumulative
