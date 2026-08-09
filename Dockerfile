@@ -12,11 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-adobe-sourcesans3 \
     fonts-dejavu-core \
     fonts-liberation \
-    fonts-oswald \
     fonts-comfortaa \
     fonts-cabin \
-    fonts-arimo \
-    fonts-tinos \
     fonts-noto-core \
     fonts-comic-neue \
     && fc-cache -f \
