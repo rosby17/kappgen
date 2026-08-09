@@ -48,6 +48,7 @@ def init_db():
             "duration_seconds": "ALTER TABLE videos ADD COLUMN duration_seconds FLOAT",
             "estimated_duration_seconds": "ALTER TABLE videos ADD COLUMN estimated_duration_seconds FLOAT",
             "purged_at": "ALTER TABLE videos ADD COLUMN purged_at TIMESTAMP",
+            "restart_count": "ALTER TABLE videos ADD COLUMN restart_count INTEGER DEFAULT 0 NOT NULL",
             "progress_stage": "ALTER TABLE videos ADD COLUMN progress_stage VARCHAR(255)",
             "progress_percent": "ALTER TABLE videos ADD COLUMN progress_percent INTEGER DEFAULT 0 NOT NULL",
         }

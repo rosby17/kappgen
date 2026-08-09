@@ -134,6 +134,7 @@ class Video(Base):
     duration_seconds = Column(Float, nullable=True)
     estimated_duration_seconds = Column(Float, nullable=True)
     purged_at = Column(DateTime, nullable=True)
+    restart_count = Column(Integer, nullable=False, default=0)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
 

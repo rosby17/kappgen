@@ -1,4 +1,5 @@
 import shutil
+import signal
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -106,20 +107,39 @@ def process_single_queued_video() -> bool:
     finally:
         db.close()
 
+MAX_AUTO_RESTARTS = 4
+
 def requeue_orphaned_videos():
     """
     On worker startup, any video still marked 'rendering' was orphaned by a
     previous process being killed mid-render (e.g. a deployment restarting the
     container) — nothing else would ever pick it back up since the picker only
-    looks at 'queued' videos. Reset those to 'queued' so they retry automatically.
+    looks at 'queued' videos. Reset those to 'queued' so they retry automatically
+    (rendering isn't resumable — it restarts from the beginning, so the progress
+    bar is reset to 0 immediately rather than showing a stale percentage while
+    "queued"). After MAX_AUTO_RESTARTS repeated interruptions, stop looping and
+    surface a clear failure instead of retrying forever.
     """
     db = SessionLocal()
     try:
         orphaned = db.query(Video).filter(Video.status == VideoStatus.RENDERING.value).all()
         for video in orphaned:
-            logger.warning(f"Re-queuing orphaned video {video.id} (was stuck in 'rendering', likely from a restart mid-render).")
-            video.status = VideoStatus.QUEUED.value
-            video.started_at = None
+            video.restart_count = (video.restart_count or 0) + 1
+            if video.restart_count > MAX_AUTO_RESTARTS:
+                logger.error(f"Video {video.id} interrupted {video.restart_count} times; giving up instead of restarting again.")
+                video.status = VideoStatus.FAILED.value
+                video.finished_at = datetime.utcnow()
+                video.error_message = (
+                    f"Le rendu a été interrompu {video.restart_count} fois par des redémarrages du serveur "
+                    "avant de pouvoir se terminer. Relancez-le manuellement une fois le serveur stable."
+                )
+                video.progress_stage = "Échec du rendu"
+            else:
+                logger.warning(f"Re-queuing orphaned video {video.id} (interrupted mid-render, restart #{video.restart_count}) — restarting from the beginning.")
+                video.status = VideoStatus.QUEUED.value
+                video.started_at = None
+                video.progress_stage = f"En reprise après interruption du serveur (tentative {video.restart_count + 1})"
+                video.progress_percent = 0
         if orphaned:
             db.commit()
     finally:
@@ -182,17 +202,32 @@ def purge_old_videos_and_uploads():
         db.close()
 
 
+_shutdown_requested = False
+
+def _handle_shutdown_signal(signum, frame):
+    # Best-effort: a deploy/restart's SIGTERM lands here instead of killing
+    # the process outright. We don't abort — process_single_queued_video()
+    # keeps running its current render to completion — we just stop picking
+    # up a *new* video afterwards. Whether this actually saves the in-flight
+    # render still depends on the container's stop grace period; if Docker's
+    # timeout expires first, SIGKILL takes the whole container regardless and
+    # requeue_orphaned_videos() picks up the pieces on next boot.
+    global _shutdown_requested
+    logger.warning("Worker received shutdown signal; finishing current render (if any) before exiting.")
+    _shutdown_requested = True
+
 def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False):
     """
     Main loop for background worker polling SQLite for queued videos.
     """
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     init_db()
     requeue_orphaned_videos()
     logger.info("Starting Nichecut Background Queue Worker...")
     last_purge = 0.0
     while True:
         processed = process_single_queued_video()
-        if single_run:
+        if single_run or _shutdown_requested:
             break
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
