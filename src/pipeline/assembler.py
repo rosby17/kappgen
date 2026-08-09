@@ -6,11 +6,10 @@ from typing import List, Optional, Dict, Any
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
 
-XFADE_TRANSITIONS = [
-    "fade", "fadeblack", "wipeleft", "wiperight", "slideleft", "slideright",
-    "circleopen", "circleclose", "dissolve", "smoothleft", "smoothright",
-]
-XFADE_DURATION = 0.5  # seconds of overlap between consecutive clips
+# Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
+# a gimmick" rather than a smooth blend between scenes.
+XFADE_TRANSITIONS = ["fade", "fadeblack", "dissolve"]
+XFADE_DURATION = 1.2  # seconds of overlap between consecutive clips — soft, unhurried blend
 
 def check_ffmpeg_filter(filter_name: str) -> bool:
     """Checks if a specific filter is supported by system ffmpeg."""
