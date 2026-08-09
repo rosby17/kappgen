@@ -2,7 +2,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from PIL import Image
 import io
 import random
@@ -58,8 +58,11 @@ async def save_valid_library_images(files: List[UploadFile], target_dir: Path):
         shutil.rmtree(incoming_dir, ignore_errors=True)
 
 @router.get("", response_model=List[Dict[str, Any]])
-def list_channels(db: Session = Depends(get_db)):
-    channels = db.query(Channel).order_by(Channel.created_at.desc()).all()
+def list_channels(user_id: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(Channel)
+    if user_id:
+        query = query.filter(Channel.user_id == user_id)
+    channels = query.order_by(Channel.created_at.desc()).all()
     result = []
     for c in channels:
         data = c.to_dict()

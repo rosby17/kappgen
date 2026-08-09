@@ -1,6 +1,7 @@
 import pytest
 import os
 import subprocess
+import uuid
 from pathlib import Path
 
 # Tests must never touch the production Postgres database or paid AI services.
@@ -62,6 +63,37 @@ def test_user_registration_and_login():
     })
     assert login_res.status_code == 200
     assert login_res.json()["id"] == user_id
+
+def test_account_history_is_filtered_by_user():
+    db = SessionLocal()
+    suffix = uuid.uuid4().hex
+    first_user = User(email=f"first-{suffix}@example.com", name="First", hashed_password="test")
+    second_user = User(email=f"second-{suffix}@example.com", name="Second", hashed_password="test")
+    db.add_all([first_user, second_user])
+    db.flush()
+    first_channel = Channel(user_id=first_user.id, name="First channel", niche="Test")
+    second_channel = Channel(user_id=second_user.id, name="Second channel", niche="Test")
+    db.add_all([first_channel, second_channel])
+    db.flush()
+    db.add_all([
+        Video(channel_id=first_channel.id, input_type="text", status=VideoStatus.QUEUED.value),
+        Video(channel_id=second_channel.id, input_type="text", status=VideoStatus.QUEUED.value),
+    ])
+    db.commit()
+
+    channels_response = client.get("/api/channels", params={"user_id": first_user.id})
+    videos_response = client.get("/api/videos", params={"user_id": first_user.id})
+
+    assert channels_response.status_code == 200
+    assert [channel["id"] for channel in channels_response.json()] == [first_channel.id]
+    assert videos_response.status_code == 200
+    assert [video["channel_id"] for video in videos_response.json()] == [first_channel.id]
+
+    db.query(Video).filter(Video.channel_id.in_([first_channel.id, second_channel.id])).delete(synchronize_session=False)
+    db.query(Channel).filter(Channel.id.in_([first_channel.id, second_channel.id])).delete(synchronize_session=False)
+    db.query(User).filter(User.id.in_([first_user.id, second_user.id])).delete(synchronize_session=False)
+    db.commit()
+    db.close()
 
 def test_channel_crud_flow(tmp_path):
     payload = {

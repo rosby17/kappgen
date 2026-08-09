@@ -128,8 +128,11 @@ async def submit_video_subject(
         return [video.to_dict()]
 
 @router.get("")
-def list_all_videos(db: Session = Depends(get_db)):
-    videos = db.query(Video).order_by(Video.created_at.desc()).all()
+def list_all_videos(user_id: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(Video)
+    if user_id:
+        query = query.join(Channel, Video.channel_id == Channel.id).filter(Channel.user_id == user_id)
+    videos = query.order_by(Video.created_at.desc()).all()
     return [v.to_dict() for v in videos]
 
 @router.get("/{video_id}")
