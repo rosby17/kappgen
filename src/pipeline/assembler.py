@@ -24,11 +24,13 @@ def assemble_final_video(
     effects_config: Optional[Dict[str, Any]] = None,
     branding_config: Optional[Dict[str, Any]] = None,
     clip_durations: Optional[List[float]] = None,
+    subtitle_style: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Joins motion clips (crossfading between them when durations are known so
     scene changes feel dynamic rather than hard-cut), applies color grading/
-    grain, burns subtitles, places logo, and multiplexes audio.
+    grain, burns subtitles, places a square logo (top-left) and channel-name
+    watermark text in the subtitle font (top-right), and multiplexes audio.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = output_path.parent / "temp"
@@ -36,6 +38,7 @@ def assemble_final_video(
 
     effects = effects_config or {}
     branding = branding_config or {}
+    sub_style = subtitle_style or {}
 
     video_filters = []
 
@@ -62,11 +65,31 @@ def assemble_final_video(
 
     vf_string = ",".join(video_filters) if video_filters else "null"
 
-    # Handles Logo overlay if branding logo_path is present
+    # Square logo, top-left corner (if configured)
     logo_path_str = branding.get("logo_path")
-    has_logo = False
-    if logo_path_str and Path(logo_path_str).exists():
-        has_logo = True
+    has_logo = bool(logo_path_str and Path(logo_path_str).exists())
+
+    # Channel-name watermark, top-right corner, styled with the channel's own
+    # subtitle font/color so it visually matches the rest of the video
+    # instead of a generic default. Written to a textfile so ffmpeg's drawtext
+    # doesn't choke on colons/quotes/apostrophes in the channel name.
+    watermark_text = str(branding.get("channel_name_text") or "").strip()
+    has_watermark = bool(watermark_text)
+    watermark_txt_path = None
+    if has_watermark:
+        watermark_txt_path = temp_dir / "watermark.txt"
+        watermark_txt_path.write_text(watermark_text, encoding="utf-8")
+        watermark_font = sub_style.get("font", "Arial")
+        # ffmpeg's color parser accepts "#RRGGBB" directly — the same web hex
+        # value already used for the subtitle style, no conversion needed.
+        watermark_color = sub_style.get("color") or "#FFFFFF"
+        watermark_outline = sub_style.get("outline_color") or "#000000"
+        wm_txt_escaped = str(watermark_txt_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        watermark_filter = (
+            f"drawtext=font='{watermark_font}':textfile='{wm_txt_escaped}':fontsize=40:"
+            f"fontcolor={watermark_color}:borderw=2:bordercolor={watermark_outline}:"
+            f"x=w-tw-40:y=40"
+        )
 
     # Crossfade chain needs each clip's real duration to compute cumulative
     # xfade offsets, and opens every clip as a simultaneous ffmpeg input to
@@ -104,7 +127,6 @@ def assemble_final_video(
             cumulative += clip_durations[i] - XFADE_DURATION
             prev_label = out_label
         video_chain = ";".join(chain)
-        post_chain = f"[v_joined]{vf_string}[v_base]" if vf_string != "null" else None
     else:
         with open(concat_list_file, "w", encoding="utf-8") as f:
             for clip in clip_paths:
@@ -118,25 +140,27 @@ def assemble_final_video(
     cmd.extend(["-i", str(audio_path.resolve())])
     audio_input_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
 
-    if use_xfade:
-        filter_parts = [video_chain]
-        base_label = "v_joined"
-        if vf_string != "null":
-            filter_parts.append(f"[v_joined]{vf_string}[v_base]")
-            base_label = "v_base"
-        if has_logo:
-            logo_index = len(clip_paths)
-            filter_parts.append(f"[{logo_index}:v]scale=120:-1[logo]")
-            filter_parts.append(f"[{base_label}][logo]overlay=W-w-40:40[outv]")
-            out_label = "outv"
-        else:
-            out_label = base_label
-        cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{out_label}]", "-map", f"{audio_input_index}:a"])
-    elif has_logo:
-        filter_complex = f"[0:v]{vf_string}[v_base];[1:v]scale=120:-1[logo];[v_base][logo]overlay=W-w-40:40[outv]"
-        cmd.extend(["-filter_complex", filter_complex, "-map", "[outv]", "-map", "2:a"])
+    filter_parts = [video_chain] if use_xfade else []
+    base_label = "v_joined" if use_xfade else "0:v"
+    if vf_string != "null":
+        filter_parts.append(f"[{base_label}]{vf_string}[v_base]")
+        base_label = "v_base"
+
+    if has_logo:
+        logo_index = len(clip_paths) if use_xfade else 1
+        # Force a clean square crop regardless of the source image's aspect ratio.
+        filter_parts.append(f"[{logo_index}:v]scale=100:100:force_original_aspect_ratio=increase,crop=100:100[logo]")
+        filter_parts.append(f"[{base_label}][logo]overlay=40:40[v_logo]")
+        base_label = "v_logo"
+
+    if has_watermark:
+        filter_parts.append(f"[{base_label}]{watermark_filter}[v_wm]")
+        base_label = "v_wm"
+
+    if filter_parts:
+        cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{base_label}]", "-map", f"{audio_input_index}:a"])
     else:
-        cmd.extend(["-vf", vf_string, "-map", "0:v", "-map", "1:a"])
+        cmd.extend(["-vf", "null", "-map", "0:v", "-map", "1:a"])
 
     # Encode to a temp file first and atomically rename into place only on success.
     # Prevents a killed/crashed process (e.g. server restart mid-render) from leaving

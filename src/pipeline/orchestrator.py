@@ -150,6 +150,7 @@ def run_video_pipeline(
         effects_config=channel_config.get("effects_config"),
         branding_config=channel_config.get("branding"),
         clip_durations=[seg["duration"] for seg in segments],
+        subtitle_style=channel_config.get("subtitle_style"),
     )
     
     logger.info(f"Pipeline successfully rendered video to {final_output_path}")
