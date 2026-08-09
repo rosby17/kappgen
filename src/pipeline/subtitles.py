@@ -52,7 +52,7 @@ def generate_ass_subtitles(
     primary_color = to_ass_color(style_config.get("color"), "&H00FFFFFF")  # White
     outline_color = to_ass_color(style_config.get("outline_color"), "&H00000000")  # Black
     outline_width = style_config.get("outline_width", 3)
-    position = style_config.get("position", "bottom")
+    position = str(style_config.get("position", "bottom")).strip().lower()
     karaoke = style_config.get("karaoke", True)
 
     alignment = 2  # Bottom center
@@ -136,7 +136,7 @@ def overlay_subtitles_on_image(
     width, height = img.size
     
     font_size = style_config.get("size", 48)
-    position = style_config.get("position", "bottom")
+    position = str(style_config.get("position", "bottom")).strip().lower()
     
     try:
         font = ImageFont.truetype("Helvetica", font_size)

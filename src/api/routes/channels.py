@@ -1,9 +1,11 @@
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 from PIL import Image
 import io
+import random
 import shutil
 import time
 import uuid
@@ -101,6 +103,25 @@ def get_channel(channel_id: str, db: Session = Depends(get_db)):
     data["rendering_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.RENDERING.value).count()
     data["done_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.DONE.value).count()
     return data
+
+@router.get("/{channel_id}/library-preview")
+def get_channel_library_preview(channel_id: str, db: Session = Depends(get_db)):
+    """Return a real random image from this channel's server-side library."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+    images = [
+        item for item in library_dir.iterdir()
+        if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS
+    ] if library_dir.is_dir() else []
+    if not images:
+        raise HTTPException(status_code=404, detail="Aucune image disponible dans cette bibliothèque.")
+
+    response = FileResponse(random.choice(images))
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 @router.put("/{channel_id}")
 def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depends(get_db)):
