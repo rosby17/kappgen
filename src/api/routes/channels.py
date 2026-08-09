@@ -1,7 +1,12 @@
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
+from PIL import Image
+import io
+import shutil
+import time
+import uuid
 from src.db.session import get_db
 from src.db.models import Channel, Video, User
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus
@@ -11,6 +16,44 @@ router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+
+async def save_valid_library_images(files: List[UploadFile], target_dir: Path):
+    incoming_dir = target_dir.with_name(f".{target_dir.name}.incoming-{uuid.uuid4()}")
+    incoming_dir.mkdir(parents=True, exist_ok=False)
+    saved = 0
+    rejected = 0
+    try:
+        for file in files:
+            ext = Path(file.filename or "").suffix.lower()
+            if ext not in ALLOWED_LIBRARY_EXTENSIONS:
+                rejected += 1
+                continue
+            contents = await file.read()
+            try:
+                with Image.open(io.BytesIO(contents)) as image:
+                    image.verify()
+            except Exception:
+                rejected += 1
+                continue
+            (incoming_dir / f"img_{saved:04d}{ext}").write_bytes(contents)
+            saved += 1
+
+        if saved == 0:
+            raise HTTPException(status_code=400, detail="Aucune image valide dans les fichiers envoyés.")
+
+        backup_dir = target_dir.with_name(f".{target_dir.name}.backup-{uuid.uuid4()}")
+        if target_dir.exists():
+            target_dir.rename(backup_dir)
+        try:
+            incoming_dir.rename(target_dir)
+        except Exception:
+            if backup_dir.exists() and not target_dir.exists():
+                backup_dir.rename(target_dir)
+            raise
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        return saved, rejected
+    finally:
+        shutil.rmtree(incoming_dir, ignore_errors=True)
 
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(db: Session = Depends(get_db)):
@@ -113,43 +156,75 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     db.refresh(channel)
     return channel.to_dict()
 
+@router.post("/library-images/staging")
+async def stage_channel_library_images(files: List[UploadFile] = File(...)):
+    staging_root = STORAGE_PATH / "staging" / "channel-libraries"
+    staging_root.mkdir(parents=True, exist_ok=True)
+
+    # Opportunistic cleanup of abandoned uploads older than 24 hours.
+    cutoff = time.time() - 86400
+    for old_dir in staging_root.iterdir():
+        if old_dir.is_dir() and old_dir.stat().st_mtime < cutoff:
+            shutil.rmtree(old_dir, ignore_errors=True)
+
+    token = str(uuid.uuid4())
+    saved, rejected = await save_valid_library_images(files, staging_root / token)
+    return {"staging_token": token, "library_image_count": saved, "rejected_count": rejected}
+
+@router.post("/{channel_id}/library-images/staging")
+def attach_staged_channel_library(
+    channel_id: str,
+    staging_token: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        safe_token = str(uuid.UUID(staging_token))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Import temporaire invalide.")
+
+    staging_dir = STORAGE_PATH / "staging" / "channel-libraries" / safe_token
+    if not staging_dir.is_dir() or not any(staging_dir.iterdir()):
+        raise HTTPException(status_code=400, detail="Import temporaire introuvable ou expiré.")
+
+    library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+    saved = len([item for item in staging_dir.iterdir() if item.is_file()])
+    backup_dir = library_dir.with_name(f".{library_dir.name}.backup-{uuid.uuid4()}")
+    library_dir.parent.mkdir(parents=True, exist_ok=True)
+    if library_dir.exists():
+        library_dir.rename(backup_dir)
+    try:
+        staging_dir.rename(library_dir)
+    except Exception:
+        if backup_dir.exists() and not library_dir.exists():
+            backup_dir.rename(library_dir)
+        raise
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    image_style = dict(channel.image_style or {})
+    image_style["library_path"] = f"channels/{channel.id}/library"
+    image_style["library_image_count"] = saved
+    channel.image_style = image_style
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
 @router.post("/{channel_id}/library-images")
 async def upload_channel_library_images(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    library_dir = STORAGE_PATH / "channels" / channel.id / "library"
-    library_dir.mkdir(parents=True, exist_ok=True)
-
-    valid_files = []
-    for file in files:
-        ext = Path(file.filename or "").suffix.lower()
-        if ext not in ALLOWED_LIBRARY_EXTENSIONS:
-            continue
-        contents = await file.read()
-        if contents:
-            valid_files.append((ext, contents))
-
-    if not valid_files:
-        raise HTTPException(status_code=400, detail="Aucune image valide dans les fichiers envoyés.")
-
-    # Only replace the existing library after the new payload has been fully
-    # received and validated. A bad upload can no longer erase good assets.
-    for old_file in library_dir.iterdir():
-        if old_file.is_file():
-            old_file.unlink(missing_ok=True)
-
-    for index, (ext, contents) in enumerate(valid_files):
-        dest_file = library_dir / f"img_{index:04d}{ext}"
-        dest_file.write_bytes(contents)
-
-    saved = len(valid_files)
+    saved, rejected = await save_valid_library_images(
+        files,
+        STORAGE_PATH / "channels" / channel.id / "library",
+    )
 
     image_style = dict(channel.image_style or {})
-    image_style["source"] = "library"
     image_style["library_path"] = f"channels/{channel.id}/library"
     image_style["library_image_count"] = saved
+    image_style["library_rejected_count"] = rejected
     channel.image_style = image_style
 
     db.commit()
