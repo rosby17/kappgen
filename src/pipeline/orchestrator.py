@@ -153,4 +153,21 @@ def run_video_pipeline(
     )
     
     logger.info(f"Pipeline successfully rendered video to {final_output_path}")
+
+    # Intermediate per-scene clips (and raw voiceover/image working files) are
+    # only needed to build output.mp4 — once assembly succeeds they just eat
+    # disk space (a single long video's clips/ dir can be gigabytes). Delete
+    # them now rather than waiting for the multi-day purge job.
+    try:
+        import shutil
+        if clips_dir.exists():
+            shutil.rmtree(clips_dir, ignore_errors=True)
+        if images_dir.exists():
+            shutil.rmtree(images_dir, ignore_errors=True)
+        temp_dir = output_dir / "temp"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception as cleanup_err:
+        logger.warning(f"Non-fatal: failed to clean up intermediate render files for {output_dir}: {cleanup_err}")
+
     return final_output_path

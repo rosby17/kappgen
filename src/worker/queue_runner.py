@@ -1,6 +1,7 @@
+import shutil
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel
@@ -9,6 +10,10 @@ from src.pipeline.orchestrator import run_video_pipeline
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
+
+VIDEO_RETENTION_DAYS = 5
+UPLOAD_RETENTION_HOURS = 48
+PURGE_INTERVAL_SECONDS = 3600
 
 def process_single_queued_video() -> bool:
     """
@@ -120,6 +125,63 @@ def requeue_orphaned_videos():
     finally:
         db.close()
 
+def purge_old_render_output(video: Video) -> None:
+    """Deletes a finished video's rendered output + source assets from disk,
+    keeping the DB record (with purged_at set) so history/stats stay intact."""
+    channel_id = video.channel_id
+    video_dir = STORAGE_PATH / "channels" / str(channel_id) / "videos" / str(video.id)
+    if video_dir.exists():
+        shutil.rmtree(video_dir, ignore_errors=True)
+
+
+def purge_old_videos_and_uploads():
+    """
+    Frees disk space on the shared VPS:
+    - Deletes rendered video files (output.mp4 + source assets) for videos
+      finished more than VIDEO_RETENTION_DAYS ago. The DB record is kept
+      (purged_at is set, output_path cleared) so history/counters remain.
+    - Deletes uploaded source audio files older than UPLOAD_RETENTION_HOURS —
+      they're only needed once, at render time, and are never reused after.
+    """
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=VIDEO_RETENTION_DAYS)
+        stale_videos = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.purged_at.is_(None))
+            .filter(Video.finished_at.isnot(None))
+            .filter(Video.finished_at < cutoff)
+            .all()
+        )
+        for video in stale_videos:
+            try:
+                purge_old_render_output(video)
+                video.output_path = None
+                video.source_assets_path = None
+                video.purged_at = datetime.utcnow()
+                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {VIDEO_RETENTION_DAYS}d).")
+            except Exception as purge_err:
+                logger.warning(f"Failed to purge video {video.id}: {purge_err}")
+        if stale_videos:
+            db.commit()
+
+        # Uploaded source audio is only needed once, at render time (it gets
+        # copied into the video's own source/ dir when picked up by the
+        # worker); anything older than the retention window is safe to drop
+        # even if a video record still points at it.
+        uploads_dir = STORAGE_PATH / "uploads"
+        if uploads_dir.exists():
+            upload_cutoff = time.time() - (UPLOAD_RETENTION_HOURS * 3600)
+            for f in uploads_dir.iterdir():
+                if f.is_file() and f.stat().st_mtime < upload_cutoff:
+                    f.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Storage purge pass failed: {e}")
+    finally:
+        db.close()
+
+
 def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False):
     """
     Main loop for background worker polling SQLite for queued videos.
@@ -127,10 +189,15 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     init_db()
     requeue_orphaned_videos()
     logger.info("Starting Nichecut Background Queue Worker...")
+    last_purge = 0.0
     while True:
         processed = process_single_queued_video()
         if single_run:
             break
+        now = time.time()
+        if now - last_purge > PURGE_INTERVAL_SECONDS:
+            purge_old_videos_and_uploads()
+            last_purge = now
         if not processed:
             time.sleep(poll_interval_seconds)
 

@@ -133,6 +133,7 @@ class Video(Base):
     error_message = Column(Text, nullable=True)
     duration_seconds = Column(Float, nullable=True)
     estimated_duration_seconds = Column(Float, nullable=True)
+    purged_at = Column(DateTime, nullable=True)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
 
@@ -158,4 +159,5 @@ class Video(Base):
             "duration_seconds": self.duration_seconds,
             "progress_stage": self.progress_stage,
             "progress_percent": self.progress_percent or 0,
+            "purged_at": self.purged_at.isoformat() if self.purged_at else None,
         }
