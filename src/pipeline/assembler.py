@@ -140,8 +140,8 @@ def assemble_final_video(
 
     cmd.extend([
         "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "20",
+        "-preset", "veryfast",
+        "-crf", "21",
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
