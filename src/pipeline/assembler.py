@@ -69,12 +69,18 @@ def assemble_final_video(
         has_logo = True
 
     # Crossfade chain needs each clip's real duration to compute cumulative
-    # xfade offsets. Only usable when every clip is comfortably longer than
-    # the crossfade window; otherwise fall back to a plain hard-cut concat.
+    # xfade offsets, and opens every clip as a simultaneous ffmpeg input to
+    # build the filter graph — on a memory-constrained shared box that OOM-
+    # kills the process for long videos with many scenes (confirmed in
+    # production: a 40+ clip render was killed by the Linux OOM killer).
+    # Cap it to short/medium videos; long ones fall back to a plain hard-cut
+    # concat, which streams clips sequentially instead of holding them all
+    # open in memory at once.
+    MAX_CLIPS_FOR_XFADE = 15
     use_xfade = (
         clip_durations is not None
         and len(clip_durations) == len(clip_paths)
-        and len(clip_paths) >= 2
+        and 2 <= len(clip_paths) <= MAX_CLIPS_FOR_XFADE
         and all(d > XFADE_DURATION * 2.2 for d in clip_durations)
     )
 
