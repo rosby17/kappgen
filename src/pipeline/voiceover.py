@@ -10,7 +10,8 @@ from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 
 TASK_POLL_INTERVAL_SECONDS = 2.5
 TASK_POLL_TIMEOUT_SECONDS = 600  # per task (TTS call or one STT chunk)
-STT_CHUNK_SECONDS = 600  # 10 min/chunk keeps files well under Izivoice's 50MB STT limit
+STT_CHUNK_SECONDS = 300  # 5 min/chunk — smaller chunks are less likely to trip
+                          # Izivoice's STT into a 500 (observed on 10-min chunks)
 
 _cached_voice_id: Optional[str] = None
 
@@ -242,6 +243,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
     all_words: List[Dict[str, Any]] = []
     all_text_parts: List[str] = []
     offset = 0.0
+    failed_chunks = 0
 
     try:
         with httpx.Client() as client:
@@ -249,20 +251,32 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
                 chunk_duration = get_audio_duration(chunk_path)
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
-                with open(chunk_path, "rb") as f:
-                    resp = _post_with_retry(
-                        client,
-                        f"{IZIVOICE_BASE_URL}/speech-to-text",
-                        headers=_izivoice_headers(),
-                        files={"file": (chunk_path.name, f, "audio/mpeg")},
-                        timeout=60.0
-                    )
-                resp.raise_for_status()
-                task_id = resp.json()["task_id"]
-                task = _poll_task(task_id, client)
-                metadata = task.get("metadata", {}) or {}
+                try:
+                    with open(chunk_path, "rb") as f:
+                        resp = _post_with_retry(
+                            client,
+                            f"{IZIVOICE_BASE_URL}/speech-to-text",
+                            headers=_izivoice_headers(),
+                            files={"file": (chunk_path.name, f, "audio/mpeg")},
+                            timeout=60.0
+                        )
+                    resp.raise_for_status()
+                    task_id = resp.json()["task_id"]
+                    task = _poll_task(task_id, client)
+                    metadata = task.get("metadata", {}) or {}
+                    chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata)
+                except Exception as chunk_err:
+                    # One chunk failing (Izivoice has returned 500s on some
+                    # requests) must not throw away transcript already
+                    # recovered from the OTHER chunks — previously any single
+                    # failure fell back to showing the video's filename/title
+                    # as "subtitles" for the entire video. Skip just this
+                    # segment (no subtitle line during its span) instead.
+                    failed_chunks += 1
+                    logger.warning(f"Transcription failed for chunk {chunk_path.name} ({chunk_err}); leaving this segment without subtitles rather than discarding the rest of the transcript.")
+                    offset += chunk_duration
+                    continue
 
-                chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata)
                 all_text_parts.append(chunk_text)
 
                 if chunk_words:
@@ -281,6 +295,11 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
                         })
 
                 offset += chunk_duration
+
+        if failed_chunks == len(chunks):
+            raise RuntimeError(f"All {len(chunks)} transcription chunk(s) failed.")
+        if failed_chunks:
+            logger.warning(f"{failed_chunks}/{len(chunks)} transcription chunks failed and were skipped; the rest of the transcript is real.")
     finally:
         if chunk_dir.exists() and chunk_dir != audio_path.parent:
             for f in chunk_dir.glob("*"):
