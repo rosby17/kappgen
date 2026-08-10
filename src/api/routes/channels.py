@@ -12,7 +12,7 @@ import uuid
 from src.db.session import get_db
 from src.db.models import Channel, Video, User
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus
-from src.config import STORAGE_PATH
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -189,6 +189,38 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
+
+@router.post("/preview-ai-music")
+async def preview_ai_music(
+    niche: str = Form(""),
+    ai_prompt: Optional[str] = Form(None),
+    script_excerpt: Optional[str] = Form(None),
+    duration: float = Form(20.0),
+):
+    """Generates a short AI music preview on the spot, so the client can listen
+    to it in the wizard before saving the channel — same prompt path used at
+    render time (Claude-written prompt, or the client's own override)."""
+    if not IZIVOICE_API_KEY:
+        raise HTTPException(status_code=503, detail="La génération musicale IA n'est pas configurée sur le serveur.")
+
+    prompt = (ai_prompt or "").strip()
+    if not prompt:
+        from src.pipeline.vision import generate_music_prompt
+        try:
+            prompt = generate_music_prompt(niche, script_excerpt or "")
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Génération du prompt impossible : {e}")
+
+    from src.pipeline.music import generate_music_izivoice
+    tmp_dir = STORAGE_PATH / "tmp" / "music-previews"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"{uuid.uuid4()}.mp3"
+    try:
+        generate_music_izivoice(prompt, max(5.0, min(duration, 30.0)), tmp_path)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Génération musicale impossible : {e}")
+
+    return FileResponse(tmp_path, media_type="audio/mpeg", filename="preview.mp3")
 
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 

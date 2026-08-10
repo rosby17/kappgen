@@ -50,7 +50,7 @@ class MusicPreference(BaseModel):
     track_id_or_style: str = "ambient"  # legacy, unused by new modes — kept for old channels
     tracks: List[str] = Field(default_factory=list)  # storage-relative paths to uploaded tracks; one is picked at random per render
     ai_prompt: Optional[str] = None     # optional override prompt for AI generation; defaults to the channel niche
-    volume: float = 0.15                # Background volume level (0.0 - 1.0)
+    volume: float = 0.10                # Background volume level (0.0 - 1.0)
 
 class ImageStyle(BaseModel):
     source: str = "library"             # "library" | "ai_generated"
@@ -62,6 +62,8 @@ class EffectsConfig(BaseModel):
     grain: bool = True                  # legacy flag, kept for old channels — superseded by overlay_effect
     overlay_effect: str = "grain"       # "none", "grain", "white_noise", "vignette", "grain_vignette"
     color_grade: str = "warm"           # "warm", "vintage", "dramatic", "none"
+    grain_intensity: int = 50           # 0-100, scales the noise/grain amount
+    vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
 

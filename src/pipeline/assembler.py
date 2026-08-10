@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import subprocess
@@ -54,18 +55,30 @@ def assemble_final_video(
     # Overlay effect — a texture layered on top of the whole video, distinct
     # from the color grade above. "overlay_effect" is the current field;
     # falls back to the old boolean "grain" flag for channels saved before
-    # this was a choice of several effects.
+    # this was a choice of several effects. grain_intensity/vignette_intensity
+    # (0-100, default 50) scale how strong each one is.
     overlay_effect = effects.get("overlay_effect")
     if overlay_effect is None:
         overlay_effect = "grain" if effects.get("grain", True) else "none"
+
+    grain_frac = max(0, min(100, effects.get("grain_intensity", 50))) / 100
+    vignette_frac = max(0, min(100, effects.get("vignette_intensity", 50))) / 100
+
+    # alls ranges chosen so 50% lands near the old fixed defaults (8 / 22)
+    grain_alls = round(2 + grain_frac * 28)
+    white_noise_alls = round(4 + grain_frac * 46)
+    # ffmpeg's vignette "angle": smaller = stronger. PI/4 was the old fixed
+    # default (~50%); sweep from a barely-there PI/2.2 up to a heavy PI/9.
+    vignette_angle = (math.pi / 2.2) - (math.pi / 2.2 - math.pi / 9) * vignette_frac
+
     if overlay_effect == "grain":
-        video_filters.append("noise=alls=8:allf=t+u")
+        video_filters.append(f"noise=alls={grain_alls}:allf=t+u")
     elif overlay_effect == "white_noise":
-        video_filters.append("noise=alls=22:allf=t+u")
+        video_filters.append(f"noise=alls={white_noise_alls}:allf=t+u")
     elif overlay_effect == "vignette":
-        video_filters.append("vignette=PI/4")
+        video_filters.append(f"vignette={vignette_angle:.4f}")
     elif overlay_effect == "grain_vignette":
-        video_filters.append("noise=alls=8:allf=t+u,vignette=PI/4")
+        video_filters.append(f"noise=alls={grain_alls}:allf=t+u,vignette={vignette_angle:.4f}")
 
     # Check if FFmpeg build has libass 'subtitles' filter
     has_subtitles_filter = check_ffmpeg_filter("subtitles")
