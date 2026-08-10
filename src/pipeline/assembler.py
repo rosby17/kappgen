@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
-from src.config import STORAGE_PATH
+from src.config import STORAGE_PATH, ASSETS_PATH
+
+WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 
 # Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
 # a gimmick" rather than a smooth blend between scenes.
@@ -115,6 +117,10 @@ def assemble_final_video(
     logo_full_path = (STORAGE_PATH / logo_path_str) if logo_path_str else None
     has_logo = bool(branding.get("logo_enabled", True) and logo_full_path and logo_full_path.exists())
 
+    # NicheCut watermark, bottom-left, small — on by default (free-tier), toggleable
+    # per channel via effects_config.watermark_enabled.
+    has_watermark = bool(effects.get("watermark_enabled", True) and WATERMARK_PATH.exists())
+
     # Crossfade chain needs each clip's real duration to compute cumulative
     # xfade offsets, and opens every clip as a simultaneous ffmpeg input to
     # build the filter graph — on a memory-constrained shared box that OOM-
@@ -164,9 +170,11 @@ def assemble_final_video(
 
     if has_logo:
         cmd.extend(["-i", str(logo_full_path.resolve())])
+    if has_watermark:
+        cmd.extend(["-i", str(WATERMARK_PATH.resolve())])
 
     cmd.extend(["-i", str(audio_path.resolve())])
-    audio_input_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
+    audio_input_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0) + (1 if has_watermark else 0)
 
     filter_parts = [video_chain] if use_xfade else []
     base_label = "v_joined" if use_xfade else "0:v"
@@ -180,6 +188,14 @@ def assemble_final_video(
         filter_parts.append(f"[{logo_index}:v]scale=100:100:force_original_aspect_ratio=increase,crop=100:100[logo]")
         filter_parts.append(f"[{base_label}][logo]overlay=W-w-40:40[v_logo]")
         base_label = "v_logo"
+
+    if has_watermark:
+        watermark_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
+        # Small, semi-transparent, bottom-left — a discreet "made with NicheCut"
+        # mark rather than a competing brand element.
+        filter_parts.append(f"[{watermark_index}:v]scale=200:-1,format=rgba,colorchannelmixer=aa=0.75[wm]")
+        filter_parts.append(f"[{base_label}][wm]overlay=30:H-h-30[v_wm]")
+        base_label = "v_wm"
 
     if filter_parts:
         cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{base_label}]", "-map", f"{audio_input_index}:a"])

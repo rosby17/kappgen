@@ -70,6 +70,7 @@ class EffectsConfig(BaseModel):
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
+    watermark_enabled: bool = True       # small "Créé avec NicheCut" mark, bottom-left — free-tier default; toggleable
 
 class ChannelCreate(BaseModel):
     name: str
