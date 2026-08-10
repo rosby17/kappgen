@@ -283,6 +283,8 @@ def list_video_scenes(video_id: str, db: Session = Depends(get_db)):
             "start": s["start"],
             "end": s["end"],
             "duration": s["duration"],
+            "text": s.get("text", ""),
+            "editable_text": s.get("word_start_idx") is not None,
             "image_url": f"/api/videos/{video_id}/scenes/{s['index']}/image",
         }
         for s in scenes
@@ -359,6 +361,74 @@ async def replace_scene_image(
     video.is_reassembly = True
     video.error_message = None
     video.progress_stage = "En attente du réassemblage"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
+class SceneSubtitleUpdate(BaseModel):
+    text: str
+
+
+@router.patch("/{video_id}/scenes/{scene_index}/subtitle")
+def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleUpdate, db: Session = Depends(get_db)):
+    """Corrects one scene's caption text only — no TTS/STT call, audio untouched.
+    Queued the same way as an image swap; the worker calls edit_scene_subtitle_text."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Le texte ne peut pas être vide.")
+
+    scenes = _load_scenes_manifest(video)
+    scene = next((s for s in scenes if s["index"] == scene_index), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    if scene.get("word_start_idx") is None:
+        raise HTTPException(status_code=409, detail="Cette scène n’a pas de sous-titres modifiables (vidéo antérieure à cette fonctionnalité).")
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = True
+    video.pending_edit = {"type": "subtitle_text", "scene_index": scene_index, "text": text}
+    video.error_message = None
+    video.progress_stage = "En attente de la correction des sous-titres"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
+@router.post("/{video_id}/scenes/{scene_index}/regenerate-audio")
+def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: SceneSubtitleUpdate, db: Session = Depends(get_db)):
+    """Re-records one scene's narration via TTS. Re-times that scene's clip and
+    every later scene's position in the final video (their own clips are kept,
+    only their timeline position moves) — queued for the worker to run
+    regenerate_scene_audio, since it involves a real TTS call."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Le texte ne peut pas être vide.")
+
+    scenes = _load_scenes_manifest(video)
+    scene = next((s for s in scenes if s["index"] == scene_index), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    if scene.get("word_start_idx") is None:
+        raise HTTPException(status_code=409, detail="Cette scène n’a pas de plage audio modifiable (vidéo antérieure à cette fonctionnalité).")
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = True
+    video.pending_edit = {"type": "audio", "scene_index": scene_index, "text": text}
+    video.error_message = None
+    video.progress_stage = "En attente de la régénération de la voix"
     video.progress_percent = 0
     db.commit()
     db.refresh(video)

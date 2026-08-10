@@ -7,7 +7,12 @@ from pathlib import Path
 from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel
 from src.models.project import VideoStatus
-from src.pipeline.orchestrator import run_video_pipeline, reassemble_video_output
+from src.pipeline.orchestrator import (
+    run_video_pipeline,
+    reassemble_video_output,
+    edit_scene_subtitle_text,
+    regenerate_scene_audio,
+)
 from src.pipeline.transcode import try_ensure_sd_variant
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
@@ -61,10 +66,30 @@ def process_single_queued_video() -> bool:
         video_dir = STORAGE_PATH / "channels" / str(channel.id) / "videos" / str(video.id)
 
         if video.is_reassembly:
-            # A scene image was swapped via the post-render editor — rebuild
-            # output.mp4 from the kept clips/subtitles/audio only, skipping
-            # TTS/pacing/image-fetch entirely (those didn't change).
-            output_mp4 = reassemble_video_output(channel_config=channel.to_dict(), output_dir=video_dir)
+            # Studio editor request — pending_edit says which lightweight edit
+            # to run instead of the full pipeline. No pending_edit (or an
+            # unrecognized/legacy "image" type) means a plain scene-image swap:
+            # rebuild output.mp4 from the kept clips/subtitles/audio only.
+            edit = video.pending_edit or {}
+            edit_type = edit.get("type", "image")
+            channel_config = channel.to_dict()
+            if edit_type == "subtitle_text":
+                output_mp4 = edit_scene_subtitle_text(
+                    channel_config=channel_config,
+                    output_dir=video_dir,
+                    scene_index=edit["scene_index"],
+                    new_text=edit.get("text") or "",
+                )
+            elif edit_type == "audio":
+                output_mp4 = regenerate_scene_audio(
+                    channel_config=channel_config,
+                    output_dir=video_dir,
+                    scene_index=edit["scene_index"],
+                    new_text=edit.get("text") or "",
+                )
+            else:
+                output_mp4 = reassemble_video_output(channel_config=channel_config, output_dir=video_dir)
+            video.pending_edit = None
             try:
                 video.duration_seconds = get_audio_duration(output_mp4)
             except Exception:
@@ -196,7 +221,7 @@ def purge_edit_assets(video: Video) -> None:
     without touching output.mp4 or the small source files (voiceover, transcript,
     subtitles) — the video stays downloadable/watchable, just no longer editable."""
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
-    for sub in ("source/images", "source/clips"):
+    for sub in ("source/images", "source/clips", "source/audio_segments"):
         p = video_dir / sub
         if p.exists():
             shutil.rmtree(p, ignore_errors=True)

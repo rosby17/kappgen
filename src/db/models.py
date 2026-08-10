@@ -143,6 +143,11 @@ class Video(Base):
     # credits transcribing the upload for accurate subtitles, or skip it (free,
     # approximate title-based captions instead). Opt-out toggle in the wizard.
     transcribe_audio = Column(Boolean, nullable=False, default=True)
+    # Set alongside is_reassembly=True + status=QUEUED by the Studio editor's
+    # scene endpoints; tells the worker which lightweight edit function to run
+    # instead of the full pipeline. JSON: {"type": "image"|"subtitle_text"|"audio",
+    # "scene_index": int, "text": str|null}. Cleared once the worker picks it up.
+    pending_edit = Column(JSON, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")

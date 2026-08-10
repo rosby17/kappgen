@@ -54,6 +54,7 @@ def init_db():
             "is_reassembly": "ALTER TABLE videos ADD COLUMN is_reassembly BOOLEAN DEFAULT FALSE NOT NULL",
             "edit_assets_purged_at": "ALTER TABLE videos ADD COLUMN edit_assets_purged_at TIMESTAMP",
             "transcribe_audio": "ALTER TABLE videos ADD COLUMN transcribe_audio BOOLEAN DEFAULT TRUE NOT NULL",
+            "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
