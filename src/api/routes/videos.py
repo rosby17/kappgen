@@ -18,6 +18,11 @@ router = APIRouter(prefix="/api/videos", tags=["videos"])
 
 LIBRARY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
+# At the capped ~4.2Mbps render bitrate a 60min video lands around ~2GB —
+# generous for long-form content while stopping runaway renders (and the
+# very long CPU-bound renders that caused them) before they even start.
+MAX_VIDEO_DURATION_SECONDS = 60 * 60
+
 def validate_channel_visual_source(channel: Channel) -> None:
     """Fail before TTS/queueing when the selected visual source cannot work."""
     image_style = channel.image_style or {}
@@ -96,6 +101,13 @@ async def submit_video_subject(
             except Exception:
                 estimated_duration = None
 
+            if estimated_duration and estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+                dest_file.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"« {audio_file.filename} » dure {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min.",
+                )
+
             video = Video(
                 channel_id=channel.id,
                 script_text=auto_title,
@@ -121,6 +133,12 @@ async def submit_video_subject(
         # shorter jobs; corrected to the real duration once TTS runs.
         word_count = len(script_text.split())
         estimated_duration = max(3.0, word_count / 2.5)
+
+        if estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ce script produirait une vidéo d'environ {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min. Raccourcissez le texte ou divisez-le en plusieurs vidéos.",
+            )
 
         video = Video(
             channel_id=channel.id,
