@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer, Boolean
 from sqlalchemy.orm import relationship
 from src.db.session import Base
 from src.models.project import VideoStatus
@@ -137,6 +137,8 @@ class Video(Base):
     restart_count = Column(Integer, nullable=False, default=0)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
+    is_reassembly = Column(Boolean, nullable=False, default=False)
+    edit_assets_purged_at = Column(DateTime, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -161,4 +163,5 @@ class Video(Base):
             "progress_stage": self.progress_stage,
             "progress_percent": self.progress_percent or 0,
             "purged_at": self.purged_at.isoformat() if self.purged_at else None,
+            "editable": bool(self.status == VideoStatus.DONE.value and self.output_path and not self.edit_assets_purged_at),
         }

@@ -114,7 +114,7 @@ def run_video_pipeline(
     clip_paths = []
     zoom_min = channel_config.get("effects_config", {}).get("zoom_min_pct", 1.0)
     zoom_max = channel_config.get("effects_config", {}).get("zoom_max_pct", 1.12)
-    
+
     for i, (seg, img_path) in enumerate(zip(segments, subtitled_image_paths)):
         clip_file = clips_dir / f"clip_{i+1:03d}.mp4"
         build_image_clip(
@@ -125,6 +125,22 @@ def run_video_pipeline(
             zoom_max_pct=zoom_max
         )
         clip_paths.append(clip_file)
+
+    # Manifest of each scene's source image + built clip, keyed by index — lets
+    # the post-render editor ("replace this image") locate and rebuild a single
+    # scene without needing to re-run TTS/pacing/image-fetch for the whole video.
+    scenes_manifest = [
+        {
+            "index": i,
+            "start": seg["start"],
+            "end": seg["end"],
+            "duration": seg["duration"],
+            "image_path": str(image_paths[i]),
+            "clip_path": str(clip_paths[i]),
+        }
+        for i, seg in enumerate(segments)
+    ]
+    (source_dir / "scenes.json").write_text(json.dumps(scenes_manifest, indent=2), encoding="utf-8")
         
     # 7. Mix Voiceover and Background Music
     logger.info("Step 6/7: Mixing audio tracks...")
@@ -166,20 +182,55 @@ def run_video_pipeline(
     
     logger.info(f"Pipeline successfully rendered video to {final_output_path}")
 
-    # Intermediate per-scene clips (and raw voiceover/image working files) are
-    # only needed to build output.mp4 — once assembly succeeds they just eat
-    # disk space (a single long video's clips/ dir can be gigabytes). Delete
-    # them now rather than waiting for the multi-day purge job.
+    # images_dir/clips_dir are kept (not deleted here) so the post-render editor
+    # can swap a bad scene image and reassemble without redoing TTS/image-gen —
+    # they're purged later by the retention job or when the user closes the editor.
+    # assembler's own scratch dir (concat list file) is short-lived and safe to drop now.
     try:
         import shutil
-        if clips_dir.exists():
-            shutil.rmtree(clips_dir, ignore_errors=True)
-        if images_dir.exists():
-            shutil.rmtree(images_dir, ignore_errors=True)
         temp_dir = output_dir / "temp"
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
     except Exception as cleanup_err:
-        logger.warning(f"Non-fatal: failed to clean up intermediate render files for {output_dir}: {cleanup_err}")
+        logger.warning(f"Non-fatal: failed to clean up scratch render files for {output_dir}: {cleanup_err}")
 
+    return final_output_path
+
+
+def reassemble_video_output(
+    channel_config: Dict[str, Any],
+    output_dir: Path,
+) -> Path:
+    """
+    Rebuilds output.mp4 from an already-rendered video's kept scene clips,
+    subtitles, and mixed audio — used by the post-render editor after a scene
+    image (and its clip) has been swapped, so a fix doesn't require redoing
+    TTS, pacing, or image generation for the whole video.
+    """
+    source_dir = output_dir / "source"
+    scenes_path = source_dir / "scenes.json"
+    if not scenes_path.exists():
+        raise FileNotFoundError(f"No scenes.json found for {output_dir} — this video predates edit support or was already purged.")
+
+    scenes_manifest = json.loads(scenes_path.read_text(encoding="utf-8"))
+    clip_paths = [Path(s["clip_path"]) for s in scenes_manifest]
+    clip_durations = [s["duration"] for s in scenes_manifest]
+
+    subtitle_ass_path = source_dir / "subtitles.ass"
+    mixed_audio_path = source_dir / "mixed_audio.mp3"
+    if not mixed_audio_path.exists():
+        mixed_audio_path = source_dir / "voiceover.mp3"
+
+    final_output_path = output_dir / "output.mp4"
+    assemble_final_video(
+        clip_paths=clip_paths,
+        audio_path=mixed_audio_path,
+        subtitle_ass_path=subtitle_ass_path,
+        output_path=final_output_path,
+        effects_config=channel_config.get("effects_config"),
+        branding_config=channel_config.get("branding"),
+        clip_durations=clip_durations,
+        subtitle_style=channel_config.get("subtitle_style"),
+    )
+    logger.info(f"Reassembled video output to {final_output_path}")
     return final_output_path

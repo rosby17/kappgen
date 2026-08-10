@@ -7,13 +7,19 @@ from pathlib import Path
 from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel
 from src.models.project import VideoStatus
-from src.pipeline.orchestrator import run_video_pipeline
+from src.pipeline.orchestrator import run_video_pipeline, reassemble_video_output
 from src.pipeline.transcode import try_ensure_sd_variant
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
 
-VIDEO_RETENTION_DAYS = 5
+# Kept at 7 days so the post-render editor's "swap a bad scene image" window
+# never outlives the video itself (edit assets are a subset of what this purges).
+VIDEO_RETENTION_DAYS = 7
+# Editable scene assets (images/clips kept for the post-render editor) get
+# their own, separate purge — either at this deadline, or immediately if the
+# user explicitly closes the editor.
+EDIT_ASSETS_RETENTION_DAYS = 7
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
 
@@ -41,10 +47,10 @@ def process_single_queued_video() -> bool:
             db.close()
             return False
 
-        logger.info(f"Worker picked queued video ID: {video.id} (Channel: {video.channel_id})")
+        logger.info(f"Worker picked queued video ID: {video.id} (Channel: {video.channel_id}, reassembly={video.is_reassembly})")
         video.status = VideoStatus.RENDERING.value
         video.started_at = datetime.utcnow()
-        video.progress_stage = "Démarrage du rendu"
+        video.progress_stage = "Réassemblage de la vidéo" if video.is_reassembly else "Démarrage du rendu"
         video.progress_percent = 2
         db.commit()
 
@@ -53,7 +59,28 @@ def process_single_queued_video() -> bool:
             raise ValueError(f"Channel {video.channel_id} not found in database.")
 
         video_dir = STORAGE_PATH / "channels" / str(channel.id) / "videos" / str(video.id)
-        
+
+        if video.is_reassembly:
+            # A scene image was swapped via the post-render editor — rebuild
+            # output.mp4 from the kept clips/subtitles/audio only, skipping
+            # TTS/pacing/image-fetch entirely (those didn't change).
+            output_mp4 = reassemble_video_output(channel_config=channel.to_dict(), output_dir=video_dir)
+            try:
+                video.duration_seconds = get_audio_duration(output_mp4)
+            except Exception:
+                pass
+            video.status = VideoStatus.DONE.value
+            video.is_reassembly = False
+            video.finished_at = datetime.utcnow()
+            video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
+            video.error_message = None
+            video.progress_stage = "Vidéo prête"
+            video.progress_percent = 100
+            db.commit()
+            logger.info(f"Worker successfully reassembled video ID: {video.id}")
+            try_ensure_sd_variant(output_mp4)
+            return True
+
         pre_audio_path = None
         if video.audio_input_path:
             p = Path(video.audio_input_path)
@@ -163,6 +190,48 @@ def purge_old_render_output(video: Video) -> None:
         shutil.rmtree(video_dir, ignore_errors=True)
 
 
+def purge_edit_assets(video: Video) -> None:
+    """Deletes the heavy scene images/clips kept for the post-render editor,
+    without touching output.mp4 or the small source files (voiceover, transcript,
+    subtitles) — the video stays downloadable/watchable, just no longer editable."""
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    for sub in ("source/images", "source/clips"):
+        p = video_dir / sub
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+    scenes_manifest = video_dir / "source" / "scenes.json"
+    scenes_manifest.unlink(missing_ok=True)
+
+
+def purge_stale_edit_assets():
+    """Background sweep for the EDIT_ASSETS_RETENTION_DAYS window — most users
+    trigger this earlier via the explicit 'close editor' action instead."""
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RETENTION_DAYS)
+        stale = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.edit_assets_purged_at.is_(None))
+            .filter(Video.finished_at.isnot(None))
+            .filter(Video.finished_at < cutoff)
+            .all()
+        )
+        for video in stale:
+            try:
+                purge_edit_assets(video)
+                video.edit_assets_purged_at = datetime.utcnow()
+                logger.info(f"Purged edit assets (images/clips) for video {video.id}, finished {video.finished_at}.")
+            except Exception as purge_err:
+                logger.warning(f"Failed to purge edit assets for video {video.id}: {purge_err}")
+        if stale:
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Edit-assets purge pass failed: {e}")
+    finally:
+        db.close()
+
+
 def purge_old_videos_and_uploads():
     """
     Frees disk space on the shared VPS:
@@ -241,6 +310,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
             purge_old_videos_and_uploads()
+            purge_stale_edit_assets()
             last_purge = now
         if not processed:
             time.sleep(poll_interval_seconds)

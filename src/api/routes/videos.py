@@ -237,6 +237,133 @@ def update_video(video_id: str, payload: VideoUpdate, db: Session = Depends(get_
     db.refresh(video)
     return video.to_dict()
 
+def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    scenes_path = video_dir / "source" / "scenes.json"
+    if not scenes_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail="Cette vidéo n’est plus éditable (fichiers sources supprimés ou vidéo antérieure à cette fonctionnalité).",
+        )
+    import json
+    return json.loads(scenes_path.read_text(encoding="utf-8"))
+
+
+@router.get("/{video_id}/scenes")
+def list_video_scenes(video_id: str, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status != VideoStatus.DONE.value:
+        raise HTTPException(status_code=409, detail="La vidéo n’est pas encore prête.")
+    scenes = _load_scenes_manifest(video)
+    return [
+        {
+            "index": s["index"],
+            "start": s["start"],
+            "end": s["end"],
+            "duration": s["duration"],
+            "image_url": f"/api/videos/{video_id}/scenes/{s['index']}/image",
+        }
+        for s in scenes
+    ]
+
+
+@router.get("/{video_id}/scenes/{scene_index}/image")
+def get_scene_image(video_id: str, scene_index: int, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    scenes = _load_scenes_manifest(video)
+    scene = next((s for s in scenes if s["index"] == scene_index), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    image_path = Path(scene["image_path"])
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Scene image file not found on disk")
+    return FileResponse(image_path)
+
+
+@router.post("/{video_id}/scenes/{scene_index}/image")
+async def replace_scene_image(
+    video_id: str,
+    scene_index: int,
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Swaps a single scene's source image and rebuilds just that scene's Ken
+    Burns clip, then queues a lightweight reassembly (no TTS/pacing/other
+    images touched) so a bad AI image doesn't require regenerating the video."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
+
+    if image.content_type not in {"image/png", "image/jpeg", "image/jpg", "image/webp"}:
+        raise HTTPException(status_code=400, detail="Format d’image non supporté (PNG, JPEG ou WEBP attendu).")
+
+    import json
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    scenes_path = video_dir / "source" / "scenes.json"
+    scenes = _load_scenes_manifest(video)
+    scene = next((s for s in scenes if s["index"] == scene_index), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+
+    contents = await image.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Le fichier image est vide.")
+
+    image_path = Path(scene["image_path"])
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(contents)
+
+    channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    from src.pipeline.clip_builder import build_image_clip
+    effects = channel.effects_config or {}
+    build_image_clip(
+        image_path=image_path,
+        output_clip_path=Path(scene["clip_path"]),
+        duration=scene["duration"],
+        zoom_min_pct=effects.get("zoom_min_pct", 1.0),
+        zoom_max_pct=effects.get("zoom_max_pct", 1.12),
+    )
+
+    scenes_path.write_text(json.dumps(scenes, indent=2), encoding="utf-8")
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = True
+    video.error_message = None
+    video.progress_stage = "En attente du réassemblage"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
+@router.post("/{video_id}/close-edit")
+def close_video_edit(video_id: str, db: Session = Depends(get_db)):
+    """Frees the heavy per-scene images/clips once the user leaves the editor,
+    rather than waiting for the retention window — output.mp4 is untouched."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.edit_assets_purged_at:
+        return video.to_dict()
+
+    from src.worker.queue_runner import purge_edit_assets
+    from datetime import datetime
+    purge_edit_assets(video)
+    video.edit_assets_purged_at = datetime.utcnow()
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 @router.delete("/{video_id}")
 def delete_video(video_id: str, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
