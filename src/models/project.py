@@ -15,6 +15,7 @@ class InputType(str, Enum):
     AUDIO = "audio"
 
 class SubtitleStyle(BaseModel):
+    enabled: bool = True                # burn subtitles into the render at all
     font: str = "Arial"
     size: int = 44
     color: str = "#FFD700"              # accent/highlight color (hex or ASS format)
@@ -42,6 +43,7 @@ class SubtitleStyle(BaseModel):
 
 class BrandingConfig(BaseModel):
     logo_path: Optional[str] = None
+    logo_enabled: bool = True           # burn the channel logo into the render at all
     channel_name_text: Optional[str] = None
 
 class MusicPreference(BaseModel):
@@ -59,8 +61,10 @@ class ImageStyle(BaseModel):
     library_image_count: int = 0
 
 class EffectsConfig(BaseModel):
-    grain: bool = True                  # legacy flag, kept for old channels — superseded by overlay_effect
-    overlay_effect: str = "grain"       # "none", "grain", "white_noise", "vignette", "grain_vignette"
+    enabled: bool = True                # master on/off for color grade + overlay effects together
+    grain: bool = True                  # legacy flag, kept for old channels — superseded by overlay_effects
+    overlay_effect: str = "grain"       # legacy single-choice field, kept for old channels — superseded by overlay_effects
+    overlay_effects: List[str] = Field(default_factory=lambda: ["grain"])  # any combination of "grain", "white_noise", "vignette"
     color_grade: str = "warm"           # "warm", "vintage", "dramatic", "none"
     grain_intensity: int = 50           # 0-100, scales the noise/grain amount
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get

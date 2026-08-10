@@ -43,8 +43,12 @@ def assemble_final_video(
 
     video_filters = []
 
-    # Color grading
-    color_mode = effects.get("color_grade", "warm")
+    # Color grading + overlay effects are both gated behind effects_config.enabled —
+    # a client can turn the whole "effects" layer off without losing their tuned
+    # color grade / intensity settings underneath (they just don't apply for now).
+    effects_enabled = effects.get("enabled", True)
+
+    color_mode = effects.get("color_grade", "warm") if effects_enabled else "none"
     if color_mode == "warm":
         video_filters.append("eq=gamma=1.05:saturation=1.15")
     elif color_mode == "vintage":
@@ -52,14 +56,24 @@ def assemble_final_video(
     elif color_mode == "dramatic":
         video_filters.append("eq=contrast=1.2:saturation=0.9")
 
-    # Overlay effect — a texture layered on top of the whole video, distinct
-    # from the color grade above. "overlay_effect" is the current field;
-    # falls back to the old boolean "grain" flag for channels saved before
-    # this was a choice of several effects. grain_intensity/vignette_intensity
-    # (0-100, default 50) scale how strong each one is.
-    overlay_effect = effects.get("overlay_effect")
-    if overlay_effect is None:
-        overlay_effect = "grain" if effects.get("grain", True) else "none"
+    # Overlay effects — textures layered on top of the whole video, distinct from
+    # the color grade above. A channel can combine any number of them at once.
+    # "overlay_effects" is the current field (a list); falls back to the old
+    # single-choice "overlay_effect" string, and further back to the original
+    # boolean "grain" flag, for channels saved before either existed.
+    # grain_intensity/vignette_intensity (0-100, default 50) scale how strong
+    # each one is.
+    overlay_effects = effects.get("overlay_effects")
+    if overlay_effects is None:
+        legacy = effects.get("overlay_effect")
+        if legacy is None:
+            legacy = "grain" if effects.get("grain", True) else "none"
+        overlay_effects = {
+            "none": [], "grain": ["grain"], "white_noise": ["white_noise"],
+            "vignette": ["vignette"], "grain_vignette": ["grain", "vignette"],
+        }.get(legacy, [])
+    if not effects_enabled:
+        overlay_effects = []
 
     grain_frac = max(0, min(100, effects.get("grain_intensity", 50))) / 100
     vignette_frac = max(0, min(100, effects.get("vignette_intensity", 50))) / 100
@@ -71,28 +85,30 @@ def assemble_final_video(
     # default (~50%); sweep from a barely-there PI/2.2 up to a heavy PI/9.
     vignette_angle = (math.pi / 2.2) - (math.pi / 2.2 - math.pi / 9) * vignette_frac
 
-    if overlay_effect == "grain":
+    # grain and white_noise both drive ffmpeg's "noise" filter — applying both
+    # would just double up the same texture, so grain wins if both are picked.
+    if "grain" in overlay_effects:
         video_filters.append(f"noise=alls={grain_alls}:allf=t+u")
-    elif overlay_effect == "white_noise":
+    elif "white_noise" in overlay_effects:
         video_filters.append(f"noise=alls={white_noise_alls}:allf=t+u")
-    elif overlay_effect == "vignette":
+    if "vignette" in overlay_effects:
         video_filters.append(f"vignette={vignette_angle:.4f}")
-    elif overlay_effect == "grain_vignette":
-        video_filters.append(f"noise=alls={grain_alls}:allf=t+u,vignette={vignette_angle:.4f}")
 
-    # Check if FFmpeg build has libass 'subtitles' filter
-    has_subtitles_filter = check_ffmpeg_filter("subtitles")
+    # Check if FFmpeg build has libass 'subtitles' filter, and whether the client
+    # wants subtitles burned in at all (subtitle_style.enabled, default True).
+    subtitles_enabled = sub_style.get("enabled", True)
+    has_subtitles_filter = subtitles_enabled and check_ffmpeg_filter("subtitles")
     if has_subtitles_filter:
         ass_path_escaped = str(subtitle_ass_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
         video_filters.append(f"subtitles=filename='{ass_path_escaped}'")
-    else:
+    elif subtitles_enabled:
         logger.info("FFmpeg missing libass 'subtitles' filter; continuing video assembly without direct ASS filter burn.")
 
     vf_string = ",".join(video_filters) if video_filters else "null"
 
-    # Square logo, top-right corner (if configured)
+    # Square logo, top-right corner (if configured and not disabled)
     logo_path_str = branding.get("logo_path")
-    has_logo = bool(logo_path_str and Path(logo_path_str).exists())
+    has_logo = bool(branding.get("logo_enabled", True) and logo_path_str and Path(logo_path_str).exists())
 
     # Crossfade chain needs each clip's real duration to compute cumulative
     # xfade offsets, and opens every clip as a simultaneous ffmpeg input to

@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from PIL import Image
 import io
 import random
+import re
 import shutil
 import time
 import uuid
@@ -190,6 +191,37 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     db.refresh(channel)
     return channel.to_dict()
 
+@router.post("/{channel_id}/avatar")
+async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Uploads the channel's app-facing profile picture — shown in channel cards,
+    lists and the sidebar. Distinct from the logo (branding.logo_path), which is
+    the high-quality asset burned into the rendered video and never resized."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp, gif, svg).")
+
+    channel_dir = STORAGE_PATH / "channels" / channel.id
+    channel_dir.mkdir(parents=True, exist_ok=True)
+
+    for old_avatar in channel_dir.glob("avatar.*"):
+        old_avatar.unlink(missing_ok=True)
+
+    dest_file = channel_dir / f"avatar{ext}"
+    contents = await file.read()
+    dest_file.write_bytes(contents)
+
+    branding = dict(channel.branding or {})
+    branding["avatar_path"] = f"channels/{channel.id}/avatar{ext}"
+    channel.branding = branding
+
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
 @router.post("/preview-ai-music")
 async def preview_ai_music(
     niche: str = Form(""),
@@ -242,7 +274,12 @@ async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(.
         ext = Path(file.filename or "").suffix.lower()
         if ext not in ALLOWED_MUSIC_EXTENSIONS:
             continue
-        dest_name = f"{uuid.uuid4()}{ext}"
+        # Keep a sanitized version of the original filename after a short unique
+        # prefix — the prefix guarantees no collisions, and the frontend recap
+        # strips it back off to show the client their real track name instead
+        # of a bare UUID.
+        stem = re.sub(r'[^A-Za-z0-9._-]+', '-', Path(file.filename or "track").stem)[:60] or "track"
+        dest_name = f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
         dest_path = music_dir / dest_name
         dest_path.write_bytes(await file.read())
         tracks.append(f"channels/{channel.id}/music/{dest_name}")
