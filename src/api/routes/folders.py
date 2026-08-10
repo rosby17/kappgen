@@ -18,8 +18,11 @@ class FolderRename(BaseModel):
 
 
 @router.get("")
-def list_folders(db: Session = Depends(get_db)):
-    folders = db.query(Folder).order_by(Folder.created_at.asc()).all()
+def list_folders(user_id: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(Folder)
+    if user_id:
+        query = query.filter(Folder.user_id == user_id)
+    folders = query.order_by(Folder.created_at.asc()).all()
     return [f.to_dict() for f in folders]
 
 
