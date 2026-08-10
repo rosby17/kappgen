@@ -61,12 +61,26 @@ def _post_with_retry(client: httpx.Client, url: str, max_retries: int = 5, **kwa
 
 
 def _poll_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
-    """Polls GET /tasks/{task_id} until status is 'done' or 'error' (or timeout)."""
+    """Polls GET /tasks/{task_id} until status is 'done' or 'error' (or timeout).
+    Transient 5xx/429 responses (observed intermittently from Izivoice) are
+    retried instead of aborting the whole transcription — the underlying task
+    is usually still processing fine server-side."""
     elapsed = 0.0
     while elapsed < TASK_POLL_TIMEOUT_SECONDS:
-        resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(), timeout=30.0)
-        resp.raise_for_status()
-        task = resp.json()
+        try:
+            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(), timeout=30.0)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                logger.warning(f"Izivoice task poll for {task_id} returned {resp.status_code}, retrying...")
+                time.sleep(TASK_POLL_INTERVAL_SECONDS)
+                elapsed += TASK_POLL_INTERVAL_SECONDS
+                continue
+            resp.raise_for_status()
+            task = resp.json()
+        except httpx.TransportError as e:
+            logger.warning(f"Izivoice task poll for {task_id} transport error ({e}), retrying...")
+            time.sleep(TASK_POLL_INTERVAL_SECONDS)
+            elapsed += TASK_POLL_INTERVAL_SECONDS
+            continue
         status = task.get("status")
         if status == "done":
             return task
