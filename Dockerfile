@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -45,7 +45,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-lobstertwo \
     fonts-manrope \
     fonts-national-park \
-    fonts-oxygen \
     fonts-play \
     fonts-quattrocento \
     fonts-quicksand \

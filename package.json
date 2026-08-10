@@ -1,8 +1,0 @@
-{
-  "name": "nichecut",
-  "private": true,
-  "version": "1.0.0",
-  "scripts": {
-    "build": "cd frontend && npm install && npm run build && rm -rf ../dist ../public && cp -r dist ../dist && mkdir -p ../public && cp -r dist/* ../public/"
-  }
-}
