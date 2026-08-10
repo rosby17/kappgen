@@ -13,6 +13,13 @@ IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
+# Vision analysis (reference image -> style prompt) for AI image generation.
+# Provider-swappable: set VISION_PROVIDER to "anthropic" (default, Claude) or
+# "openai" once an OpenAI key is available — see src/pipeline/vision.py.
+VISION_PROVIDER = os.getenv("VISION_PROVIDER", "anthropic")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
 # NOTE: NicheCut's database must always be its own, dedicated instance — never
 # shared with another project (see incident: an earlier setup pointed this at
 # Izivoice's production Supabase Postgres and polluted its public schema).

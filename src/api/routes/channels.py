@@ -190,6 +190,25 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     db.refresh(channel)
     return channel.to_dict()
 
+ALLOWED_STYLE_REFERENCE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+@router.post("/analyze-style-image")
+async def analyze_style_image(file: UploadFile = File(...)):
+    """Analyzes a reference image and returns a reusable image-generation style prompt."""
+    ext = Path(file.filename or "").suffix.lower()
+    media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
+    if not media_type:
+        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp).")
+
+    contents = await file.read()
+    from src.pipeline.vision import analyze_reference_image
+    try:
+        style_prompt = analyze_reference_image(contents, media_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Analyse de l'image impossible : {e}")
+
+    return {"style_prompt": style_prompt}
+
 @router.post("/library-images/staging")
 async def stage_channel_library_images(files: List[UploadFile] = File(...)):
     staging_root = STORAGE_PATH / "staging" / "channel-libraries"
