@@ -82,7 +82,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     events = []
 
     if words and karaoke:
-        chunk_size = 6
+        chunk_size = max(1, int(style_config.get("words_per_line") or 6))
         for i in range(0, len(words), chunk_size):
             chunk = words[i:i + chunk_size]
             line_start = chunk[0]["start"]
