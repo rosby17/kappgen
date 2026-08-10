@@ -1,4 +1,6 @@
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
 from src.utils.logger import logger
@@ -111,20 +113,30 @@ def run_video_pipeline(
     # 6. Build Dynamic Motion Video Clips
     logger.info("Step 5/7: Rendering motion video clips (Ken Burns effect)...")
     progress("Animation des scènes", 65)
-    clip_paths = []
     zoom_min = channel_config.get("effects_config", {}).get("zoom_min_pct", 1.0)
     zoom_max = channel_config.get("effects_config", {}).get("zoom_max_pct", 1.12)
 
-    for i, (seg, img_path) in enumerate(zip(segments, subtitled_image_paths)):
-        clip_file = clips_dir / f"clip_{i+1:03d}.mp4"
-        build_image_clip(
-            image_path=img_path,
-            output_clip_path=clip_file,
-            duration=seg["duration"],
-            zoom_min_pct=zoom_min,
-            zoom_max_pct=zoom_max
-        )
-        clip_paths.append(clip_file)
+    # Each scene's clip is independent (its own ffmpeg subprocess), so building
+    # them one at a time was leaving CPU cores idle for no reason — this was the
+    # single biggest sequential bottleneck for long videos (dozens of clips).
+    # Bounded by CPU count so a small VPS doesn't get more concurrent ffmpeg
+    # processes than it has cores to actually run them on.
+    clip_paths = [clips_dir / f"clip_{i+1:03d}.mp4" for i in range(len(segments))]
+    max_clip_workers = max(1, min(os.cpu_count() or 2, 4))
+    with ThreadPoolExecutor(max_workers=max_clip_workers) as pool:
+        futures = [
+            pool.submit(
+                build_image_clip,
+                image_path=img_path,
+                output_clip_path=clip_paths[i],
+                duration=seg["duration"],
+                zoom_min_pct=zoom_min,
+                zoom_max_pct=zoom_max,
+            )
+            for i, (seg, img_path) in enumerate(zip(segments, subtitled_image_paths))
+        ]
+        for f in futures:
+            f.result()  # surface the first exception instead of silently dropping it
 
     # Manifest of each scene's source image + built clip, keyed by index — lets
     # the post-render editor ("replace this image") locate and rebuild a single

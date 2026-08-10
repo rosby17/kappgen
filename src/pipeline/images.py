@@ -1,6 +1,7 @@
 import json
 import time
 import httpx
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL
@@ -97,24 +98,40 @@ def fetch_or_generate_images(
         if not IZIVOICE_API_KEY:
             raise RuntimeError("La génération d’images IA n’est pas configurée sur le serveur.")
         logger.info(f"Generating {len(ai_prompts)} images via Izivoice (model={IZIVOICE_IMAGE_MODEL_ID})...")
-        generated_paths = []
+        # These are independent network calls (each waits on Izivoice's API, not
+        # local CPU), so running them one after another was pure dead time —
+        # fanning them out is the single biggest lever for a long video's total
+        # render time, since a 1h video can mean 150+ sequential image requests.
+        results: List[Optional[Path]] = [None] * len(ai_prompts)
         failures = 0
-        with httpx.Client() as client:
-            for i, p in enumerate(ai_prompts):
-                img_file = output_dir / f"{prefix}_{i+1}.png"
-                full_prompt = f"{p}, {style_prompt}" if style_prompt else p
-                try:
-                    generate_ai_image(full_prompt, img_file, client)
-                    generated_paths.append(img_file)
-                except Exception as e:
-                    # ai33.pro is a third-party service that has proven unreliable
-                    # (slow/erroring under load) — one failed image shouldn't sink
-                    # an otherwise-ready render. Use a fallback asset instead.
-                    failures += 1
-                    logger.warning(f"AI image generation failed for prompt '{p[:60]}': {e}. Using fallback image instead.")
-                    fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
-                    if fallback:
-                        generated_paths.append(fallback[0])
+
+        def fetch_one(i: int, p: str, client: httpx.Client) -> Optional[Path]:
+            img_file = output_dir / f"{prefix}_{i+1}.png"
+            full_prompt = f"{p}, {style_prompt}" if style_prompt else p
+            try:
+                generate_ai_image(full_prompt, img_file, client)
+                return img_file
+            except Exception as e:
+                # ai33.pro is a third-party service that has proven unreliable
+                # (slow/erroring under load) — one failed image shouldn't sink
+                # an otherwise-ready render. Use a fallback asset instead.
+                logger.warning(f"AI image generation failed for prompt '{p[:60]}': {e}. Using fallback image instead.")
+                fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
+                return fallback[0] if fallback else None
+
+        with httpx.Client(limits=httpx.Limits(max_connections=8, max_keepalive_connections=8)) as client:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                future_to_index = {
+                    pool.submit(fetch_one, i, p, client): i for i, p in enumerate(ai_prompts)
+                }
+                for future in future_to_index:
+                    i = future_to_index[future]
+                    result = future.result()
+                    results[i] = result
+                    if result is None:
+                        failures += 1
+
+        generated_paths = [r for r in results if r is not None]
         if failures:
             logger.warning(f"{failures}/{len(ai_prompts)} AI images fell back to library/synthetic assets due to provider errors.")
         return generated_paths
