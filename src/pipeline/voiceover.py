@@ -191,9 +191,11 @@ def _extract_words_from_stt_metadata(metadata: Dict[str, Any], client: httpx.Cli
         # First match is usually the top-level language segment's full text;
         # skip 1-2 char entries which are just word/spacing fragments.
         full_texts = [t for t in recovered if len(t) > 3]
+        # resp.text is already correctly-decoded unicode (httpx handles the
+        # charset) — do NOT re-decode it as unicode_escape, that mangles
+        # accented characters (was producing "chaÃ®ne" instead of "chaîne").
         text = " ".join(full_texts[:1]).strip() if full_texts else ""
-        if text:
-            text = text.encode().decode("unicode_escape", errors="ignore")
+        text = text.replace('\\"', '"').replace("\\\\", "\\")
         logger.warning(f"Izivoice STT json_url returned truncated/invalid JSON; recovered plain text via regex ({'ok' if text else 'failed'}).")
         return text, None
 
