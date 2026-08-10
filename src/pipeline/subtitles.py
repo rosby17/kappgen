@@ -201,7 +201,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                             parts.append(word_text)
                     line_text = " ".join(parts)
                     start_str = format_ass_time(w["start"])
-                    end_str = format_ass_time(w["end"])
+                    # Extend to the NEXT word's start (or the chunk's end for the
+                    # last word) instead of this word's own end — natural pauses
+                    # between spoken words left a gap with no active dialogue
+                    # event, which made the whole subtitle line flicker off and
+                    # back on between every word.
+                    next_start = chunk[idx + 1]["start"] if idx + 1 < len(chunk) else line_end
+                    end_str = format_ass_time(max(next_start, w["end"]))
                     events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{{{prefix_tags}}}{line_text}")
             else:
                 # "line" shows the accent color for the whole chunk; "none"

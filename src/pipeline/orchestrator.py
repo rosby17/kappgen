@@ -67,7 +67,15 @@ def run_video_pipeline(
     # 4. Fetch or Generate Images
     logger.info("Step 3/7: Preparing image pool...")
     progress("Préparation des visuels", 35)
-    prompts = [f"Scene for text section {i+1}" for i in range(len(segments))]
+    # Each segment's prompt is the actual narration spoken during its time window
+    # (previously a content-blind placeholder like "Scene for text section 3" —
+    # the AI generator had no idea what the video was even about).
+    all_words = transcript_info.get("words") or []
+    prompts = []
+    for seg in segments:
+        seg_words = [w["word"] for w in all_words if w.get("start", 0) < seg["end"] and w.get("end", 0) > seg["start"]]
+        seg_text = " ".join(seg_words).strip()
+        prompts.append(seg_text if seg_text else (script_text or "")[:200])
     image_paths = fetch_or_generate_images(prompts, images_dir, channel_config.get("image_style"))
     
     # 5. Generate Subtitles ASS file
