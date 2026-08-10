@@ -210,13 +210,17 @@ def assemble_final_video(
     cmd.extend([
         "-c:v", "libx264",
         "-preset", "veryfast",
-        # CRF 27 (was 21): x264's CRF is logarithmic — this cuts output size by
-        # roughly 40-60% with a quality drop that's essentially invisible on
-        # YouTube/mobile viewing, which matters here since long renders were
-        # producing multi-GB files (e.g. 11.6GB for a single long video at CRF 21).
-        "-crf", "27",
+        # Capped average bitrate instead of plain CRF: CRF's output size is
+        # content-dependent and unpredictable — the grain/noise overlay filter
+        # in particular adds high-frequency detail that's expensive to encode,
+        # which is how a 30min render ended up at 11.6GB under CRF alone.
+        # 4200k video + 128k audio ≈ 4.33 Mbps → a 30min video lands around
+        # ~975MB, comfortably under a 1GB budget regardless of content.
+        "-b:v", "4200k",
+        "-maxrate", "4600k",
+        "-bufsize", "9200k",
         "-c:a", "aac",
-        "-b:a", "192k",
+        "-b:a", "128k",
         "-movflags", "+faststart",
         "-shortest",
         str(temp_output_path)
