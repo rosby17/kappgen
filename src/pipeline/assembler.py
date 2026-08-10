@@ -210,7 +210,11 @@ def assemble_final_video(
     cmd.extend([
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-crf", "21",
+        # CRF 27 (was 21): x264's CRF is logarithmic — this cuts output size by
+        # roughly 40-60% with a quality drop that's essentially invisible on
+        # YouTube/mobile viewing, which matters here since long renders were
+        # producing multi-GB files (e.g. 11.6GB for a single long video at CRF 21).
+        "-crf", "27",
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
