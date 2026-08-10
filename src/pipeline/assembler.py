@@ -51,9 +51,21 @@ def assemble_final_video(
     elif color_mode == "dramatic":
         video_filters.append("eq=contrast=1.2:saturation=0.9")
 
-    # Film grain
-    if effects.get("grain", True):
+    # Overlay effect — a texture layered on top of the whole video, distinct
+    # from the color grade above. "overlay_effect" is the current field;
+    # falls back to the old boolean "grain" flag for channels saved before
+    # this was a choice of several effects.
+    overlay_effect = effects.get("overlay_effect")
+    if overlay_effect is None:
+        overlay_effect = "grain" if effects.get("grain", True) else "none"
+    if overlay_effect == "grain":
         video_filters.append("noise=alls=8:allf=t+u")
+    elif overlay_effect == "white_noise":
+        video_filters.append("noise=alls=22:allf=t+u")
+    elif overlay_effect == "vignette":
+        video_filters.append("vignette=PI/4")
+    elif overlay_effect == "grain_vignette":
+        video_filters.append("noise=alls=8:allf=t+u,vignette=PI/4")
 
     # Check if FFmpeg build has libass 'subtitles' filter
     has_subtitles_filter = check_ffmpeg_filter("subtitles")
