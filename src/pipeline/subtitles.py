@@ -1,8 +1,35 @@
 import math
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, List
 from PIL import Image, ImageDraw, ImageFont
 from src.utils.logger import logger
+
+_DEJAVU_BOLD_FALLBACK = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+def _resolve_font_file(font_name: str) -> str:
+    """
+    PIL's ImageFont.truetype() needs an actual font FILE path, not a family
+    name — unlike libass (used by the ASS/subtitles ffmpeg filter), it can't
+    look a name up via fontconfig on its own. Ask fontconfig (`fc-match`,
+    always available alongside the many `fonts-*` packages this image
+    installs) to resolve the client's configured family to the real .ttf/.otf
+    file. Falls back to DejaVu Sans Bold (bundled via fonts-dejavu-core) if
+    fontconfig can't be reached or returns nothing usable — better than a
+    silent switch to PIL's tiny built-in bitmap font, which ignores the
+    configured size/position entirely.
+    """
+    try:
+        result = subprocess.run(
+            ["fc-match", "--format=%{file}", font_name or "sans-serif"],
+            capture_output=True, text=True, timeout=5
+        )
+        path = result.stdout.strip()
+        if path and Path(path).exists():
+            return path
+    except Exception as e:
+        logger.warning(f"fc-match failed resolving font '{font_name}': {e}")
+    return _DEJAVU_BOLD_FALLBACK
 
 def to_ass_color(color: str, default: str = "&H00FFFFFF", opacity: float = 100) -> str:
     """
@@ -107,8 +134,12 @@ def generate_ass_subtitles(
     box_padding = max(0, int(style_config.get("box_padding", 10)))
 
     # Alignment is a single ASS numpad value (1-9) combining vertical position
-    # (bottom/center/top row) with horizontal alignment (left/center/right column).
-    row = {"bottom": 0, "center": 4, "top": 6}.get(position, 0)
+    # (bottom/center/top row) with horizontal alignment (left/center/right column):
+    # bottom row = 1,2,3 (base 0); middle row = 4,5,6 (base 3); top row = 7,8,9
+    # (base 6). The middle row's base was wrongly 4 instead of 3, which shifted
+    # every "center" position one column right (e.g. center+center rendered as
+    # middle-right instead of true middle-center).
+    row = {"bottom": 0, "center": 3, "top": 6}.get(position, 0)
     col = {"left": 1, "center": 2, "right": 3}.get(align_h, 2)
     alignment = row + col
     margin_v = 50 if position != "center" else 0
@@ -220,9 +251,12 @@ def overlay_subtitles_on_image(
     position = str(style_config.get("position", "bottom")).strip().lower()
     
     try:
-        font = ImageFont.truetype("Helvetica", font_size)
-    except IOError:
-        font = ImageFont.load_default()
+        font = ImageFont.truetype(_resolve_font_file(style_config.get("font")), font_size)
+    except (IOError, OSError):
+        try:
+            font = ImageFont.truetype(_DEJAVU_BOLD_FALLBACK, font_size)
+        except (IOError, OSError):
+            font = ImageFont.load_default()
 
     bbox = draw.textbbox((0, 0), text, font=font)
     text_w = bbox[2] - bbox[0]

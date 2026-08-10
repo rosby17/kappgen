@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
+from src.config import STORAGE_PATH
 
 # Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
 # a gimmick" rather than a smooth blend between scenes.
@@ -106,9 +107,13 @@ def assemble_final_video(
 
     vf_string = ",".join(video_filters) if video_filters else "null"
 
-    # Square logo, top-right corner (if configured and not disabled)
+    # Square logo, top-right corner (if configured and not disabled). logo_path
+    # is stored storage-relative ("channels/<id>/logo.png") — it must be resolved
+    # against STORAGE_PATH, not treated as relative to the process's cwd (which
+    # silently made has_logo False for every channel, however the logo was set).
     logo_path_str = branding.get("logo_path")
-    has_logo = bool(branding.get("logo_enabled", True) and logo_path_str and Path(logo_path_str).exists())
+    logo_full_path = (STORAGE_PATH / logo_path_str) if logo_path_str else None
+    has_logo = bool(branding.get("logo_enabled", True) and logo_full_path and logo_full_path.exists())
 
     # Crossfade chain needs each clip's real duration to compute cumulative
     # xfade offsets, and opens every clip as a simultaneous ffmpeg input to
@@ -158,7 +163,7 @@ def assemble_final_video(
         cmd.extend(["-f", "concat", "-safe", "0", "-i", str(concat_list_file)])
 
     if has_logo:
-        cmd.extend(["-i", str(Path(logo_path_str).resolve())])
+        cmd.extend(["-i", str(logo_full_path.resolve())])
 
     cmd.extend(["-i", str(audio_path.resolve())])
     audio_input_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
