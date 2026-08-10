@@ -174,7 +174,29 @@ def _extract_words_from_stt_metadata(metadata: Dict[str, Any], client: httpx.Cli
 
     resp = client.get(json_url, timeout=30.0)
     resp.raise_for_status()
-    segments = resp.json()
+    raw_body = resp.text
+
+    try:
+        segments = resp.json()
+    except ValueError:
+        # Izivoice has been observed serving this json_url genuinely truncated
+        # at the source (confirmed: reproduces identically across HTTP/1.1,
+        # HTTP/2, and with compression disabled — not a decoding bug on our
+        # end). The "text" field of each segment appears early in the
+        # document, well before the (much longer) per-word timing array where
+        # the cut happens, so it's usually still intact even when the overall
+        # JSON is broken. Recover it with a regex rather than falling back to
+        # showing the video's title as the subtitle.
+        recovered = re.findall(r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"', raw_body)
+        # First match is usually the top-level language segment's full text;
+        # skip 1-2 char entries which are just word/spacing fragments.
+        full_texts = [t for t in recovered if len(t) > 3]
+        text = " ".join(full_texts[:1]).strip() if full_texts else ""
+        if text:
+            text = text.encode().decode("unicode_escape", errors="ignore")
+        logger.warning(f"Izivoice STT json_url returned truncated/invalid JSON; recovered plain text via regex ({'ok' if text else 'failed'}).")
+        return text, None
+
     if not isinstance(segments, list):
         return "", None
 
