@@ -139,6 +139,10 @@ class Video(Base):
     progress_percent = Column(Integer, nullable=False, default=0)
     is_reassembly = Column(Boolean, nullable=False, default=False)
     edit_assets_purged_at = Column(DateTime, nullable=True)
+    # Only meaningful for input_type="audio": whether to spend Izivoice STT
+    # credits transcribing the upload for accurate subtitles, or skip it (free,
+    # approximate title-based captions instead). Opt-out toggle in the wizard.
+    transcribe_audio = Column(Boolean, nullable=False, default=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -164,4 +168,5 @@ class Video(Base):
             "progress_percent": self.progress_percent or 0,
             "purged_at": self.purged_at.isoformat() if self.purged_at else None,
             "editable": bool(self.status == VideoStatus.DONE.value and self.output_path and not self.edit_assets_purged_at),
+            "transcribe_audio": self.transcribe_audio,
         }

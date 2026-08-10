@@ -63,6 +63,7 @@ async def submit_video_subject(
     input_type: str = Form("text"),                    # "text" | "audio"
     script_text: Optional[str] = Form(""),
     audio_files: Optional[List[UploadFile]] = File(None),
+    transcribe_audio: bool = Form(True),
     db: Session = Depends(get_db)
 ):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -115,6 +116,7 @@ async def submit_video_subject(
                 audio_input_path=str(dest_file),
                 status=VideoStatus.QUEUED.value,
                 estimated_duration_seconds=estimated_duration,
+                transcribe_audio=transcribe_audio,
             )
             db.add(video)
             created_videos.append(video)

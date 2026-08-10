@@ -4,7 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
 from src.utils.logger import logger
-from src.pipeline.voiceover import generate_voiceover, generate_transcript_for_audio
+from src.pipeline.voiceover import generate_voiceover, generate_transcript_for_audio, synthetic_word_timings
+from src.utils.ffmpeg_runner import get_audio_duration
 from src.pipeline.pacing import calculate_pacing_segments
 from src.pipeline.images import fetch_or_generate_images
 from src.pipeline.clip_builder import build_image_clip
@@ -19,6 +20,7 @@ def run_video_pipeline(
     output_dir: Path,
     pre_recorded_audio_path: Optional[Path] = None,
     progress_callback: Optional[Callable[[str, int], None]] = None,
+    transcribe_audio: bool = True,
 ) -> Path:
     """
     Orchestrates the entire video generation pipeline for a given script/audio and channel configuration.
@@ -48,10 +50,24 @@ def run_video_pipeline(
         cmd = ["ffmpeg", "-y", "-i", str(pre_recorded_audio_path.resolve()), "-c:a", "libmp3lame", "-b:a", "192k", str(raw_vo_path)]
         run_ffmpeg(cmd)
 
-        # Real spoken content is unknown for uploaded audio (script_text is only the
-        # filename-derived title), so transcribe via Izivoice speech-to-text to get
-        # accurate subtitle text and word-level timing.
-        transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré")
+        if transcribe_audio:
+            # Real spoken content is unknown for uploaded audio (script_text is only
+            # the filename-derived title), so transcribe via Izivoice speech-to-text
+            # to get accurate subtitle text and word-level timing. This is billable
+            # (Izivoice STT credits) — callers can opt out via transcribe_audio=False.
+            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré")
+        else:
+            # Skips the paid STT call entirely — subtitles fall back to the video's
+            # title evenly spread over the audio's duration (same fallback already
+            # used when Izivoice isn't configured at all), not real captions.
+            logger.info("Transcription IA désactivée pour cette vidéo ; sous-titres approximatifs à partir du titre.")
+            duration = get_audio_duration(raw_vo_path)
+            fallback_text = script_text or "Audio préenregistré"
+            transcript_info = {
+                "text": fallback_text,
+                "duration": duration,
+                "words": synthetic_word_timings(fallback_text, duration),
+            }
     else:
         progress("Génération de la voix et transcription", 8)
         logger.info("Step 1/7: Generating voiceover audio via TTS...")

@@ -53,6 +53,7 @@ def init_db():
             "progress_percent": "ALTER TABLE videos ADD COLUMN progress_percent INTEGER DEFAULT 0 NOT NULL",
             "is_reassembly": "ALTER TABLE videos ADD COLUMN is_reassembly BOOLEAN DEFAULT FALSE NOT NULL",
             "edit_assets_purged_at": "ALTER TABLE videos ADD COLUMN edit_assets_purged_at TIMESTAMP",
+            "transcribe_audio": "ALTER TABLE videos ADD COLUMN transcribe_audio BOOLEAN DEFAULT TRUE NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():

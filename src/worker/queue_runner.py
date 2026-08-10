@@ -101,6 +101,7 @@ def process_single_queued_video() -> bool:
             output_dir=video_dir,
             pre_recorded_audio_path=pre_audio_path,
             progress_callback=update_progress,
+            transcribe_audio=video.transcribe_audio,
         )
 
         try:
