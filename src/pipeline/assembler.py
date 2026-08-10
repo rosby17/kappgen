@@ -29,8 +29,8 @@ def assemble_final_video(
     """
     Joins motion clips (crossfading between them when durations are known so
     scene changes feel dynamic rather than hard-cut), applies color grading/
-    grain, burns subtitles, places a square logo (top-left) and channel-name
-    watermark text in the subtitle font (top-right), and multiplexes audio.
+    grain, burns subtitles, places a square logo (top-right), and multiplexes
+    audio.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = output_path.parent / "temp"
@@ -65,31 +65,9 @@ def assemble_final_video(
 
     vf_string = ",".join(video_filters) if video_filters else "null"
 
-    # Square logo, top-left corner (if configured)
+    # Square logo, top-right corner (if configured)
     logo_path_str = branding.get("logo_path")
     has_logo = bool(logo_path_str and Path(logo_path_str).exists())
-
-    # Channel-name watermark, top-right corner, styled with the channel's own
-    # subtitle font/color so it visually matches the rest of the video
-    # instead of a generic default. Written to a textfile so ffmpeg's drawtext
-    # doesn't choke on colons/quotes/apostrophes in the channel name.
-    watermark_text = str(branding.get("channel_name_text") or "").strip()
-    has_watermark = bool(watermark_text)
-    watermark_txt_path = None
-    if has_watermark:
-        watermark_txt_path = temp_dir / "watermark.txt"
-        watermark_txt_path.write_text(watermark_text, encoding="utf-8")
-        watermark_font = sub_style.get("font", "Arial")
-        # ffmpeg's color parser accepts "#RRGGBB" directly — the same web hex
-        # value already used for the subtitle style, no conversion needed.
-        watermark_color = sub_style.get("color") or "#FFFFFF"
-        watermark_outline = sub_style.get("outline_color") or "#000000"
-        wm_txt_escaped = str(watermark_txt_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        watermark_filter = (
-            f"drawtext=font='{watermark_font}':textfile='{wm_txt_escaped}':fontsize=26:"
-            f"fontcolor={watermark_color}:borderw=1.5:bordercolor={watermark_outline}:"
-            f"x=w-tw-40:y=52"
-        )
 
     # Crossfade chain needs each clip's real duration to compute cumulative
     # xfade offsets, and opens every clip as a simultaneous ffmpeg input to
@@ -156,10 +134,6 @@ def assemble_final_video(
         filter_parts.append(f"[{logo_index}:v]scale=100:100:force_original_aspect_ratio=increase,crop=100:100[logo]")
         filter_parts.append(f"[{base_label}][logo]overlay=W-w-40:40[v_logo]")
         base_label = "v_logo"
-
-    if has_watermark:
-        filter_parts.append(f"[{base_label}]{watermark_filter}[v_wm]")
-        base_label = "v_wm"
 
     if filter_parts:
         cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{base_label}]", "-map", f"{audio_input_index}:a"])
