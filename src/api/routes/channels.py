@@ -190,6 +190,63 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     db.refresh(channel)
     return channel.to_dict()
 
+ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
+
+@router.post("/{channel_id}/music")
+async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+    """Uploads one or more of the client's own background tracks. One is picked at
+    random per render — this is the channel's own music, never third-party stock."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    music_dir = STORAGE_PATH / "channels" / channel.id / "music"
+    music_dir.mkdir(parents=True, exist_ok=True)
+
+    music_pref = dict(channel.music_preference or {})
+    tracks = list(music_pref.get("tracks") or [])
+    saved = 0
+    for file in files:
+        ext = Path(file.filename or "").suffix.lower()
+        if ext not in ALLOWED_MUSIC_EXTENSIONS:
+            continue
+        dest_name = f"{uuid.uuid4()}{ext}"
+        dest_path = music_dir / dest_name
+        dest_path.write_bytes(await file.read())
+        tracks.append(f"channels/{channel.id}/music/{dest_name}")
+        saved += 1
+
+    if saved == 0:
+        raise HTTPException(status_code=400, detail="Aucun fichier audio valide (mp3, wav, m4a, ogg).")
+
+    music_pref["tracks"] = tracks
+    channel.music_preference = music_pref
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+@router.delete("/{channel_id}/music")
+def delete_channel_music_track(channel_id: str, track_path: str, db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    music_pref = dict(channel.music_preference or {})
+    tracks = list(music_pref.get("tracks") or [])
+    if track_path not in tracks:
+        raise HTTPException(status_code=404, detail="Track not found on this channel.")
+    tracks.remove(track_path)
+    music_pref["tracks"] = tracks
+    channel.music_preference = music_pref
+
+    file_path = STORAGE_PATH / track_path
+    if file_path.exists() and file_path.is_relative_to(STORAGE_PATH / "channels" / channel.id / "music"):
+        file_path.unlink(missing_ok=True)
+
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
 ALLOWED_STYLE_REFERENCE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 @router.post("/analyze-style-image")

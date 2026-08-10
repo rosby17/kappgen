@@ -129,7 +129,8 @@ def run_video_pipeline(
             music_pref=music_pref,
             duration=total_duration,
             channel_id=channel_config.get("id"),
-            niche=channel_config.get("niche")
+            niche=channel_config.get("niche"),
+            script_text=script_text
         )
         mix_audio_tracks(
             voiceover_path=raw_vo_path,

@@ -65,3 +65,47 @@ def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
     if VISION_PROVIDER == "openai":
         return _analyze_with_openai(image_bytes, media_type)
     return _analyze_with_anthropic(image_bytes, media_type)
+
+
+MUSIC_PROMPT_INSTRUCTION = (
+    "You are configuring an AI music generator for background music on a YouTube video. "
+    "Given the channel's niche and (optionally) an excerpt of this specific video's script, "
+    "write a single short, dense music-generation prompt (comma-separated descriptors, no "
+    "full sentences, no preamble): instrumentation, mood, tempo/BPM feel, genre. The track "
+    "must stay subtle and non-distracting under a voiceover — never suggest vocals, lyrics, "
+    "or anything that would compete with narration. Reply with only the prompt text."
+)
+
+
+def _generate_music_prompt_with_anthropic(niche: str, script_excerpt: str) -> str:
+    import anthropic
+
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    user_text = f"Channel niche: {niche or 'general'}\n"
+    if script_excerpt:
+        user_text += f"Video script excerpt: {script_excerpt[:800]}\n"
+    user_text += "\n" + MUSIC_PROMPT_INSTRUCTION
+
+    response = client.messages.create(
+        model="claude-opus-5",
+        max_tokens=200,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    for block in response.content:
+        if block.type == "text":
+            return block.text.strip()
+    raise RuntimeError("Music prompt generation returned no text content.")
+
+
+def generate_music_prompt(niche: str, script_excerpt: str = "") -> str:
+    """Uses Claude to turn a channel's niche (and optionally this video's script) into a
+    focused instrumental-music generation prompt, instead of a naive template string."""
+    if VISION_PROVIDER == "openai":
+        raise NotImplementedError(
+            "OpenAI music-prompt generation isn't wired up yet — implement alongside "
+            "_analyze_with_openai once OPENAI_API_KEY is available."
+        )
+    return _generate_music_prompt_with_anthropic(niche, script_excerpt)

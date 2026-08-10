@@ -95,14 +95,16 @@ def get_background_music_track(
     duration: float,
     channel_id: Optional[str] = None,
     niche: Optional[str] = None,
+    script_text: Optional[str] = None,
 ) -> Path:
     """
     Resolves the background music track for a render:
       - mode "library": picks a random track from the channel's own uploaded
         set (music_pref["tracks"], storage-relative paths) — the user's own
         music, never third-party stock tracks.
-      - mode "ai_generate": generates a track with Izivoice from the channel
-        niche (or an explicit music_pref["ai_prompt"] override).
+      - mode "ai_generate": generates a track with Izivoice, using a prompt
+        Claude derives from the channel niche and this video's script (or an
+        explicit music_pref["ai_prompt"] override, which skips the Claude step).
       - anything else / on failure: a synthetic ambient drone, generated
         locally, so a render never blocks on missing music.
     """
@@ -120,7 +122,15 @@ def get_background_music_track(
         if not IZIVOICE_API_KEY:
             logger.info("Music mode is 'ai_generate' but IZIVOICE_API_KEY is not set; using fallback tone.")
             return _generate_synthetic_fallback_track(duration)
-        prompt = music_pref.get("ai_prompt") or f"Instrumental background music for a {niche or 'general'} themed video, subtle and non-distracting"
+
+        prompt = music_pref.get("ai_prompt")
+        if not prompt:
+            try:
+                from src.pipeline.vision import generate_music_prompt
+                prompt = generate_music_prompt(niche or "general", script_text or "")
+            except Exception as e:
+                logger.warning(f"Claude music-prompt generation failed ({e}); using a plain template prompt.")
+                prompt = f"Instrumental background music for a {niche or 'general'} themed video, subtle and non-distracting"
         try:
             cache_dir = ASSETS_PATH / "music" / "ai_cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
