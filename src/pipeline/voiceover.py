@@ -160,57 +160,40 @@ def generate_mock_voiceover(script_text: str, output_audio_path: Path) -> Tuple[
     return output_audio_path, mock_transcript_json
 
 
-def _extract_words_from_stt_metadata(metadata: Dict[str, Any]) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
+def _extract_words_from_stt_metadata(metadata: Dict[str, Any], client: httpx.Client) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
     """
-    Best-effort parsing of a completed speech-to-text task's `metadata` field.
-    Izivoice's docs don't publish the exact completed shape, so this tries a few
-    reasonable layouts and falls back gracefully when only plain text is available.
+    Parses a completed speech-to-text task's `metadata` field. Izivoice's STT
+    task metadata does NOT include the transcript inline — it only provides a
+    `json_url` (and `srt_url`) pointing to the actual result, which is a JSON
+    array of language segments, each with a `text` and a `words` list (entries
+    typed "word" or "spacing" — only "word" entries carry real timing).
     """
-    text = metadata.get("text") or metadata.get("transcript") or ""
+    json_url = metadata.get("json_url")
+    if not json_url:
+        return metadata.get("text") or metadata.get("transcript") or "", None
 
-    raw_words = metadata.get("words")
-    if isinstance(raw_words, list) and raw_words:
-        words = []
-        for w in raw_words:
-            word = w.get("word") or w.get("text")
-            start = w.get("start", w.get("start_time"))
-            end = w.get("end", w.get("end_time"))
-            if word is not None and start is not None and end is not None:
-                words.append({"word": word, "start": float(start), "end": float(end)})
-        if words:
-            return text, words
+    resp = client.get(json_url, timeout=30.0)
+    resp.raise_for_status()
+    segments = resp.json()
+    if not isinstance(segments, list):
+        return "", None
 
-    segments = metadata.get("segments")
-    if isinstance(segments, list) and segments:
-        words = []
-        full_text_parts = []
-        for seg in segments:
-            seg_words = seg.get("words")
-            if isinstance(seg_words, list) and seg_words:
-                for w in seg_words:
-                    word = w.get("word") or w.get("text")
-                    start = w.get("start", w.get("start_time"))
-                    end = w.get("end", w.get("end_time"))
-                    if word is not None and start is not None and end is not None:
-                        words.append({"word": word, "start": float(start), "end": float(end)})
-            else:
-                seg_text = seg.get("text", "")
-                seg_start = seg.get("start", seg.get("start_time", 0.0))
-                seg_end = seg.get("end", seg.get("end_time", seg_start))
-                full_text_parts.append(seg_text)
-                if seg_text and seg_end > seg_start:
-                    for w in synthetic_word_timings(seg_text, seg_end - seg_start):
-                        words.append({
-                            "word": w["word"],
-                            "start": round(seg_start + w["start"], 2),
-                            "end": round(seg_start + w["end"], 2)
-                        })
-        if not text:
-            text = " ".join(full_text_parts)
-        if words:
-            return text, words
+    words = []
+    full_text_parts = []
+    for seg in segments:
+        seg_text = seg.get("text") or ""
+        if seg_text:
+            full_text_parts.append(seg_text)
+        for w in seg.get("words") or []:
+            if w.get("type") != "word":
+                continue
+            word = w.get("text")
+            start = w.get("start")
+            end = w.get("end")
+            if word is not None and start is not None and end is not None and word.strip():
+                words.append({"word": word.strip(), "start": float(start), "end": float(end)})
 
-    return text, None
+    return " ".join(full_text_parts).strip(), (words or None)
 
 
 def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
@@ -264,7 +247,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
                     task_id = resp.json()["task_id"]
                     task = _poll_task(task_id, client)
                     metadata = task.get("metadata", {}) or {}
-                    chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata)
+                    chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
                 except Exception as chunk_err:
                     # One chunk failing (Izivoice has returned 500s on some
                     # requests) must not throw away transcript already
