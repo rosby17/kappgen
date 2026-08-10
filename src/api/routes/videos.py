@@ -12,6 +12,7 @@ from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY
 from src.pipeline.transcode import ensure_sd_variant
+from src.pipeline.audio_extract import ensure_extracted_audio
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -168,6 +169,20 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
     # here as a fallback if that background step hasn't completed yet.
     cached_path = ensure_sd_variant(source_path)
     return FileResponse(cached_path, media_type="video/mp4", filename=f"nichecut-{video_id}-sd.mp4")
+
+@router.get("/{video_id}/audio")
+def download_video_audio(video_id: str, db: Session = Depends(get_db)):
+    """Extracts and returns this video's soundtrack, for the 'reuse audio' flow."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or not video.output_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    source_path = STORAGE_PATH / video.output_path
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found on disk")
+
+    audio_path = ensure_extracted_audio(source_path)
+    return FileResponse(audio_path, media_type="audio/mp4", filename=f"nichecut-{video_id}-audio.m4a")
 
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):

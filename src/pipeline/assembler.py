@@ -108,7 +108,11 @@ def assemble_final_video(
     )
 
     concat_list_file = temp_dir / "clips_concat.txt"
-    cmd = ["ffmpeg", "-y"]
+    # Without this, the concat demuxer can leave PTS discontinuities between
+    # clips that make ffmpeg write a wrong (too-short) duration into the
+    # output's moov atom — browsers then report the wrong video.duration,
+    # which breaks seeking/skip controls near the end of the real content.
+    cmd = ["ffmpeg", "-y", "-fflags", "+genpts"]
 
     if use_xfade:
         for clip in clip_paths:
@@ -150,7 +154,7 @@ def assemble_final_video(
         logo_index = len(clip_paths) if use_xfade else 1
         # Force a clean square crop regardless of the source image's aspect ratio.
         filter_parts.append(f"[{logo_index}:v]scale=100:100:force_original_aspect_ratio=increase,crop=100:100[logo]")
-        filter_parts.append(f"[{base_label}][logo]overlay=40:40[v_logo]")
+        filter_parts.append(f"[{base_label}][logo]overlay=W-w-40:40[v_logo]")
         base_label = "v_logo"
 
     if has_watermark:
