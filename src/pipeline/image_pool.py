@@ -82,6 +82,31 @@ def generate_fallback_image(path: Path, index: int, label: str = "Nichecut Scene
     img.save(path, quality=95)
     logger.info(f"Generated artistic fallback image: {path}")
 
+MIN_LANDSCAPE_RATIO = 1.35  # tolerant lower bound around 16:9 (~1.78) — excludes portrait/square
+
+def _is_landscape_enough(path: Path) -> bool:
+    """
+    Rejects portrait/square images: forcing them through the 16:9
+    scale+crop pipeline zooms in hard and throws away most of the frame,
+    producing an ugly, over-cropped result in the final video.
+    """
+    try:
+        with Image.open(path) as img:
+            w, h = img.size
+        return h > 0 and (w / h) >= MIN_LANDSCAPE_RATIO
+    except Exception as e:
+        logger.warning(f"Could not read image dimensions for '{path}', excluding it from the pool: {e}")
+        return False
+
+
+def _filter_landscape(paths: List[Path]) -> List[Path]:
+    kept = [p for p in paths if _is_landscape_enough(p)]
+    dropped = len(paths) - len(kept)
+    if dropped:
+        logger.info(f"Excluded {dropped} non-16:9 (portrait/square) image(s) from the pool.")
+    return kept
+
+
 def get_image_pool(
     image_dir: Path,
     required_count: int,
@@ -109,28 +134,29 @@ def get_image_pool(
         if not is_safe_path:
             logger.warning(f"Rejected library_path outside STORAGE_PATH: '{custom_dir}'.")
         elif custom_dir.is_dir():
-            custom_images = [f for f in custom_dir.iterdir() if f.suffix.lower() in image_extensions]
+            custom_images = _filter_landscape([f for f in custom_dir.iterdir() if f.suffix.lower() in image_extensions])
             if custom_images:
                 existing_images.extend(custom_images)
             else:
-                logger.warning(f"Configured library_path '{custom_dir}' contains no supported images ({image_extensions}).")
+                logger.warning(f"Configured library_path '{custom_dir}' contains no supported 16:9 images ({image_extensions}).")
         elif is_safe_path:
             logger.warning(f"Configured library_path '{custom_dir}' does not exist or is not a directory.")
 
     if require_custom_library and not existing_images:
         raise ValueError(
-            "La bibliothèque d’images de cette chaîne est absente ou vide. "
-            "Modifiez la chaîne et importez de nouveau le dossier d’images."
+            "La bibliothèque d’images de cette chaîne est absente, vide, ou ne contient que des "
+            "images qui ne sont pas au format 16:9. Modifiez la chaîne et importez des images "
+            "au format paysage (16:9)."
         )
 
     # Check custom channel image dir
     if image_dir.exists():
-        existing_images.extend([f for f in image_dir.iterdir() if f.suffix.lower() in image_extensions and not f.name.startswith("subtitled_")])
+        existing_images.extend(_filter_landscape([f for f in image_dir.iterdir() if f.suffix.lower() in image_extensions and not f.name.startswith("subtitled_")]))
 
     # Check general assets library directory
     library_dir = ASSETS_PATH / "images" / "library"
     if library_dir.exists():
-        lib_images = [f for f in library_dir.iterdir() if f.suffix.lower() in image_extensions]
+        lib_images = _filter_landscape([f for f in library_dir.iterdir() if f.suffix.lower() in image_extensions])
         existing_images.extend(lib_images)
 
     # Generate default fallback images if empty
