@@ -191,10 +191,10 @@ def assemble_final_video(
 
     if has_watermark:
         watermark_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
-        # Small, semi-transparent, bottom-left — a discreet "made with NicheCut"
+        # Small, semi-transparent, bottom-right — a discreet "made with NicheCut"
         # mark rather than a competing brand element.
         filter_parts.append(f"[{watermark_index}:v]scale=200:-1,format=rgba,colorchannelmixer=aa=0.75[wm]")
-        filter_parts.append(f"[{base_label}][wm]overlay=30:H-h-30[v_wm]")
+        filter_parts.append(f"[{base_label}][wm]overlay=W-w-30:H-h-30[v_wm]")
         base_label = "v_wm"
 
     if filter_parts:
