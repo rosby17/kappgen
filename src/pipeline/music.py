@@ -45,18 +45,16 @@ def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> 
     """
     Generates a background music track via Izivoice's music-generation endpoint.
 
-    NOTE: unlike /text-to-speech and /images/generate (both confirmed against
-    the live API), this endpoint path (/music/generate) is inferred from
-    Izivoice's naming convention and has not been verified against their docs
-    — confirm the real path/params before relying on this in production.
-    Any failure here falls back to the synthetic ambient tone below, so a
-    wrong endpoint degrades gracefully instead of breaking the render.
+    Confirmed against https://www.izivoice.app/api-docs: POST /music takes a
+    `prompt` string (no documented duration param — the API decides the
+    length), returns {success, task_id}, polled via GET /tasks/{task_id}
+    until status == "done", at which point metadata.audio_url holds the track.
     """
     with httpx.Client() as client:
         resp = client.post(
-            f"{IZIVOICE_BASE_URL}/music/generate",
+            f"{IZIVOICE_BASE_URL}/music",
             headers=_izivoice_headers(),
-            json={"prompt": prompt[:2000], "duration": round(duration)},
+            json={"prompt": prompt[:2000]},
             timeout=30.0
         )
         resp.raise_for_status()
