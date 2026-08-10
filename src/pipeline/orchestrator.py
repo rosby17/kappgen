@@ -126,8 +126,10 @@ def run_video_pipeline(
     
     if music_pref.get("enabled", True):
         music_track = get_background_music_track(
-            style=music_pref.get("track_id_or_style", "ambient"),
-            duration=total_duration
+            music_pref=music_pref,
+            duration=total_duration,
+            channel_id=channel_config.get("id"),
+            niche=channel_config.get("niche")
         )
         mix_audio_tracks(
             voiceover_path=raw_vo_path,

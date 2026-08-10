@@ -57,6 +57,16 @@ async def save_valid_library_images(files: List[UploadFile], target_dir: Path):
     finally:
         shutil.rmtree(incoming_dir, ignore_errors=True)
 
+@router.get("/niches")
+def list_niches(db: Session = Depends(get_db)):
+    """
+    Every distinct niche any channel has actually been saved with — the free-text
+    niche field on channel creation grows this list organically instead of relying
+    on a fixed pre-set catalogue, so it becomes a real shared niche database over time.
+    """
+    rows = db.query(Channel.niche).distinct().order_by(Channel.niche).all()
+    return [r[0] for r in rows if r[0]]
+
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(user_id: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(Channel)

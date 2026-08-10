@@ -17,11 +17,28 @@ class InputType(str, Enum):
 class SubtitleStyle(BaseModel):
     font: str = "Arial"
     size: int = 44
-    color: str = "&H00FFFFFF"           # ASS Hex color format (&HAA00BBGGRR or &H00FFFFFF white)
+    color: str = "#FFD700"              # accent/highlight color (hex or ASS format)
+    base_color: str = "#FFFFFF"         # non-highlighted word color
     outline_color: str = "&H00000000"   # Black outline
     outline_width: int = 3
     position: str = "bottom"            # bottom, center, top
-    karaoke: bool = True                # Enable word-by-word highlight
+    align: str = "center"               # left, center, right
+    karaoke: bool = True                # legacy flag, kept for old channels — superseded by highlight_mode
+    highlight_mode: str = "word"        # "word" (per-word), "line" (whole chunk), "none"
+    words_per_line: int = 6
+    text_case: str = "none"             # "none", "upper", "lower", "capitalize"
+    bold: bool = False
+    italic: bool = False
+    letter_spacing: int = 0
+    opacity: float = 100                # 0-100
+    rotation: int = 0                   # degrees
+    x_offset: int = 0                   # px nudge at 1920 width
+    y_offset: int = 0                   # px nudge at 1080 height
+    box_color: str = "transparent"      # background rectangle color, or "transparent"
+    box_padding: int = 10
+    shadow: bool = False
+    shadow_color: str = "#000000"
+    shadow_distance: int = 3
 
 class BrandingConfig(BaseModel):
     logo_path: Optional[str] = None
@@ -29,7 +46,10 @@ class BrandingConfig(BaseModel):
 
 class MusicPreference(BaseModel):
     enabled: bool = True
-    track_id_or_style: str = "ambient"
+    mode: str = "library"               # "library" (user's own tracks) | "ai_generate" (Izivoice)
+    track_id_or_style: str = "ambient"  # legacy, unused by new modes — kept for old channels
+    tracks: List[str] = Field(default_factory=list)  # storage-relative paths to uploaded tracks; one is picked at random per render
+    ai_prompt: Optional[str] = None     # optional override prompt for AI generation; defaults to the channel niche
     volume: float = 0.15                # Background volume level (0.0 - 1.0)
 
 class ImageStyle(BaseModel):
@@ -39,7 +59,8 @@ class ImageStyle(BaseModel):
     library_image_count: int = 0
 
 class EffectsConfig(BaseModel):
-    grain: bool = True
+    grain: bool = True                  # legacy flag, kept for old channels — superseded by overlay_effect
+    overlay_effect: str = "grain"       # "none", "grain", "white_noise", "vignette", "grain_vignette"
     color_grade: str = "warm"           # "warm", "vintage", "dramatic", "none"
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
