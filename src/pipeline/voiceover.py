@@ -210,8 +210,26 @@ def _extract_words_from_stt_metadata(metadata: Dict[str, Any], client: httpx.Cli
         # accented characters (was producing "chaÃ®ne" instead of "chaîne").
         text = " ".join(full_texts[:1]).strip() if full_texts else ""
         text = text.replace('\\"', '"').replace("\\\\", "\\")
-        logger.warning(f"Izivoice STT json_url returned truncated/invalid JSON; recovered plain text via regex ({'ok' if text else 'failed'}).")
-        return text, None
+
+        # Also recover REAL per-word timing for whichever word objects made it
+        # through intact before the cut (truncation happens at some point deep
+        # in the "words" array, so most of it is usually still there). Without
+        # this, the caller falls back to synthetic even-split timing, which
+        # visibly drifts out of sync with the actual voiceover on longer clips.
+        word_objs = re.findall(
+            r'"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"start"\s*:\s*([\d.]+)\s*,\s*"end"\s*:\s*([\d.]+)\s*,\s*"type"\s*:\s*"word"',
+            raw_body,
+        )
+        words = [
+            {"word": w.replace('\\"', '"').strip(), "start": float(s), "end": float(e)}
+            for w, s, e in word_objs if w.strip()
+        ]
+
+        logger.warning(
+            f"Izivoice STT json_url returned truncated/invalid JSON; recovered plain text via regex "
+            f"({'ok' if text else 'failed'}) and {len(words)} word timing(s)."
+        )
+        return text, (words or None)
 
     if not isinstance(segments, list):
         return "", None
