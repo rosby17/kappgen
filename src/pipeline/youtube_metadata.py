@@ -73,14 +73,40 @@ def _font(size: int):
     return ImageFont.load_default()
 
 
-def generate_thumbnail(video_path: Path, destination: Path, text: str) -> Path:
+def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> Path:
+    """Generates the thumbnail's background image via Izivoice's AI image API
+    (same provider/model as the render pipeline's visuals) instead of just
+    cropping a frame out of the finished video — a purpose-made, eye-catching
+    background that actually represents the video's subject."""
+    from src.pipeline.images import generate_ai_image
+    import httpx
+
+    style_prompt = ((channel.image_style or {}).get("style_prompt") or "").strip()
+    niche = (channel.niche or "").strip()
+    prompt = f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, cinematic, high detail, dramatic lighting, eye-catching, no text, no watermark, 16:9"
+    ai_path = destination.with_suffix(".ai.jpg")
+    with httpx.Client(timeout=60.0) as client:
+        generate_ai_image(prompt, ai_path, client)
+    return ai_path
+
+
+def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
-    try:
-        run_ffmpeg(["ffmpeg", "-y", "-ss", "00:00:02", "-i", str(video_path), "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720", str(frame_path)])
-        image = Image.open(frame_path).convert("RGB")
-    except Exception:
-        image = Image.new("RGB", (1280, 720), "#07111f")
+    image = None
+    if channel is not None:
+        try:
+            ai_path = _generate_ai_thumbnail_background(text, channel, destination)
+            image = Image.open(ai_path).convert("RGB")
+        except Exception as exc:
+            logger.warning(f"AI thumbnail background generation failed, falling back to a video frame: {exc}")
+    if image is None:
+        try:
+            run_ffmpeg(["ffmpeg", "-y", "-ss", "00:00:02", "-i", str(video_path), "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720", str(frame_path)])
+            image = Image.open(frame_path).convert("RGB")
+        except Exception:
+            image = Image.new("RGB", (1280, 720), "#07111f")
+    image = image.resize((1280, 720)) if image.size != (1280, 720) else image
     image = ImageEnhance.Contrast(image).enhance(1.12)
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -104,4 +130,5 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str) -> Path:
     result = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     result.save(destination, "JPEG", quality=90, optimize=True)
     frame_path.unlink(missing_ok=True)
+    destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
     return destination

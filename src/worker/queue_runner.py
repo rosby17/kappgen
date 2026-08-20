@@ -173,10 +173,10 @@ def process_single_queued_video() -> bool:
         # "Vidéo prête" shows immediately regardless of how long this takes.
         try_ensure_sd_variant(output_mp4)
 
-        # Propose a ready-to-publish YouTube title/description as soon as the
-        # video exists, for every channel — not just auto-mode ones — so the
-        # creator always has something reviewable/editable rather than a blank
-        # field until the moment they hit "Publier".
+        # Propose a ready-to-publish YouTube title/description/thumbnail as
+        # soon as the video exists, for every channel — not just auto-mode
+        # ones — so the creator always has something reviewable/ready rather
+        # than a blank field until the moment they hit "Publier".
         if not video.title or not video.youtube_description:
             try:
                 meta = youtube_metadata.generate_metadata(video, channel)
@@ -187,6 +187,13 @@ def process_single_queued_video() -> bool:
                 db.commit()
             except Exception as e:
                 logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
+
+        try:
+            youtube_metadata.generate_thumbnail(
+                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or "", channel=channel
+            )
+        except Exception as e:
+            logger.warning(f"Could not pre-generate thumbnail for video {video.id}: {e}")
 
         # How this finished video actually reaches YouTube is always the
         # creator's own choice (channel.publish_mode), independent of whether
@@ -297,15 +304,20 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         meta["title"] = video.title
     if video.youtube_description:
         meta["description"] = video.youtube_description
-    thumbnail_path = None
-    try:
-        video.progress_stage = "Génération de la miniature"
-        db.commit()
-        thumbnail_path = youtube_metadata.generate_thumbnail(
-            output_mp4, output_mp4.with_name("thumbnail.jpg"), meta.get("thumbnail_text") or meta["title"]
-        )
-    except Exception as e:
-        logger.warning(f"Thumbnail generation failed for video {video.id}, publishing without a custom one: {e}")
+    # Usually already sitting on disk — generated right after the render
+    # finished, alongside the title/description. Only regenerate here if
+    # that earlier pass failed for some reason.
+    existing_thumbnail = output_mp4.with_name("thumbnail.jpg")
+    thumbnail_path = existing_thumbnail if existing_thumbnail.exists() else None
+    if not thumbnail_path:
+        try:
+            video.progress_stage = "Génération de la miniature"
+            db.commit()
+            thumbnail_path = youtube_metadata.generate_thumbnail(
+                output_mp4, existing_thumbnail, meta.get("thumbnail_text") or meta["title"], channel=channel
+            )
+        except Exception as e:
+            logger.warning(f"Thumbnail generation failed for video {video.id}, publishing without a custom one: {e}")
 
     try:
         video.progress_stage = "Publication sur YouTube"

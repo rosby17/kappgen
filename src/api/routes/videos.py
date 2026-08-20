@@ -258,6 +258,7 @@ def publish_video_to_youtube(video_id: str, db: Session = Depends(get_db)):
         video_path,
         publication_dir / "youtube-thumbnail.jpg",
         metadata["thumbnail_text"],
+        channel=channel,
     )
     try:
         youtube_id = youtube_publisher.publish_video_for_channel(
@@ -326,6 +327,35 @@ def regenerate_youtube_metadata(video_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(video)
     return video.to_dict()
+
+@router.post("/{video_id}/youtube-thumbnail/resync")
+def resync_youtube_thumbnail(video_id: str, db: Session = Depends(get_db)):
+    """Regenerates the thumbnail and re-uploads it to the already-published
+    YouTube video — for videos published before thumbnail generation existed,
+    or whose thumbnail upload silently failed (e.g. the channel wasn't phone-
+    verified with YouTube yet at the time)."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if not video.youtube_video_id:
+        raise HTTPException(status_code=409, detail="Cette vidéo n'est pas encore publiée sur YouTube.")
+    channel = video.channel
+    if not channel or not channel.youtube_refresh_token:
+        raise HTTPException(status_code=409, detail="Chaîne non connectée à YouTube.")
+    video_path = STORAGE_PATH / video.output_path if video.output_path else None
+    if not video_path or not video_path.exists():
+        raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+
+    access_token = youtube_publisher.get_valid_access_token(channel)
+    if not access_token:
+        raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
+
+    thumbnail_path = generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.title or "", channel=channel)
+    try:
+        youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Échec de l'envoi de la miniature à YouTube : {str(exc)[:300]}")
+    return {"status": "ok"}
 
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):
