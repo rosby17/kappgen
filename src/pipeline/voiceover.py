@@ -434,5 +434,11 @@ def generate_voiceover(script_text: str, output_audio_path: Path, voice_id: Opti
         return output_audio_path, transcript_info
 
     except Exception as e:
-        logger.warning(f"Izivoice API call failed ({e}). Falling back to local TTS mock generator.")
-        return generate_mock_voiceover(script_text, output_audio_path)
+        # Do NOT fall back to the sine-tone mock generator here — a real key
+        # is configured, so a failure means the video's actual voiceover
+        # could not be produced. Silently shipping a placeholder tone instead
+        # was masking real Izivoice failures as "successful" renders (users
+        # got a whistling sound for the whole video with no error anywhere).
+        # Let this propagate so the video is correctly marked failed and can
+        # be retried, instead of silently succeeding with unusable audio.
+        raise RuntimeError(f"Izivoice text-to-speech failed: {e}") from e
