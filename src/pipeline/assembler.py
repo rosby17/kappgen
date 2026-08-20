@@ -192,9 +192,10 @@ def assemble_final_video(
 
     if has_watermark:
         watermark_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
-        # Roughly 47% of a 1920px frame, with low opacity so the content remains
-        # watchable while the free export cannot be cleaned by cropping a corner.
-        filter_parts.append(f"[{watermark_index}:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.14[wm]")
+        # Roughly 47% of a 1920px frame. Opacity raised from 0.14 to 0.22 so it
+        # actually reads as sitting on top of the subtitles instead of getting
+        # visually lost behind their bold, high-contrast text.
+        filter_parts.append(f"[{watermark_index}:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.22[wm]")
         filter_parts.append(f"[{base_label}][wm]overlay=(W-w)/2:(H-h)/2[v_wm]")
         base_label = "v_wm"
 
