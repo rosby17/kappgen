@@ -15,6 +15,7 @@ from src.pipeline.orchestrator import (
 )
 from src.pipeline.transcode import try_ensure_sd_variant
 from src.pipeline import youtube_publisher
+from src.pipeline import youtube_metadata
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
@@ -179,10 +180,20 @@ def process_single_queued_video() -> bool:
         db.close()
 
 def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path) -> None:
-    title = video.title or f"{channel.name} — {datetime.utcnow().strftime('%d/%m/%Y')}"
-    description = (video.script_text or "").strip()[:400]
+    meta = youtube_metadata.generate_metadata(video, channel)
+    thumbnail_path = None
     try:
-        video_id = youtube_publisher.publish_video_for_channel(channel, output_mp4, title, description)
+        thumbnail_path = youtube_metadata.generate_thumbnail(
+            output_mp4, output_mp4.with_name("thumbnail.jpg"), meta.get("thumbnail_text") or meta["title"]
+        )
+    except Exception as e:
+        logger.warning(f"Thumbnail generation failed for video {video.id}, publishing without a custom one: {e}")
+
+    try:
+        video_id = youtube_publisher.publish_video_for_channel(
+            channel, output_mp4, meta["title"], meta["description"],
+            thumbnail_path=thumbnail_path, tags=meta.get("tags"),
+        )
         video.youtube_video_id = video_id
         video.youtube_published_at = datetime.utcnow()
         video.youtube_publish_error = None
