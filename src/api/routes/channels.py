@@ -73,19 +73,33 @@ def disconnect_izivoice(user_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/voice/catalog")
-def list_voice_catalog(language: Optional[str] = None, user_id: Optional[str] = None, db: Session = Depends(get_db)):
+def list_voice_catalog(
+    language: Optional[str] = None,
+    user_id: Optional[str] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Izivoice's real catalog holds 11 000+ voices — far too many to ever load
+    in full into a picker. Without a search term we fetch a first, generously
+    sized page (~1000) so the picker isn't limited to a handful of voices;
+    with a search term we forward it straight to Izivoice (which searches its
+    whole catalog server-side) and only fetch a couple of pages, since the
+    match set is already narrow."""
     _, api_key = _user_and_izivoice_key(db, user_id)
     if not api_key:
         raise HTTPException(status_code=503, detail="Le catalogue de voix n'est pas configuré.")
     # Izivoice's `page` is 0-indexed — page=1 silently returns the *second*
     # page (empty for most accounts), which is why the picker only ever
     # showed the 4 hardcoded fallback voices instead of the real catalog.
+    max_pages = 3 if search else 10
     all_voices = []
     with httpx.Client(timeout=30) as client:
-        for page in range(0, 4):  # up to ~400 voices; plenty for a picker
+        for page in range(0, max_pages):
             params = {"page": page, "page_size": 100}
             if language:
                 params["language"] = language
+            if search:
+                params["search"] = search
             response = client.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params=params)
             response.raise_for_status()
             data = (response.json().get("data") or {})
@@ -534,60 +548,109 @@ async def analyze_style_image(file: UploadFile = File(...)):
 
     return {"style_prompt": style_prompt}
 
+def _thumbnail_reference_paths(thumbnail_style: dict) -> List[str]:
+    """thumbnail_style used to store a single 'reference_image_path' — normalize both
+    the old and current ('reference_image_paths', a list) shapes into a list."""
+    if not thumbnail_style:
+        return []
+    paths = thumbnail_style.get("reference_image_paths")
+    if paths:
+        return list(paths)
+    single = thumbnail_style.get("reference_image_path")
+    return [single] if single else []
+
+
 @router.post("/{channel_id}/thumbnail-style")
-async def upload_channel_thumbnail_style(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Sets this channel's thumbnail-specific reference image: analyzes it via vision
-    into a reusable style prompt (kept separate from image_style, since the thumbnail
-    look is often deliberately different from the video's body-image style) and stores
-    both the prompt and the reference image itself."""
+async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+    """Adds one or more thumbnail-specific reference images for this channel, then
+    re-analyzes ALL of them together (existing + newly uploaded) into a single
+    reusable style prompt — kept separate from image_style, since the thumbnail
+    look is often deliberately different from the video's own body-image style."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    ext = Path(file.filename or "").suffix.lower()
-    media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
-    if not media_type:
-        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp).")
-
-    contents = await file.read()
-    from src.pipeline.vision import analyze_thumbnail_reference_image
-    try:
-        style_prompt = analyze_thumbnail_reference_image(contents, media_type)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Analyse de l'image impossible : {e}")
-
-    channel_dir = STORAGE_PATH / "channels" / channel.id
+    channel_dir = STORAGE_PATH / "channels" / channel.id / "thumbnail_references"
     channel_dir.mkdir(parents=True, exist_ok=True)
-    for old_ref in channel_dir.glob("thumbnail_reference.*"):
-        old_ref.unlink(missing_ok=True)
-    dest_file = channel_dir / f"thumbnail_reference{ext}"
-    dest_file.write_bytes(contents)
 
-    channel.thumbnail_style = {
-        "reference_image_path": f"channels/{channel.id}/thumbnail_reference{ext}",
-        "style_prompt": style_prompt,
-    }
+    existing_paths = _thumbnail_reference_paths(channel.thumbnail_style or {})
+    new_paths = []
+    for file in files:
+        ext = Path(file.filename or "").suffix.lower()
+        media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
+        if not media_type:
+            raise HTTPException(status_code=400, detail=f"Format d'image non supporté pour {file.filename} (png, jpg, webp).")
+        contents = await file.read()
+        dest_file = channel_dir / f"{uuid.uuid4().hex}{ext}"
+        dest_file.write_bytes(contents)
+        new_paths.append(f"channels/{channel.id}/thumbnail_references/{dest_file.name}")
+
+    all_paths = existing_paths + new_paths
+    images = []
+    for rel_path in all_paths:
+        abs_path = STORAGE_PATH / rel_path
+        ext = abs_path.suffix.lower()
+        media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
+        if abs_path.exists() and media_type:
+            images.append((abs_path.read_bytes(), media_type))
+
+    from src.pipeline.vision import analyze_thumbnail_reference_images
+    try:
+        style_prompt = analyze_thumbnail_reference_images(images)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
+
+    channel.thumbnail_style = {"reference_image_paths": all_paths, "style_prompt": style_prompt}
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
 
 
 @router.delete("/{channel_id}/thumbnail-style")
-def delete_channel_thumbnail_style(channel_id: str, db: Session = Depends(get_db)):
-    """Reverts this channel's thumbnails to the default background source (video
-    frame, or image_style's own prompt) by clearing the dedicated thumbnail style."""
+def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = None, db: Session = Depends(get_db)):
+    """Without `image_path`: clears the whole thumbnail style (reverts to the default
+    background source — video frame, or image_style's own prompt). With `image_path`:
+    removes just that one reference image and re-analyzes the remaining ones."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    thumbnail_style = channel.thumbnail_style or {}
-    ref_path = thumbnail_style.get("reference_image_path")
-    if ref_path:
-        file_path = STORAGE_PATH / ref_path
-        if file_path.exists() and file_path.is_relative_to(STORAGE_PATH / "channels" / channel.id):
-            file_path.unlink(missing_ok=True)
+    channel_dir = STORAGE_PATH / "channels" / channel.id
+    existing_paths = _thumbnail_reference_paths(channel.thumbnail_style or {})
 
-    channel.thumbnail_style = None
+    if image_path is None:
+        for rel_path in existing_paths:
+            file_path = STORAGE_PATH / rel_path
+            if file_path.exists() and file_path.is_relative_to(channel_dir):
+                file_path.unlink(missing_ok=True)
+        channel.thumbnail_style = None
+        db.commit()
+        db.refresh(channel)
+        return channel.to_dict()
+
+    if image_path not in existing_paths:
+        raise HTTPException(status_code=404, detail="Image de référence introuvable.")
+    file_path = STORAGE_PATH / image_path
+    if file_path.exists() and file_path.is_relative_to(channel_dir):
+        file_path.unlink(missing_ok=True)
+    remaining_paths = [p for p in existing_paths if p != image_path]
+
+    if not remaining_paths:
+        channel.thumbnail_style = None
+    else:
+        images = []
+        for rel_path in remaining_paths:
+            abs_path = STORAGE_PATH / rel_path
+            media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(abs_path.suffix.lower())
+            if abs_path.exists() and media_type:
+                images.append((abs_path.read_bytes(), media_type))
+        from src.pipeline.vision import analyze_thumbnail_reference_images
+        try:
+            style_prompt = analyze_thumbnail_reference_images(images)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
+        channel.thumbnail_style = {"reference_image_paths": remaining_paths, "style_prompt": style_prompt}
+
     db.commit()
     db.refresh(channel)
     return channel.to_dict()

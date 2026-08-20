@@ -28,33 +28,32 @@ THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION = (
 
 
 def _analyze_with_anthropic(image_bytes: bytes, media_type: str, instruction: str = STYLE_ANALYSIS_INSTRUCTION) -> str:
+    return _analyze_many_with_anthropic([(image_bytes, media_type)], instruction)
+
+
+def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     import anthropic
 
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    b64_data = base64.standard_b64encode(image_bytes).decode("utf-8")
+    content = []
+    for image_bytes, media_type in images:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.standard_b64encode(image_bytes).decode("utf-8"),
+            },
+        })
+    content.append({"type": "text", "text": instruction})
 
     response = client.messages.create(
         model="claude-opus-5",
         max_tokens=400,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64_data,
-                        },
-                    },
-                    {"type": "text", "text": instruction},
-                ],
-            }
-        ],
+        messages=[{"role": "user", "content": content}],
     )
 
     for block in response.content:
@@ -87,9 +86,35 @@ def analyze_thumbnail_reference_image(image_bytes: bytes, media_type: str) -> st
     (e.g. a consistent character) rather than stripping it out like the generic
     per-video style prompt does.
     """
+    return analyze_thumbnail_reference_images([(image_bytes, media_type)])
+
+
+THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
+    "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
+    "You are shown several reference thumbnails from the same channel. Write a single, "
+    "dense image-generation prompt (comma-separated descriptors, no full sentences, no "
+    "preamble) that captures the visual identity shared across ALL of them: recurring "
+    "subject archetype (e.g. elderly bearded man in a robe, praying) if consistent across "
+    "images, framing/composition, art style/medium, color palette, lighting, mood, and "
+    "level of detail. If the images disagree on a detail, favor whatever appears in most "
+    "of them. Do not mention any on-image text/typography, since that is added separately. "
+    "Reply with only the prompt text."
+)
+
+
+def analyze_thumbnail_reference_images(images: list) -> str:
+    """
+    Analyzes one or more reference YouTube thumbnails together and returns a single
+    reusable image-generation prompt synthesizing their shared visual identity.
+    images: list of (image_bytes, media_type) tuples.
+    """
+    instruction = THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION
     if VISION_PROVIDER == "openai":
-        return _analyze_with_openai(image_bytes, media_type, THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION)
-    return _analyze_with_anthropic(image_bytes, media_type, THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION)
+        raise NotImplementedError(
+            "OpenAI vision analysis isn't wired up yet — set VISION_PROVIDER=openai and "
+            "OPENAI_API_KEY once available, and implement this function."
+        )
+    return _analyze_many_with_anthropic(images, instruction)
 
 
 MUSIC_PROMPT_INSTRUCTION = (
