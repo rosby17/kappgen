@@ -3,8 +3,6 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
-from PIL import Image
-import io
 import random
 import re
 import shutil
@@ -125,10 +123,14 @@ async def save_valid_library_images(files: List[UploadFile], target_dir: Path):
                 rejected += 1
                 continue
             contents = await file.read()
-            try:
-                with Image.open(io.BytesIO(contents)) as image:
-                    image.verify()
-            except Exception:
+            # Trust the extension instead of decoding every image with PIL —
+            # for a large batch (100+ MB), a full open()+verify() per file was
+            # slow enough to blow past Cloudflare's fixed ~100s proxy timeout,
+            # which killed the upload client-side right as it finished
+            # uploading. A quick non-empty check catches the obvious garbage;
+            # a genuinely corrupt image just falls back gracefully at render
+            # time like any other unusable library asset.
+            if not contents:
                 rejected += 1
                 continue
             (incoming_dir / f"img_{saved:04d}{ext}").write_bytes(contents)
