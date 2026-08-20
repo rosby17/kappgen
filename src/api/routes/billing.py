@@ -20,6 +20,17 @@ def list_plans(db: Session = Depends(get_db)):
     return [p.to_dict() for p in plans]
 
 
+@router.get("/subscription")
+def my_subscription(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sub = (
+        db.query(Subscription)
+        .filter(Subscription.user_id == current_user.id, Subscription.status == "active", Subscription.expires_at > datetime.utcnow())
+        .order_by(Subscription.expires_at.desc())
+        .first()
+    )
+    return {"active": sub is not None, "subscription": sub.to_dict() if sub else None}
+
+
 class CheckoutPayload(BaseModel):
     plan_id: str
     provider: str  # "maketou" | "tarapay"
