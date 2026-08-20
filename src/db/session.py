@@ -81,6 +81,7 @@ def init_db():
             "automation_mode": "ALTER TABLE channels ADD COLUMN automation_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
             "automation_style_prompt": "ALTER TABLE channels ADD COLUMN automation_style_prompt TEXT",
             "last_auto_run_date": "ALTER TABLE channels ADD COLUMN last_auto_run_date VARCHAR(10)",
+            "script_structure": "ALTER TABLE channels ADD COLUMN script_structure JSON",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

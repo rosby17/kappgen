@@ -80,6 +80,11 @@ class Channel(Base):
     automation_mode = Column(String(20), nullable=False, default="manual")
     automation_style_prompt = Column(Text, nullable=True)  # optional extra creative direction for Claude
     last_auto_run_date = Column(String(10), nullable=True)  # "YYYY-MM-DD" in the channel's automation timezone
+    # Configurable shape of the auto-generated script: language, parts (each
+    # with a word count + what it must cover), formatting rules, CTA style.
+    # See src/pipeline/script_writer.py DEFAULT_SCRIPT_STRUCTURE for the shape
+    # and fallback used when this is null.
+    script_structure = Column(JSON, nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="channels")
@@ -100,6 +105,7 @@ class Channel(Base):
             "automation_mode": self.automation_mode or "manual",
             "automation_style_prompt": self.automation_style_prompt,
             "last_auto_run_date": self.last_auto_run_date,
+            "script_structure": self.script_structure,
             "video_count": len(self.videos) if self.videos else 0
         }
 

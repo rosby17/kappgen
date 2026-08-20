@@ -103,6 +103,7 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         effects_config=payload.effects_config.model_dump(),
         automation_mode=payload.automation_mode or "manual",
         automation_style_prompt=payload.automation_style_prompt,
+        script_structure=payload.script_structure,
     )
     db.add(channel)
     db.commit()
@@ -163,6 +164,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.automation_mode = payload.automation_mode
     if payload.automation_style_prompt is not None:
         channel.automation_style_prompt = payload.automation_style_prompt
+    if payload.script_structure is not None:
+        channel.script_structure = payload.script_structure
 
     db.commit()
     db.refresh(channel)

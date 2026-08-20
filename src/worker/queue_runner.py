@@ -368,6 +368,7 @@ def run_daily_automation():
                 niche=channel.niche,
                 recent_titles=recent_titles,
                 style_prompt=channel.automation_style_prompt,
+                script_structure=channel.script_structure,
             )
             if not result:
                 # Leave last_auto_run_date untouched so this is retried on the

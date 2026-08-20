@@ -82,6 +82,7 @@ class ChannelCreate(BaseModel):
     effects_config: EffectsConfig = Field(default_factory=EffectsConfig)
     automation_mode: str = "manual"  # "manual" | "auto"
     automation_style_prompt: Optional[str] = None
+    script_structure: Optional[dict] = None
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -93,6 +94,7 @@ class ChannelUpdate(BaseModel):
     effects_config: Optional[EffectsConfig] = None
     automation_mode: Optional[str] = None
     automation_style_prompt: Optional[str] = None
+    script_structure: Optional[dict] = None
 
 class VideoCreate(BaseModel):
     channel_id: str

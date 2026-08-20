@@ -1,8 +1,21 @@
 """
 Full-auto pipeline: picks a fresh topic and writes a complete narration script
 for a channel, with zero human input, for channels running in "auto" mode.
-Given the channel's niche/style and its recent video titles (to avoid
-repeating the same topic), returns a ready-to-render {title, script_text}.
+
+The script's shape (how many parts, how long each one is, what it must cover,
+formatting rules, call-to-action style, output language) is fully configurable
+per channel via Channel.script_structure — inspired by the kind of detailed
+"project instructions" creators already write by hand for long-form scripts
+(e.g. a six-part, ten-thousand-word narration with Bible references for a
+faith channel, or a completely different shape for another niche). Channels
+that haven't configured one yet fall back to DEFAULT_SCRIPT_STRUCTURE, a
+generic long-form narrative shape that works for any niche.
+
+Long scripts (thousands of words) are written one part at a time in separate
+Claude calls — each part sees the title, the niche, the shared style/formatting
+rules, and the tail of what was already written for continuity — then stitched
+into one continuous block of prose. This keeps every individual call well
+within a safe output-token budget regardless of how long the full script is.
 """
 import json
 import re
@@ -11,6 +24,53 @@ from src.config import ANTHROPIC_API_KEY
 from src.utils.logger import logger
 
 SCRIPT_WRITER_MODEL = "claude-sonnet-5"
+
+# Generic, niche-agnostic fallback — used only for channels that haven't
+# configured their own script_structure yet.
+DEFAULT_SCRIPT_STRUCTURE = {
+    "language": "English",
+    "parts": [
+        {
+            "name": "hook_intro",
+            "word_count": 250,
+            "guidance": "Open with a striking hook — a strong claim, a vivid moment, or a question that pulls the listener in. Introduce the topic and why it matters. Naturally invite the viewer to like the video and subscribe, without breaking the tone. Tease what's coming without giving it all away.",
+        },
+        {
+            "name": "context",
+            "word_count": 250,
+            "guidance": "Give the background and context needed to understand the topic. Explain why this truth is often misunderstood, overlooked, or hard to grasp today.",
+        },
+        {
+            "name": "main_part_one",
+            "word_count": 900,
+            "guidance": "Develop the core ideas one at a time, with concrete examples, stories, or analogies that make each one memorable. Ask thought-provoking questions along the way. Partway through, naturally remind the listener to like and subscribe.",
+        },
+        {
+            "name": "main_part_two",
+            "word_count": 900,
+            "guidance": "Go deeper — surface less obvious insights, explain the real benefits of understanding and applying this, and gently correct common misconceptions about the topic.",
+        },
+        {
+            "name": "application",
+            "word_count": 900,
+            "guidance": "Give concrete, practical steps the listener can apply starting today. Explain how this understanding changes daily life. Include one short original illustrative story (not a real historical account) that carries the lesson without stating the lesson outright — let the listener draw the conclusion themselves.",
+        },
+        {
+            "name": "conclusion",
+            "word_count": 300,
+            "guidance": "Summarize the key ideas with power and clarity. End on a strong closing statement. Close with a natural, not pushy, call to action — sharing the video, leaving a comment, or exploring the topic further.",
+        },
+    ],
+    "formatting_rules": [
+        "Write every number out in words, never as digits.",
+        "Do not include any section titles, labels, or headings anywhere in the text — it must read as one continuous piece.",
+        "Write only words meant to be read aloud by a voiceover — no visual directions, no music cues, no camera directions, no stage directions of any kind.",
+        "Write in flowing continuous paragraphs — never a single short line standing alone, never poetry-style formatting.",
+    ],
+    "cta_style": "Weave invitations to like, subscribe, and comment naturally into the narration, never as a jarring aside.",
+}
+
+MAX_PART_WORD_COUNT_PER_CALL = 1600  # keeps every single Claude call comfortably inside a safe output-token budget
 
 
 def _extract_json(text: str) -> dict:
@@ -21,52 +81,150 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
-def generate_daily_script(
-    niche: str,
-    recent_titles: List[str],
-    style_prompt: Optional[str] = None,
-    target_minutes: float = 5.0,
-) -> Optional[Dict[str, str]]:
-    """
-    Returns {"title": str, "script_text": str} for a brand-new video topic in
-    this niche, or None if Claude isn't configured / the call fails — callers
-    should treat None as "skip today, try again on the next scheduled run"
-    rather than publishing a broken video.
-    """
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set — cannot auto-generate a daily script.")
-        return None
+def _split_oversized_parts(parts: List[dict]) -> List[dict]:
+    """Splits any single part whose word_count is too large for one safe Claude
+    call into several same-guidance sub-parts, so no individual call is asked
+    to produce more than MAX_PART_WORD_COUNT_PER_CALL words at once."""
+    result = []
+    for part in parts:
+        word_count = int(part.get("word_count", 0) or 0)
+        if word_count <= MAX_PART_WORD_COUNT_PER_CALL:
+            result.append(part)
+            continue
+        chunks = -(-word_count // MAX_PART_WORD_COUNT_PER_CALL)  # ceil div
+        chunk_words = word_count // chunks
+        for i in range(chunks):
+            words = chunk_words if i < chunks - 1 else (word_count - chunk_words * (chunks - 1))
+            result.append({"name": f"{part.get('name', 'part')}_{i+1}", "word_count": words, "guidance": part.get("guidance", "")})
+    return result
 
+
+def _pick_topic(client, niche: str, recent_titles: List[str], style_prompt: Optional[str], language: str) -> Optional[str]:
     avoid_list = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet — this is the first video)"
-    target_words = int(target_minutes * 150)  # ~150 spoken words/minute
-
-    instruction = f"""You are the head writer for a faceless YouTube channel.
-
-Niche: {niche or "general"}
+    instruction = f"""You are the head writer for a faceless YouTube channel (niche: {niche or "general"}).
 {f"Creative/tone direction from the channel owner: {style_prompt}" if style_prompt else ""}
 
 Titles of videos already published on this channel (never repeat these topics or very close variants):
 {avoid_list}
 
-Task: invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet, then write a complete narration script for it — the exact text a voiceover will read aloud, start to finish, with a strong hook in the first sentence, a clear throughline, and a natural closing line. No stage directions, no scene numbers, no headings — just the spoken narration text itself. Target length: about {target_words} words (~{target_minutes:.0f} minutes spoken).
-
-Respond with ONLY this JSON object, no other text:
-{{"title": "short punchy video title", "script_text": "the full narration script"}}"""
-
+Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet. Respond in {language} with ONLY this JSON object, no other text:
+{{"title": "short punchy video title"}}"""
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
             model=SCRIPT_WRITER_MODEL,
-            max_tokens=6000,
+            max_tokens=300,
             messages=[{"role": "user", "content": instruction}],
         )
         raw_text = "".join(b.text for b in response.content if b.type == "text")
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
-        script_text = str(data.get("script_text", "")).strip()
-        if not title or not script_text:
-            logger.warning("Daily script generation returned an empty title/script.")
+        return title or None
+    except Exception as e:
+        logger.warning(f"Daily script topic selection (Claude) failed: {e}")
+        return None
+
+
+def _write_part(
+    client,
+    title: str,
+    niche: str,
+    language: str,
+    style_prompt: Optional[str],
+    formatting_rules: List[str],
+    cta_style: str,
+    part: dict,
+    previous_tail: str,
+    is_last_part: bool,
+) -> Optional[str]:
+    word_count = int(part.get("word_count", 300) or 300)
+    rules_block = "\n".join(f"- {r}" for r in formatting_rules) if formatting_rules else ""
+    guidance_text = part.get("guidance", "")
+    continuity_block = (
+        f'The script so far ends with this text — continue the narration seamlessly from here, in the same voice, with no repetition and no break in flow (do not restate or summarize what was already said):\n"{previous_tail}"'
+        if previous_tail else "This is the very opening of the script — start strong."
+    )
+    style_line = f"Creative/tone direction from the channel owner: {style_prompt}" if style_prompt else ""
+    cta_line = f"Call-to-action style: {cta_style}" if cta_style else ""
+    closing_line = "This is the closing section of the script." if is_last_part else ""
+
+    instruction = f"""You are writing one continuous section of a long-form narration script, in {language}, for a video titled "{title}" (niche: {niche or "general"}).
+{style_line}
+{cta_line}
+
+Formatting rules that apply to the whole script:
+{rules_block}
+
+This section must be about {word_count} words long and must cover: {guidance_text}
+{closing_line}
+{continuity_block}
+
+Respond with ONLY the narration text for this section, nothing else — no title, no preamble, no quotation marks, no labels."""
+
+    max_tokens = min(8000, int(word_count * 1.8) + 300)
+    try:
+        response = client.messages.create(
+            model=SCRIPT_WRITER_MODEL,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": instruction}],
+        )
+        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        return text or None
+    except Exception as e:
+        logger.warning(f"Daily script part generation (Claude) failed for part '{part.get('name')}': {e}")
+        return None
+
+
+def generate_daily_script(
+    niche: str,
+    recent_titles: List[str],
+    style_prompt: Optional[str] = None,
+    script_structure: Optional[Dict] = None,
+) -> Optional[Dict[str, str]]:
+    """
+    Returns {"title": str, "script_text": str} for a brand-new video topic in
+    this niche, written according to script_structure (or DEFAULT_SCRIPT_STRUCTURE
+    if the channel hasn't configured one), or None if Claude isn't configured /
+    the call fails — callers should treat None as "skip today, try again on the
+    next scheduled run" rather than publishing a broken video.
+    """
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not set — cannot auto-generate a daily script.")
+        return None
+
+    structure = script_structure or DEFAULT_SCRIPT_STRUCTURE
+    language = structure.get("language") or "English"
+    raw_parts = structure.get("parts") or DEFAULT_SCRIPT_STRUCTURE["parts"]
+    parts = _split_oversized_parts(raw_parts)
+    formatting_rules = structure.get("formatting_rules") or DEFAULT_SCRIPT_STRUCTURE["formatting_rules"]
+    cta_style = structure.get("cta_style") or DEFAULT_SCRIPT_STRUCTURE["cta_style"]
+
+    if not parts:
+        logger.warning("Daily script generation: script_structure has no parts configured.")
+        return None
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        title = _pick_topic(client, niche, recent_titles, style_prompt, language)
+        if not title:
+            return None
+
+        written_parts: List[str] = []
+        tail = ""
+        for i, part in enumerate(parts):
+            part_text = _write_part(
+                client, title, niche, language, style_prompt, formatting_rules, cta_style,
+                part, tail, is_last_part=(i == len(parts) - 1),
+            )
+            if not part_text:
+                logger.warning(f"Daily script generation: part '{part.get('name')}' failed, aborting this run.")
+                return None
+            written_parts.append(part_text)
+            tail = part_text[-600:]
+
+        script_text = " ".join(written_parts).strip()
+        if not script_text:
             return None
         return {"title": title, "script_text": script_text}
     except Exception as e:
