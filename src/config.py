@@ -47,10 +47,10 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 # secret and a registered redirect URI on the same or a dedicated OAuth client.
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 YOUTUBE_OAUTH_REDIRECT_URI = os.getenv("YOUTUBE_OAUTH_REDIRECT_URI", "")
-FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://nichecut.tools-cl.com")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://kappgen.com")
 # This backend's own public URL — needed to build webhook callback URLs (Tara
 # Money) that point back at the server, not the frontend.
-BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://api-nichecut.tools-cl.com")
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://api.kappgen.com")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
 BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "")
 BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "NicheCut")
