@@ -82,6 +82,8 @@ class ChannelCreate(BaseModel):
     effects_config: EffectsConfig = Field(default_factory=EffectsConfig)
     automation_mode: str = "manual"  # "manual" | "auto"
     automation_style_prompt: Optional[str] = None
+    videos_per_day: int = 1
+    active_days: Optional[List[int]] = None  # 0=Monday..6=Sunday; None/empty = every day
     script_structure: Optional[dict] = None
     voice_id: Optional[str] = None
     voice_name: Optional[str] = None
@@ -89,6 +91,7 @@ class ChannelCreate(BaseModel):
     publish_mode: str = "manual"  # "auto" | "scheduled" | "manual"
     publish_schedule_hour: int = 8
     publish_schedule_day_offset: int = 1
+    timezone: str = "Africa/Douala"  # IANA name, auto-detected client-side
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -100,6 +103,8 @@ class ChannelUpdate(BaseModel):
     effects_config: Optional[EffectsConfig] = None
     automation_mode: Optional[str] = None
     automation_style_prompt: Optional[str] = None
+    videos_per_day: Optional[int] = None
+    active_days: Optional[List[int]] = None
     script_structure: Optional[dict] = None
     voice_id: Optional[str] = None
     voice_name: Optional[str] = None
@@ -107,6 +112,7 @@ class ChannelUpdate(BaseModel):
     publish_mode: Optional[str] = None
     publish_schedule_hour: Optional[int] = None
     publish_schedule_day_offset: Optional[int] = None
+    timezone: Optional[str] = None
 
 class VideoCreate(BaseModel):
     channel_id: str

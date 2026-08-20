@@ -97,7 +97,25 @@ class Channel(Base):
     # day, at a randomized time in the configured window, no human input).
     automation_mode = Column(String(20), nullable=False, default="manual")
     automation_style_prompt = Column(Text, nullable=True)  # optional extra creative direction for Claude
+    # How many videos the daily pipeline generates per day (automation_mode
+    # "auto" only) — each gets its own randomized slot inside the window,
+    # spread evenly so they don't all land back-to-back.
+    videos_per_day = Column(Integer, nullable=False, default=1)
+    # Which weekdays the daily pipeline is allowed to run on — a list of ints
+    # 0=Monday..6=Sunday. Null/empty means every day. Lets creators who post
+    # once a week, three times a week, weekdays only, etc. use full automation
+    # too, instead of it only supporting "N videos every single day".
+    active_days = Column(JSON, nullable=True)
     last_auto_run_date = Column(String(10), nullable=True)  # "YYYY-MM-DD" in the channel's automation timezone
+    # How many auto videos have already been generated on last_auto_run_date —
+    # reset to 0 whenever the local date rolls over. Lets videos_per_day > 1
+    # work without a timezone-aware DB query to count "today"'s videos.
+    auto_videos_generated_today = Column(Integer, nullable=False, default=0)
+    # IANA timezone (e.g. "Europe/Paris") used to compute the channel's local
+    # day/hour for both the daily auto-generation window and the scheduled
+    # publish hour below. Auto-detected client-side at channel creation —
+    # never hardcoded to one region for every creator.
+    timezone = Column(String(64), nullable=False, default="Africa/Douala")
     # Configurable shape of the auto-generated script: language, parts (each
     # with a word count + what it must cover), formatting rules, CTA style.
     # See src/pipeline/script_writer.py DEFAULT_SCRIPT_STRUCTURE for the shape
@@ -111,12 +129,13 @@ class Channel(Base):
     # automation_mode (which only governs whether the script/topic itself is
     # picked automatically). Always the creator's choice:
     # "auto": publish immediately once the render finishes.
-    # "scheduled": wait for a fixed daily time (publish_schedule_hour, WAT),
-    #   publish_schedule_day_offset days after the render finishes.
+    # "scheduled": wait for a fixed daily time (publish_schedule_hour, in the
+    #   channel's own `timezone`), publish_schedule_day_offset days after the
+    #   render finishes.
     # "manual" (default): never auto-publish — the creator downloads and
     #   posts it themselves, or publishes on demand from NicheCut.
     publish_mode = Column(String(20), nullable=False, default="manual")
-    publish_schedule_hour = Column(Integer, nullable=False, default=8)  # 0-23, WAT
+    publish_schedule_hour = Column(Integer, nullable=False, default=8)  # 0-23, channel's own timezone
     publish_schedule_day_offset = Column(Integer, nullable=False, default=1)  # 0 = same day, 1 = next day
 
     # YouTube connection (per channel) — OAuth2 refresh token lets the worker
@@ -150,7 +169,10 @@ class Channel(Base):
             "effects_config": self.effects_config,
             "automation_mode": self.automation_mode or "manual",
             "automation_style_prompt": self.automation_style_prompt,
+            "videos_per_day": self.videos_per_day or 1,
+            "active_days": self.active_days,
             "last_auto_run_date": self.last_auto_run_date,
+            "timezone": self.timezone or "Africa/Douala",
             "script_structure": self.script_structure,
             "voice_id": self.voice_id,
             "voice_name": self.voice_name,
@@ -234,6 +256,12 @@ class Video(Base):
     # Set when the channel's publish_mode is "scheduled" — the worker leaves
     # this video alone until this time, then publishes it automatically.
     scheduled_publish_at = Column(DateTime, nullable=True)
+    # Human approval gate for publish_mode "scheduled": the render finishes
+    # ahead of the publish date specifically so the creator has time to watch
+    # and approve it — run_scheduled_publishes() never fires unless this is
+    # True, no matter how long scheduled_publish_at has passed. Irrelevant for
+    # publish_mode "auto" (publishes immediately, no gate) or "manual".
+    approved_for_publish = Column(Boolean, nullable=False, default=False)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -267,4 +295,5 @@ class Video(Base):
             "youtube_publish_error": self.youtube_publish_error,
             "youtube_description": self.youtube_description,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
+            "approved_for_publish": self.approved_for_publish,
         }

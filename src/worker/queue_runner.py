@@ -4,6 +4,8 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel
 from src.models.project import VideoStatus
@@ -218,22 +220,40 @@ def process_single_queued_video() -> bool:
     finally:
         db.close()
 
+def _channel_zone(channel: Channel) -> ZoneInfo:
+    """Every creator's channel carries its own IANA timezone (auto-detected
+    client-side at creation) — never a single region imposed on everyone.
+    Falls back to Africa/Douala (this app's home market) if unset or invalid."""
+    try:
+        return ZoneInfo(channel.timezone or "Africa/Douala")
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("Africa/Douala")
+
+
 def compute_scheduled_publish_at(channel: Channel) -> datetime:
-    """Cameroon (WAT) is a fixed UTC+1, no DST. A finished video is scheduled
-    `publish_schedule_day_offset` days out, at `publish_schedule_hour` WAT —
-    the same fixed daily rule for every video on this channel."""
-    wat_now = datetime.utcnow() + timedelta(hours=1)
-    target_date = wat_now.date() + timedelta(days=channel.publish_schedule_day_offset or 0)
-    target_wat = datetime(target_date.year, target_date.month, target_date.day, channel.publish_schedule_hour or 8)
-    return target_wat - timedelta(hours=1)  # back to UTC for storage
+    """A finished video is scheduled `publish_schedule_day_offset` days out,
+    at `publish_schedule_hour`, both read in the channel's own timezone —
+    the same daily rule for every video on this channel."""
+    zone = _channel_zone(channel)
+    local_now = datetime.now(zone)
+    target_date = local_now.date() + timedelta(days=channel.publish_schedule_day_offset or 0)
+    target_local = datetime(
+        target_date.year, target_date.month, target_date.day,
+        channel.publish_schedule_hour or 8, tzinfo=zone,
+    )
+    return target_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)  # naive UTC for storage
 
 
 SCHEDULED_PUBLISH_CHECK_INTERVAL_SECONDS = 300  # every 5 min is plenty for a daily-granularity schedule
 
 
 def run_scheduled_publishes():
-    """Publishes any video whose channel is in publish_mode='scheduled' and
-    whose scheduled_publish_at has arrived."""
+    """Publishes any video whose channel is in publish_mode='scheduled', whose
+    scheduled_publish_at has arrived, AND that the creator has approved. The
+    whole point of "scheduled" is the video renders ahead of time so there's
+    a review window before it goes live — a video sitting unapproved past its
+    scheduled_publish_at is left alone, not silently skipped or force-published;
+    it publishes the moment the creator approves it, whenever that is."""
     db = SessionLocal()
     try:
         due = (
@@ -242,6 +262,7 @@ def run_scheduled_publishes():
             .filter(Video.youtube_video_id.is_(None))
             .filter(Video.scheduled_publish_at.isnot(None))
             .filter(Video.scheduled_publish_at <= datetime.utcnow())
+            .filter(Video.approved_for_publish.is_(True))
             .all()
         )
         for video in due:
@@ -443,91 +464,128 @@ def purge_old_videos_and_uploads():
         db.close()
 
 
-AUTOMATION_WINDOW_START_HOUR_WAT = 7
-AUTOMATION_WINDOW_END_HOUR_WAT = 11
+AUTOMATION_WINDOW_START_HOUR = 7
+AUTOMATION_WINDOW_END_HOUR = 11
 AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
 AUTOMATION_RECENT_TITLES_LIMIT = 20
 
 
-def _today_wat_date_and_seconds() -> tuple:
-    """Cameroon (WAT) is a fixed UTC+1, no DST — no need for a tz database."""
-    wat_now = datetime.utcnow() + timedelta(hours=1)
-    seconds_into_day = wat_now.hour * 3600 + wat_now.minute * 60 + wat_now.second
-    return wat_now.strftime("%Y-%m-%d"), seconds_into_day
+def _channel_local_date_and_seconds(channel: Channel) -> tuple:
+    """Today's date and seconds-into-day, read in this channel's own
+    timezone — each creator's window is anchored to their own clock, not a
+    single region imposed on everyone."""
+    local_now = datetime.now(_channel_zone(channel))
+    seconds_into_day = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
+    return local_now.strftime("%Y-%m-%d"), seconds_into_day
 
 
-def _channel_target_seconds_today(channel_id: str, today_str: str) -> int:
+def _channel_target_seconds_today(channel_id: str, today_str: str, index: int = 0, total: int = 1) -> int:
     """A per-channel-per-day random target time inside the automation window,
-    deterministic from (channel_id, date) so it doesn't change across worker
-    restarts (would otherwise let a channel fire twice, or miss its slot, on
-    every redeploy)."""
+    deterministic from (channel_id, date, index) so it doesn't change across
+    worker restarts (would otherwise let a channel fire twice, or miss its
+    slot, on every redeploy). When a channel generates more than one video a
+    day (videos_per_day > 1), the window is split into `total` equal
+    sub-slots so they land spread through the morning instead of clustering."""
     import random
-    rng = random.Random(f"{channel_id}-{today_str}")
-    start_s = AUTOMATION_WINDOW_START_HOUR_WAT * 3600
-    end_s = AUTOMATION_WINDOW_END_HOUR_WAT * 3600
-    return rng.randint(start_s, end_s)
+    rng = random.Random(f"{channel_id}-{today_str}-{index}")
+    window_s = (AUTOMATION_WINDOW_END_HOUR - AUTOMATION_WINDOW_START_HOUR) * 3600
+    base_s = AUTOMATION_WINDOW_START_HOUR * 3600
+    total = max(1, total)
+    sub_start = base_s + (window_s * index) // total
+    sub_end = base_s + (window_s * (index + 1)) // total
+    return rng.randint(sub_start, max(sub_start, sub_end - 1))
+
+
+def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
+    """Asks Claude for a fresh topic + full script (grounded in the channel's
+    niche, steering clear of its recent titles) and queues it for rendering
+    exactly like a manually-submitted text video. Shared by the passive daily
+    pipeline below and by an on-demand "generate now" trigger — the auto
+    pipeline is meant to be zero-touch, so a creator on automation_mode
+    "auto" who explicitly asks for a video right now should get exactly this,
+    not the manual script/voice form."""
+    from src.pipeline.script_writer import generate_daily_script
+
+    recent_titles = [
+        (v.script_text or "").split("\n")[0][:120]
+        for v in (
+            db.query(Video)
+            .filter(Video.channel_id == channel.id)
+            .order_by(Video.created_at.desc())
+            .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+            .all()
+        )
+    ]
+
+    result = generate_daily_script(
+        niche=channel.niche,
+        recent_titles=recent_titles,
+        style_prompt=channel.automation_style_prompt,
+        script_structure=channel.script_structure,
+    )
+    if not result:
+        return None
+
+    video = Video(
+        channel_id=channel.id,
+        title=result["title"],
+        script_text=result["script_text"],
+        input_type="text",
+        audio_input_path=None,
+        status=VideoStatus.QUEUED.value,
+        estimated_duration_seconds=max(3.0, len(result["script_text"].split()) / 2.5),
+        voice_id=getattr(channel, "voice_id", None),
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+    return video
 
 
 def run_daily_automation():
     """
     Zero-human-input daily pipeline: for every channel with automation_mode
-    == "auto" that hasn't already run today (Cameroon/WAT time) and whose
-    randomized daily slot (7h-11h WAT) has arrived, asks Claude for a fresh
-    topic + full script (grounded in the channel's niche and steering clear
-    of its recent titles), then queues it for rendering exactly like a
-    manually-submitted text video — same pipeline from there on.
+    == "auto", generates up to `videos_per_day` videos per local day, each in
+    its own randomized sub-slot inside the 7h-11h window, via
+    generate_and_queue_auto_video — same pipeline from there on as a
+    manually-submitted text video. `auto_videos_generated_today` tracks how
+    many have fired so far today (reset to 0 the moment the local date rolls
+    over) so this works without a timezone-aware "count today's videos" query.
     """
-    from src.pipeline.script_writer import generate_daily_script
-
-    today_str, seconds_into_day = _today_wat_date_and_seconds()
     db = SessionLocal()
     try:
         channels = db.query(Channel).filter(Channel.automation_mode == "auto").all()
         for channel in channels:
-            if channel.last_auto_run_date == today_str:
+            today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
+            if channel.active_days:
+                weekday = datetime.strptime(today_str, "%Y-%m-%d").weekday()  # 0=Monday..6=Sunday
+                if weekday not in channel.active_days:
+                    continue
+            if channel.last_auto_run_date != today_str:
+                channel.last_auto_run_date = today_str
+                channel.auto_videos_generated_today = 0
+                db.commit()
+
+            quota = max(1, channel.videos_per_day or 1)
+            already = channel.auto_videos_generated_today or 0
+            if already >= quota:
                 continue
-            target_seconds = _channel_target_seconds_today(channel.id, today_str)
+
+            target_seconds = _channel_target_seconds_today(channel.id, today_str, index=already, total=quota)
             if seconds_into_day < target_seconds:
-                continue  # today's slot hasn't arrived yet for this channel
+                continue  # this slot hasn't arrived yet for this channel
 
-            recent_titles = [
-                (v.script_text or "").split("\n")[0][:120]
-                for v in (
-                    db.query(Video)
-                    .filter(Video.channel_id == channel.id)
-                    .order_by(Video.created_at.desc())
-                    .limit(AUTOMATION_RECENT_TITLES_LIMIT)
-                    .all()
-                )
-            ]
-
-            result = generate_daily_script(
-                niche=channel.niche,
-                recent_titles=recent_titles,
-                style_prompt=channel.automation_style_prompt,
-                script_structure=channel.script_structure,
-            )
-            if not result:
-                # Leave last_auto_run_date untouched so this is retried on the
+            video = generate_and_queue_auto_video(db, channel)
+            if not video:
+                # Leave the counter untouched so this slot is retried on the
                 # next check within today's window instead of silently
-                # skipping the whole day on a transient Claude failure.
+                # skipping it on a transient Claude failure.
                 logger.warning(f"Daily automation: script generation failed for channel {channel.id} ('{channel.name}'); will retry.")
                 continue
 
-            video = Video(
-                channel_id=channel.id,
-                title=result["title"],
-                script_text=result["script_text"],
-                input_type="text",
-                audio_input_path=None,
-                status=VideoStatus.QUEUED.value,
-                estimated_duration_seconds=max(3.0, len(result["script_text"].split()) / 2.5),
-                voice_id=getattr(channel, "voice_id", None),
-            )
-            db.add(video)
-            channel.last_auto_run_date = today_str
+            channel.auto_videos_generated_today = already + 1
             db.commit()
-            logger.info(f"Daily automation: queued auto-generated video for channel {channel.id} ('{channel.name}') — \"{result['title']}\".")
+            logger.info(f"Daily automation: queued auto-generated video {already + 1}/{quota} for channel {channel.id} ('{channel.name}') — \"{video.title}\".")
     except Exception as e:
         logger.warning(f"Daily automation pass failed: {e}")
     finally:

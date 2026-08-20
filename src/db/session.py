@@ -62,6 +62,7 @@ def init_db():
             "youtube_publish_error": "ALTER TABLE videos ADD COLUMN youtube_publish_error TEXT",
             "youtube_description": "ALTER TABLE videos ADD COLUMN youtube_description TEXT",
             "scheduled_publish_at": "ALTER TABLE videos ADD COLUMN scheduled_publish_at TIMESTAMP",
+            "approved_for_publish": "ALTER TABLE videos ADD COLUMN approved_for_publish BOOLEAN DEFAULT FALSE NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
@@ -106,6 +107,10 @@ def init_db():
             "publish_mode": "ALTER TABLE channels ADD COLUMN publish_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
             "publish_schedule_hour": "ALTER TABLE channels ADD COLUMN publish_schedule_hour INTEGER DEFAULT 8 NOT NULL",
             "publish_schedule_day_offset": "ALTER TABLE channels ADD COLUMN publish_schedule_day_offset INTEGER DEFAULT 1 NOT NULL",
+            "timezone": "ALTER TABLE channels ADD COLUMN timezone VARCHAR(64) DEFAULT 'Africa/Douala' NOT NULL",
+            "videos_per_day": "ALTER TABLE channels ADD COLUMN videos_per_day INTEGER DEFAULT 1 NOT NULL",
+            "active_days": "ALTER TABLE channels ADD COLUMN active_days JSON",
+            "auto_videos_generated_today": "ALTER TABLE channels ADD COLUMN auto_videos_generated_today INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

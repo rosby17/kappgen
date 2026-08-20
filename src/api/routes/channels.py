@@ -196,6 +196,8 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         effects_config=payload.effects_config.model_dump(),
         automation_mode=payload.automation_mode or "manual",
         automation_style_prompt=payload.automation_style_prompt,
+        videos_per_day=max(1, payload.videos_per_day or 1),
+        active_days=payload.active_days,
         script_structure=payload.script_structure,
         voice_id=payload.voice_id,
         voice_name=payload.voice_name,
@@ -203,6 +205,7 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         publish_mode=payload.publish_mode or "manual",
         publish_schedule_hour=payload.publish_schedule_hour,
         publish_schedule_day_offset=payload.publish_schedule_day_offset,
+        timezone=payload.timezone or "Africa/Douala",
     )
     db.add(channel)
     db.commit()
@@ -263,6 +266,10 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.automation_mode = payload.automation_mode
     if payload.automation_style_prompt is not None:
         channel.automation_style_prompt = payload.automation_style_prompt
+    if payload.videos_per_day is not None:
+        channel.videos_per_day = max(1, payload.videos_per_day)
+    if payload.active_days is not None:
+        channel.active_days = payload.active_days
     if payload.script_structure is not None:
         channel.script_structure = payload.script_structure
     if payload.voice_id is not None:
@@ -277,10 +284,30 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.publish_schedule_hour = payload.publish_schedule_hour
     if payload.publish_schedule_day_offset is not None:
         channel.publish_schedule_day_offset = payload.publish_schedule_day_offset
+    if payload.timezone is not None:
+        channel.timezone = payload.timezone
 
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
+
+@router.post("/{channel_id}/generate-now")
+def generate_now(channel_id: str, db: Session = Depends(get_db)):
+    """On-demand equivalent of the daily auto pipeline for a single channel:
+    only valid for automation_mode == "auto", where a creator clicking
+    "Nouvelle vidéo" should never see the manual script/voice form — the
+    Agent picks the topic and writes the script itself, immediately."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.automation_mode != "auto":
+        raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
+
+    from src.worker.queue_runner import generate_and_queue_auto_video
+    video = generate_and_queue_auto_video(db, channel)
+    if not video:
+        raise HTTPException(status_code=502, detail="La génération du script a échoué. Réessayez dans un instant.")
+    return video.to_dict()
 
 @router.post("/{channel_id}/logo")
 async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):

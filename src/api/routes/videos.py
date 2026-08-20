@@ -354,6 +354,7 @@ class VideoUpdate(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None
     clear_folder: bool = False
+    approved_for_publish: Optional[bool] = None
 
 @router.patch("/{video_id}")
 def update_video(video_id: str, payload: VideoUpdate, db: Session = Depends(get_db)):
@@ -366,6 +367,9 @@ def update_video(video_id: str, payload: VideoUpdate, db: Session = Depends(get_
         if not title:
             raise HTTPException(status_code=400, detail="Le titre ne peut pas être vide.")
         video.script_text = title
+
+    if payload.approved_for_publish is not None:
+        video.approved_for_publish = payload.approved_for_publish
 
     if payload.clear_folder:
         video.folder_id = None

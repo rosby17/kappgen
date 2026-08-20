@@ -1,5 +1,6 @@
 import base64
 import hashlib
+from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -18,7 +19,7 @@ def encrypt_credential(value: str) -> str:
     return _fernet().encrypt(value.encode("utf-8")).decode("ascii")
 
 
-def decrypt_credential(value: str | None) -> str | None:
+def decrypt_credential(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     try:
