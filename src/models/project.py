@@ -114,6 +114,9 @@ class UserLogin(BaseModel):
     email: str
     password: str
 
+class ForgotPasswordPayload(BaseModel):
+    email: str
+
 class ChangePasswordPayload(BaseModel):
     user_id: str
     old_password: str
@@ -121,6 +124,7 @@ class ChangePasswordPayload(BaseModel):
 
 class ResetPasswordPayload(BaseModel):
     email: str
+    code: str
     new_password: str
 
 class UserResponse(BaseModel):

@@ -34,6 +34,18 @@ class User(Base):
         }
 
 
+class PasswordReset(Base):
+    __tablename__ = "password_resets"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    code_hash = Column(String(255), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
 

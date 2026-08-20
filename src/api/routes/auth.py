@@ -1,16 +1,23 @@
 import hashlib
 import os
+import secrets
 import httpx
+from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from src.config import GOOGLE_CLIENT_ID
+from src.config import BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME, GOOGLE_CLIENT_ID
 from src.db.session import get_db
-from src.db.models import User
-from src.models.project import UserCreate, UserLogin, ChangePasswordPayload, ResetPasswordPayload
+from src.db.models import PasswordReset, User
+from src.models.project import UserCreate, UserLogin, ForgotPasswordPayload, ChangePasswordPayload, ResetPasswordPayload
+from src.utils.logger import logger
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+RESET_CODE_LIFETIME_MINUTES = 10
+RESET_MAX_REQUESTS_PER_HOUR = 5
+RESET_MAX_ATTEMPTS = 5
+RESET_GENERIC_MESSAGE = "Si un compte correspond à cette adresse, un code de vérification vient d'être envoyé."
 
 
 class GoogleAuthPayload(BaseModel):
@@ -38,6 +45,8 @@ def register_user(payload: UserCreate, db: Session = Depends(get_db)):
     email_clean = payload.email.strip().lower()
     if not email_clean:
         raise HTTPException(status_code=400, detail="L'adresse email est requise.")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 8 caractères.")
         
     existing = db.query(User).filter(User.email == email_clean).first()
     if existing:
@@ -71,21 +80,108 @@ def change_password(payload: ChangePasswordPayload, db: Session = Depends(get_db
     if not verify_password(payload.old_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="L'ancien mot de passe est incorrect.")
         
-    if len(payload.new_password) < 4:
+    if len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Le nouveau mot de passe est trop court.")
         
     user.hashed_password = hash_password(payload.new_password)
     db.commit()
     return {"message": "Mot de passe modifié avec succès."}
 
+def send_password_reset_email(email: str, code: str) -> None:
+    if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
+        raise RuntimeError("Brevo n'est pas configuré pour NicheCut.")
+
+    response = httpx.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
+        json={
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": BREVO_SENDER_NAME or "NicheCut"},
+            "to": [{"email": email}],
+            "subject": f"{code} — Code de récupération NicheCut",
+            "htmlContent": f"""
+              <div style="background:#07101a;padding:36px;font-family:Arial,sans-serif;color:#eaf6ff">
+                <div style="max-width:520px;margin:auto;background:#101a27;border:1px solid #26364a;border-radius:20px;padding:32px">
+                  <div style="color:#57d9ff;font-size:12px;font-weight:700;letter-spacing:1.4px">NICHECUT</div>
+                  <h1 style="font-size:25px;margin:18px 0 10px">Réinitialise ton mot de passe</h1>
+                  <p style="color:#9badc0;line-height:1.7">Saisis ce code dans NicheCut. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes et ne peut être utilisé qu’une fois.</p>
+                  <div style="font-size:34px;font-weight:800;letter-spacing:9px;text-align:center;background:#07101a;border-radius:14px;padding:20px;margin:26px 0;color:#66ddff">{code}</div>
+                  <p style="color:#65788e;font-size:12px;line-height:1.6">Si tu n’as pas demandé ce code, ignore simplement cet email. Ton mot de passe ne sera pas modifié.</p>
+                </div>
+              </div>
+            """,
+            "textContent": f"Ton code de récupération NicheCut est {code}. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes.",
+        },
+        timeout=15.0,
+    )
+    if response.status_code >= 300:
+        raise RuntimeError(f"Brevo a refusé l'envoi ({response.status_code}).")
+
+
+@router.post("/forgot-password")
+def forgot_password(payload: ForgotPasswordPayload, db: Session = Depends(get_db)):
+    if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
+        raise HTTPException(status_code=503, detail="La récupération par email est temporairement indisponible.")
+
+    email_clean = payload.email.strip().lower()
+    user = db.query(User).filter(User.email == email_clean).first()
+    if not user or user.auth_provider == "google":
+        return {"message": RESET_GENERIC_MESSAGE}
+
+    now = datetime.utcnow()
+    recent_count = db.query(PasswordReset).filter(
+        PasswordReset.user_id == user.id,
+        PasswordReset.created_at >= now - timedelta(hours=1),
+    ).count()
+    if recent_count >= RESET_MAX_REQUESTS_PER_HOUR:
+        return {"message": RESET_GENERIC_MESSAGE}
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    try:
+        send_password_reset_email(email_clean, code)
+    except Exception as exc:
+        logger.error(f"Password reset email failed for user {user.id}: {exc}")
+        raise HTTPException(status_code=503, detail="Impossible d'envoyer l'email pour le moment. Réessaie dans quelques minutes.")
+
+    db.query(PasswordReset).filter(
+        PasswordReset.user_id == user.id,
+        PasswordReset.used_at.is_(None),
+    ).update({"used_at": now}, synchronize_session=False)
+    db.add(PasswordReset(
+        user_id=user.id,
+        code_hash=hash_password(code),
+        expires_at=now + timedelta(minutes=RESET_CODE_LIFETIME_MINUTES),
+    ))
+    db.commit()
+    return {"message": RESET_GENERIC_MESSAGE}
+
+
 @router.post("/reset-password")
 def reset_password(payload: ResetPasswordPayload, db: Session = Depends(get_db)):
     email_clean = payload.email.strip().lower()
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit contenir au moins 8 caractères.")
+    if len(payload.code.strip()) != 6 or not payload.code.strip().isdigit():
+        raise HTTPException(status_code=400, detail="Le code est invalide ou expiré.")
+
     user = db.query(User).filter(User.email == email_clean).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Aucun compte trouvé avec cet e-mail.")
-        
+    if not user or user.auth_provider == "google":
+        raise HTTPException(status_code=400, detail="Le code est invalide ou expiré.")
+
+    reset = db.query(PasswordReset).filter(
+        PasswordReset.user_id == user.id,
+        PasswordReset.used_at.is_(None),
+    ).order_by(PasswordReset.created_at.desc()).first()
+    now = datetime.utcnow()
+    if not reset or reset.expires_at < now or reset.attempts >= RESET_MAX_ATTEMPTS:
+        raise HTTPException(status_code=400, detail="Le code est invalide ou expiré.")
+
+    reset.attempts += 1
+    if not verify_password(payload.code.strip(), reset.code_hash):
+        db.commit()
+        raise HTTPException(status_code=400, detail="Le code est invalide ou expiré.")
+
     user.hashed_password = hash_password(payload.new_password)
+    reset.used_at = now
     db.commit()
     return {"message": "Mot de passe réinitialisé avec succès."}
 

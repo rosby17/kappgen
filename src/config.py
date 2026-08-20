@@ -19,6 +19,9 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 YOUTUBE_OAUTH_REDIRECT_URI = os.getenv("YOUTUBE_OAUTH_REDIRECT_URI", "")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://nichecut.tools-cl.com")
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "")
+BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "NicheCut")
 
 # Vision analysis (reference image -> style prompt) for AI image generation.
 # Provider-swappable: set VISION_PROVIDER to "anthropic" (default, Claude) or
