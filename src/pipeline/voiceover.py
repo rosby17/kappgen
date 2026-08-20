@@ -1,10 +1,11 @@
 import re
 import time
+import threading
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 import httpx
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 
@@ -14,6 +15,14 @@ STT_CHUNK_SECONDS = 300  # 5 min/chunk — smaller chunks are less likely to tri
                           # Izivoice's STT into a 500 (observed on 10-min chunks)
 
 _cached_voice_id: Optional[str] = None
+
+# Videos now render concurrently (see queue_runner.MAX_CONCURRENT_RENDERS), but
+# Izivoice itself still throttles hard when too many TTS/STT calls land at
+# once. This semaphore caps how many *Izivoice* calls are in flight across all
+# concurrently-rendering videos at any moment — independent of, and tighter
+# than, the render concurrency itself — so the API doesn't just push the same
+# bottleneck into 429 retries instead of removing it.
+_izivoice_semaphore = threading.Semaphore(MAX_CONCURRENT_IZIVOICE_CALLS)
 
 
 def clean_script_text(script: str) -> str:
@@ -296,19 +305,20 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
                 try:
-                    with open(chunk_path, "rb") as f:
-                        resp = _post_with_retry(
-                            client,
-                            f"{IZIVOICE_BASE_URL}/speech-to-text",
-                            headers=_izivoice_headers(api_key),
-                            files={"file": (chunk_path.name, f, "audio/mpeg")},
-                            timeout=60.0
-                        )
-                    resp.raise_for_status()
-                    task_id = resp.json()["task_id"]
-                    task = _poll_task(task_id, client, api_key)
-                    metadata = task.get("metadata", {}) or {}
-                    chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
+                    with _izivoice_semaphore:
+                        with open(chunk_path, "rb") as f:
+                            resp = _post_with_retry(
+                                client,
+                                f"{IZIVOICE_BASE_URL}/speech-to-text",
+                                headers=_izivoice_headers(api_key),
+                                files={"file": (chunk_path.name, f, "audio/mpeg")},
+                                timeout=60.0
+                            )
+                        resp.raise_for_status()
+                        task_id = resp.json()["task_id"]
+                        task = _poll_task(task_id, client, api_key)
+                        metadata = task.get("metadata", {}) or {}
+                        chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
                 except Exception as chunk_err:
                     # One chunk failing (Izivoice has returned 500s on some
                     # requests) must not throw away transcript already
@@ -403,31 +413,32 @@ def generate_voiceover(script_text: str, output_audio_path: Path, voice_id: Opti
             voice_id = voice_id or _get_default_voice_id(client, effective_key)
 
             logger.info("Requesting voiceover from Izivoice /text-to-speech...")
-            resp = _post_with_retry(
-                client,
-                f"{IZIVOICE_BASE_URL}/text-to-speech",
-                headers=_izivoice_headers(effective_key),
-                # Izivoice's /text-to-speech now requires a JSON body — sending
-                # this as form-urlencoded (the old `data=` kwarg) gets rejected
-                # with a generic 400 "Requête invalide" regardless of the
-                # voice_id or fields used (confirmed by reproducing the same
-                # 400 with a guaranteed-valid voice_id and minimal fields, then
-                # getting 200 by switching only the transport to `json=`).
-                json={
-                    "text": script_text,
-                    "voice_id": voice_id,
-                    "speed": (voice_settings or {}).get("speed", 0.845),
-                    "with_transcript": False,
-                    "stability": (voice_settings or {}).get("stability", 0.8),
-                    "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
-                    "style": (voice_settings or {}).get("style", 0.0),
-                },
-                timeout=30.0
-            )
-            resp.raise_for_status()
-            task_id = resp.json()["task_id"]
+            with _izivoice_semaphore:
+                resp = _post_with_retry(
+                    client,
+                    f"{IZIVOICE_BASE_URL}/text-to-speech",
+                    headers=_izivoice_headers(effective_key),
+                    # Izivoice's /text-to-speech now requires a JSON body — sending
+                    # this as form-urlencoded (the old `data=` kwarg) gets rejected
+                    # with a generic 400 "Requête invalide" regardless of the
+                    # voice_id or fields used (confirmed by reproducing the same
+                    # 400 with a guaranteed-valid voice_id and minimal fields, then
+                    # getting 200 by switching only the transport to `json=`).
+                    json={
+                        "text": script_text,
+                        "voice_id": voice_id,
+                        "speed": (voice_settings or {}).get("speed", 0.845),
+                        "with_transcript": False,
+                        "stability": (voice_settings or {}).get("stability", 0.8),
+                        "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
+                        "style": (voice_settings or {}).get("style", 0.0),
+                    },
+                    timeout=30.0
+                )
+                resp.raise_for_status()
+                task_id = resp.json()["task_id"]
 
-            task = _poll_task(task_id, client, effective_key)
+                task = _poll_task(task_id, client, effective_key)
             audio_url = (task.get("metadata") or {}).get("audio_url")
             if not audio_url:
                 raise ValueError(f"Unexpected Izivoice text-to-speech response: {task}")

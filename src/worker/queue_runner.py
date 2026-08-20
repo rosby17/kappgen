@@ -1,5 +1,6 @@
 import shutil
 import signal
+import threading
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -18,7 +19,7 @@ from src.pipeline.orchestrator import (
 from src.pipeline.transcode import try_ensure_sd_variant
 from src.pipeline import youtube_publisher
 from src.pipeline import youtube_metadata
-from src.config import STORAGE_PATH
+from src.config import STORAGE_PATH, MAX_CONCURRENT_RENDERS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
 
@@ -657,22 +658,59 @@ def _handle_shutdown_signal(signum, frame):
     logger.warning("Worker received shutdown signal; finishing current render (if any) before exiting.")
     _shutdown_requested = True
 
-def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False):
+def _render_worker_loop(worker_name: str, poll_interval_seconds: float):
     """
-    Main loop for background worker polling SQLite for queued videos.
+    One render lane: repeatedly claims and renders the next queued video,
+    independently of every other lane. `process_single_queued_video()` claims
+    its row with `SELECT ... FOR UPDATE SKIP LOCKED`, so any number of these
+    loops can run concurrently (across threads, even across processes) without
+    two lanes ever picking up the same video.
+    """
+    while not _shutdown_requested:
+        try:
+            processed = process_single_queued_video()
+        except Exception as e:
+            # A lane must never die silently — an uncaught exception here
+            # would permanently drop this render slot for the rest of the
+            # process's life instead of just failing the one video.
+            logger.error(f"Render lane {worker_name} hit an unexpected error: {e}")
+            processed = False
+        if not processed:
+            time.sleep(poll_interval_seconds)
+
+
+def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False, max_concurrent_renders: Optional[int] = None):
+    """
+    Starts MAX_CONCURRENT_RENDERS render lanes so multiple videos (and thus
+    multiple users' TTS/audio jobs) render at the same time instead of the old
+    strictly-sequential one-video-at-a-time queue, plus one periodic-maintenance
+    loop (purge, automation, scheduled publish, YouTube sync) that only ever
+    runs once regardless of render concurrency.
     """
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     init_db()
     requeue_orphaned_videos()
-    logger.info("Starting Nichecut Background Queue Worker...")
+    concurrency = max_concurrent_renders or MAX_CONCURRENT_RENDERS
+
+    if single_run:
+        # Used for one-shot/manual invocations — render exactly one video and
+        # return, same as before parallelization existed.
+        process_single_queued_video()
+        return
+
+    logger.info(f"Starting Nichecut Background Queue Worker ({concurrency} concurrent render lane(s))...")
+    lanes = [
+        threading.Thread(target=_render_worker_loop, args=(f"lane-{i+1}", poll_interval_seconds), daemon=True)
+        for i in range(max(1, concurrency))
+    ]
+    for lane in lanes:
+        lane.start()
+
     last_purge = 0.0
     last_automation_check = 0.0
     last_scheduled_publish_check = 0.0
     last_youtube_identity_sync = 0.0
-    while True:
-        processed = process_single_queued_video()
-        if single_run or _shutdown_requested:
-            break
+    while not _shutdown_requested:
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
             purge_old_videos_and_uploads()
@@ -687,8 +725,12 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_youtube_identity_sync > YOUTUBE_IDENTITY_SYNC_INTERVAL_SECONDS:
             run_youtube_identity_sync()
             last_youtube_identity_sync = now
-        if not processed:
-            time.sleep(poll_interval_seconds)
+        time.sleep(poll_interval_seconds)
+
+    # SIGTERM landed — let every in-flight render lane finish its current
+    # video before the process actually exits.
+    for lane in lanes:
+        lane.join()
 
 if __name__ == "__main__":
     start_queue_worker()

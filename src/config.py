@@ -11,6 +11,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
+# How many videos the worker renders at once (each with its own TTS/STT calls),
+# instead of the old strictly-sequential one-at-a-time queue.
+MAX_CONCURRENT_RENDERS = int(os.getenv("MAX_CONCURRENT_RENDERS", "4"))
+# Separate, tighter cap on simultaneous Izivoice TTS/STT calls specifically —
+# Izivoice rate-limits aggressively, so this stays below MAX_CONCURRENT_RENDERS
+# even when more videos are rendering in parallel (the rest of each pipeline —
+# script, images, ffmpeg — isn't throttled by Izivoice at all).
+MAX_CONCURRENT_IZIVOICE_CALLS = int(os.getenv("MAX_CONCURRENT_IZIVOICE_CALLS", "3"))
 # Used to encrypt connected customers' Izivoice API keys at rest. In production
 # set a long, stable random value; changing it invalidates stored connections.
 CREDENTIAL_ENCRYPTION_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
