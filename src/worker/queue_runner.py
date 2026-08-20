@@ -306,6 +306,94 @@ def purge_old_videos_and_uploads():
         db.close()
 
 
+AUTOMATION_WINDOW_START_HOUR_WAT = 7
+AUTOMATION_WINDOW_END_HOUR_WAT = 11
+AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
+AUTOMATION_RECENT_TITLES_LIMIT = 20
+
+
+def _today_wat_date_and_seconds() -> tuple:
+    """Cameroon (WAT) is a fixed UTC+1, no DST — no need for a tz database."""
+    wat_now = datetime.utcnow() + timedelta(hours=1)
+    seconds_into_day = wat_now.hour * 3600 + wat_now.minute * 60 + wat_now.second
+    return wat_now.strftime("%Y-%m-%d"), seconds_into_day
+
+
+def _channel_target_seconds_today(channel_id: str, today_str: str) -> int:
+    """A per-channel-per-day random target time inside the automation window,
+    deterministic from (channel_id, date) so it doesn't change across worker
+    restarts (would otherwise let a channel fire twice, or miss its slot, on
+    every redeploy)."""
+    import random
+    rng = random.Random(f"{channel_id}-{today_str}")
+    start_s = AUTOMATION_WINDOW_START_HOUR_WAT * 3600
+    end_s = AUTOMATION_WINDOW_END_HOUR_WAT * 3600
+    return rng.randint(start_s, end_s)
+
+
+def run_daily_automation():
+    """
+    Zero-human-input daily pipeline: for every channel with automation_mode
+    == "auto" that hasn't already run today (Cameroon/WAT time) and whose
+    randomized daily slot (7h-11h WAT) has arrived, asks Claude for a fresh
+    topic + full script (grounded in the channel's niche and steering clear
+    of its recent titles), then queues it for rendering exactly like a
+    manually-submitted text video — same pipeline from there on.
+    """
+    from src.pipeline.script_writer import generate_daily_script
+
+    today_str, seconds_into_day = _today_wat_date_and_seconds()
+    db = SessionLocal()
+    try:
+        channels = db.query(Channel).filter(Channel.automation_mode == "auto").all()
+        for channel in channels:
+            if channel.last_auto_run_date == today_str:
+                continue
+            target_seconds = _channel_target_seconds_today(channel.id, today_str)
+            if seconds_into_day < target_seconds:
+                continue  # today's slot hasn't arrived yet for this channel
+
+            recent_titles = [
+                (v.script_text or "").split("\n")[0][:120]
+                for v in (
+                    db.query(Video)
+                    .filter(Video.channel_id == channel.id)
+                    .order_by(Video.created_at.desc())
+                    .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+                    .all()
+                )
+            ]
+
+            result = generate_daily_script(
+                niche=channel.niche,
+                recent_titles=recent_titles,
+                style_prompt=channel.automation_style_prompt,
+            )
+            if not result:
+                # Leave last_auto_run_date untouched so this is retried on the
+                # next check within today's window instead of silently
+                # skipping the whole day on a transient Claude failure.
+                logger.warning(f"Daily automation: script generation failed for channel {channel.id} ('{channel.name}'); will retry.")
+                continue
+
+            video = Video(
+                channel_id=channel.id,
+                script_text=result["script_text"],
+                input_type="text",
+                audio_input_path=None,
+                status=VideoStatus.QUEUED.value,
+                estimated_duration_seconds=max(3.0, len(result["script_text"].split()) / 2.5),
+            )
+            db.add(video)
+            channel.last_auto_run_date = today_str
+            db.commit()
+            logger.info(f"Daily automation: queued auto-generated video for channel {channel.id} ('{channel.name}') — \"{result['title']}\".")
+    except Exception as e:
+        logger.warning(f"Daily automation pass failed: {e}")
+    finally:
+        db.close()
+
+
 _shutdown_requested = False
 
 def _handle_shutdown_signal(signum, frame):
@@ -329,6 +417,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     requeue_orphaned_videos()
     logger.info("Starting Nichecut Background Queue Worker...")
     last_purge = 0.0
+    last_automation_check = 0.0
     while True:
         processed = process_single_queued_video()
         if single_run or _shutdown_requested:
@@ -338,6 +427,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
             purge_old_videos_and_uploads()
             purge_stale_edit_assets()
             last_purge = now
+        if now - last_automation_check > AUTOMATION_CHECK_INTERVAL_SECONDS:
+            run_daily_automation()
+            last_automation_check = now
         if not processed:
             time.sleep(poll_interval_seconds)
 

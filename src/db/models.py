@@ -74,6 +74,13 @@ class Channel(Base):
     image_style = Column(JSON, nullable=False, default=dict)
     effects_config = Column(JSON, nullable=False, default=dict)
 
+    # Full-auto daily pipeline: "manual" (default, user submits each video)
+    # or "auto" (Claude picks a fresh topic + writes the script itself once a
+    # day, at a randomized time in the configured window, no human input).
+    automation_mode = Column(String(20), nullable=False, default="manual")
+    automation_style_prompt = Column(Text, nullable=True)  # optional extra creative direction for Claude
+    last_auto_run_date = Column(String(10), nullable=True)  # "YYYY-MM-DD" in the channel's automation timezone
+
     # Relationships
     user = relationship("User", back_populates="channels")
     videos = relationship("Video", back_populates="channel", cascade="all, delete-orphan")
@@ -90,6 +97,9 @@ class Channel(Base):
             "music_preference": self.music_preference,
             "image_style": self.image_style,
             "effects_config": self.effects_config,
+            "automation_mode": self.automation_mode or "manual",
+            "automation_style_prompt": self.automation_style_prompt,
+            "last_auto_run_date": self.last_auto_run_date,
             "video_count": len(self.videos) if self.videos else 0
         }
 

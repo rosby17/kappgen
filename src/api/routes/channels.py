@@ -100,7 +100,9 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         branding=payload.branding.model_dump(),
         music_preference=payload.music_preference.model_dump(),
         image_style=payload.image_style.model_dump(),
-        effects_config=payload.effects_config.model_dump()
+        effects_config=payload.effects_config.model_dump(),
+        automation_mode=payload.automation_mode or "manual",
+        automation_style_prompt=payload.automation_style_prompt,
     )
     db.add(channel)
     db.commit()
@@ -157,6 +159,10 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.image_style = payload.image_style.model_dump()
     if payload.effects_config is not None:
         channel.effects_config = payload.effects_config.model_dump()
+    if payload.automation_mode is not None:
+        channel.automation_mode = payload.automation_mode
+    if payload.automation_style_prompt is not None:
+        channel.automation_style_prompt = payload.automation_style_prompt
 
     db.commit()
     db.refresh(channel)

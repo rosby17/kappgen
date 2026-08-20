@@ -80,6 +80,8 @@ class ChannelCreate(BaseModel):
     music_preference: MusicPreference = Field(default_factory=MusicPreference)
     image_style: ImageStyle = Field(default_factory=ImageStyle)
     effects_config: EffectsConfig = Field(default_factory=EffectsConfig)
+    automation_mode: str = "manual"  # "manual" | "auto"
+    automation_style_prompt: Optional[str] = None
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -89,6 +91,8 @@ class ChannelUpdate(BaseModel):
     music_preference: Optional[MusicPreference] = None
     image_style: Optional[ImageStyle] = None
     effects_config: Optional[EffectsConfig] = None
+    automation_mode: Optional[str] = None
+    automation_style_prompt: Optional[str] = None
 
 class VideoCreate(BaseModel):
     channel_id: str

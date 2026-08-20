@@ -8,6 +8,7 @@ from src.pipeline.voiceover import generate_voiceover, generate_transcript_for_a
 from src.utils.ffmpeg_runner import get_audio_duration
 from src.pipeline.pacing import calculate_pacing_segments
 from src.pipeline.images import fetch_or_generate_images
+from src.pipeline.scene_director import build_scene_prompts
 from src.pipeline.clip_builder import build_image_clip
 from src.pipeline.subtitles import generate_ass_subtitles, overlay_subtitles_on_image
 from src.pipeline.music import get_background_music_track
@@ -107,7 +108,24 @@ def run_video_pipeline(
         word_ranges.append((start_idx, end_idx))
         seg_text = " ".join(seg_word_strs).strip()
         prompts.append(seg_text if seg_text else (script_text or "")[:200])
-    image_paths = fetch_or_generate_images(prompts, images_dir, channel_config.get("image_style"))
+
+    # For AI-generated visuals, upgrade the raw narration text into real
+    # image-generation prompts sharing one consistent "visual bible" (one
+    # Claude call, sees the whole script + every scene at once). Falls back
+    # to the raw narration prompts above if this fails or isn't configured —
+    # library-only channels skip this entirely since prompts aren't used.
+    image_style_cfg = channel_config.get("image_style") or {}
+    if image_style_cfg.get("source") in ("ai_generated", "hybrid"):
+        directed_prompts = build_scene_prompts(
+            script_text=script_text or "",
+            segment_texts=prompts,
+            style_prompt=image_style_cfg.get("style_prompt", ""),
+            niche=channel_config.get("niche", ""),
+        )
+        if directed_prompts:
+            prompts = directed_prompts
+
+    image_paths = fetch_or_generate_images(prompts, images_dir, image_style_cfg)
     
     # 5. Generate Subtitles ASS file
     logger.info("Step 4/7: Formatting ASS subtitles...")

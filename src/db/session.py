@@ -74,3 +74,16 @@ def init_db():
                 if col_name not in existing_user_columns:
                     logger.info(f"Migrating users table: adding {col_name} column.")
                     conn.execute(text(ddl))
+
+    if "channels" in inspector.get_table_names():
+        existing_channel_columns = {col["name"] for col in inspector.get_columns("channels")}
+        channel_migrations = {
+            "automation_mode": "ALTER TABLE channels ADD COLUMN automation_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
+            "automation_style_prompt": "ALTER TABLE channels ADD COLUMN automation_style_prompt TEXT",
+            "last_auto_run_date": "ALTER TABLE channels ADD COLUMN last_auto_run_date VARCHAR(10)",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in channel_migrations.items():
+                if col_name not in existing_channel_columns:
+                    logger.info(f"Migrating channels table: adding {col_name} column.")
+                    conn.execute(text(ddl))
