@@ -619,6 +619,36 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
         return redirect_with("error", str(e)[:200], channel_id=channel.id)
 
 
+@router.post("/{channel_id}/youtube/refresh")
+def refresh_youtube_identity(channel_id: str, db: Session = Depends(get_db)):
+    """Re-fetches the connected YouTube channel's name/handle/avatar — the
+    creator may have renamed the channel or changed its photo directly on
+    YouTube since the initial connection, and NicheCut only ever pulled that
+    info once (at connect time) until now."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if not channel.youtube_refresh_token:
+        raise HTTPException(status_code=409, detail="Cette chaîne n'est pas connectée à YouTube.")
+
+    access_token = youtube_publisher.get_valid_access_token(channel)
+    if not access_token:
+        raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
+
+    channel_info = youtube_publisher.fetch_own_channel_info(access_token)
+    if not channel_info:
+        raise HTTPException(status_code=502, detail="Impossible de récupérer les informations de la chaîne YouTube.")
+
+    channel.youtube_channel_id = channel_info["id"]
+    channel.youtube_channel_title = channel_info["title"]
+    channel.youtube_channel_handle = channel_info.get("handle")
+    channel.youtube_channel_thumbnail_url = channel_info.get("thumbnail_url")
+    channel.name = channel_info["title"]
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
 @router.post("/{channel_id}/youtube/disconnect")
 def disconnect_youtube(channel_id: str, db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -630,6 +660,8 @@ def disconnect_youtube(channel_id: str, db: Session = Depends(get_db)):
     channel.youtube_connected_at = None
     channel.youtube_channel_id = None
     channel.youtube_channel_title = None
+    channel.youtube_channel_handle = None
+    channel.youtube_channel_thumbnail_url = None
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
