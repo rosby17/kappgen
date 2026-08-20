@@ -55,6 +55,10 @@ def init_db():
             "edit_assets_purged_at": "ALTER TABLE videos ADD COLUMN edit_assets_purged_at TIMESTAMP",
             "transcribe_audio": "ALTER TABLE videos ADD COLUMN transcribe_audio BOOLEAN DEFAULT TRUE NOT NULL",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
+            "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",
+            "youtube_video_id": "ALTER TABLE videos ADD COLUMN youtube_video_id VARCHAR(32)",
+            "youtube_published_at": "ALTER TABLE videos ADD COLUMN youtube_published_at TIMESTAMP",
+            "youtube_publish_error": "ALTER TABLE videos ADD COLUMN youtube_publish_error TEXT",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
@@ -82,6 +86,12 @@ def init_db():
             "automation_style_prompt": "ALTER TABLE channels ADD COLUMN automation_style_prompt TEXT",
             "last_auto_run_date": "ALTER TABLE channels ADD COLUMN last_auto_run_date VARCHAR(10)",
             "script_structure": "ALTER TABLE channels ADD COLUMN script_structure JSON",
+            "youtube_channel_id": "ALTER TABLE channels ADD COLUMN youtube_channel_id VARCHAR(64)",
+            "youtube_channel_title": "ALTER TABLE channels ADD COLUMN youtube_channel_title VARCHAR(255)",
+            "youtube_access_token": "ALTER TABLE channels ADD COLUMN youtube_access_token TEXT",
+            "youtube_refresh_token": "ALTER TABLE channels ADD COLUMN youtube_refresh_token TEXT",
+            "youtube_token_expiry": "ALTER TABLE channels ADD COLUMN youtube_token_expiry TIMESTAMP",
+            "youtube_connected_at": "ALTER TABLE channels ADD COLUMN youtube_connected_at TIMESTAMP",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

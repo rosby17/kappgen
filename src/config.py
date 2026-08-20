@@ -12,6 +12,13 @@ IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+# Separate from the login flow above (which only verifies an id_token client-side).
+# YouTube publishing needs a full server-side OAuth2 authorization-code exchange
+# (to get a refresh_token with the youtube.upload scope), which requires a client
+# secret and a registered redirect URI on the same or a dedicated OAuth client.
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+YOUTUBE_OAUTH_REDIRECT_URI = os.getenv("YOUTUBE_OAUTH_REDIRECT_URI", "")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://nichecut.tools-cl.com")
 
 # Vision analysis (reference image -> style prompt) for AI image generation.
 # Provider-swappable: set VISION_PROVIDER to "anthropic" (default, Claude) or

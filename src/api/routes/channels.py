@@ -13,7 +13,10 @@ import uuid
 from src.db.session import get_db
 from src.db.models import Channel, Video, User
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, FRONTEND_BASE_URL
+from fastapi.responses import RedirectResponse
+from datetime import datetime
+from src.pipeline import youtube_publisher
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -418,6 +421,75 @@ async def upload_channel_library_images(channel_id: str, files: List[UploadFile]
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
+
+@router.get("/{channel_id}/youtube/auth-url")
+def get_youtube_auth_url(channel_id: str, db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if not youtube_publisher.is_configured():
+        raise HTTPException(status_code=503, detail="La connexion YouTube n'est pas configurée sur le serveur.")
+    return {"auth_url": youtube_publisher.build_auth_url(channel_id)}
+
+
+@router.get("/youtube/callback")
+def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None, db: Session = Depends(get_db)):
+    """Google redirects here after the creator grants (or denies) YouTube access."""
+    def redirect_with(status_str: str, message: str = ""):
+        params = f"youtube={status_str}"
+        if message:
+            from urllib.parse import quote
+            params += f"&youtube_message={quote(message)}"
+        return RedirectResponse(f"{FRONTEND_BASE_URL}/channels?{params}")
+
+    if error:
+        return redirect_with("error", error)
+    if not code or not state:
+        return redirect_with("error", "Réponse OAuth incomplète.")
+
+    channel = db.query(Channel).filter(Channel.id == state).first()
+    if not channel:
+        return redirect_with("error", "Chaîne introuvable.")
+
+    try:
+        tokens = youtube_publisher.exchange_code(code)
+        access_token = tokens["access_token"]
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            # Happens if the account already granted consent before without
+            # "prompt=consent" forcing a fresh one — ask the creator to retry.
+            return redirect_with("error", "Aucun jeton de rafraîchissement reçu. Réessaie la connexion YouTube.")
+
+        channel_info = youtube_publisher.fetch_own_channel_info(access_token)
+
+        channel.youtube_access_token = access_token
+        channel.youtube_refresh_token = refresh_token
+        channel.youtube_token_expiry = datetime.utcnow()
+        channel.youtube_connected_at = datetime.utcnow()
+        if channel_info:
+            channel.youtube_channel_id = channel_info["id"]
+            channel.youtube_channel_title = channel_info["title"]
+        db.commit()
+        return redirect_with("connected")
+    except Exception as e:
+        return redirect_with("error", str(e)[:200])
+
+
+@router.post("/{channel_id}/youtube/disconnect")
+def disconnect_youtube(channel_id: str, db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    channel.youtube_access_token = None
+    channel.youtube_refresh_token = None
+    channel.youtube_token_expiry = None
+    channel.youtube_connected_at = None
+    channel.youtube_channel_id = None
+    channel.youtube_channel_title = None
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
 
 @router.delete("/{channel_id}")
 def delete_channel(channel_id: str, db: Session = Depends(get_db)):

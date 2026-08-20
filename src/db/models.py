@@ -86,6 +86,17 @@ class Channel(Base):
     # and fallback used when this is null.
     script_structure = Column(JSON, nullable=True)
 
+    # YouTube connection (per channel) — OAuth2 refresh token lets the worker
+    # publish auto-generated videos with zero human input. access_token +
+    # token_expiry are a short-lived cache; refresh_token is what's actually
+    # durable and gets exchanged for a fresh access_token as needed.
+    youtube_channel_id = Column(String(64), nullable=True)
+    youtube_channel_title = Column(String(255), nullable=True)
+    youtube_access_token = Column(Text, nullable=True)
+    youtube_refresh_token = Column(Text, nullable=True)
+    youtube_token_expiry = Column(DateTime, nullable=True)
+    youtube_connected_at = Column(DateTime, nullable=True)
+
     # Relationships
     user = relationship("User", back_populates="channels")
     videos = relationship("Video", back_populates="channel", cascade="all, delete-orphan")
@@ -106,6 +117,8 @@ class Channel(Base):
             "automation_style_prompt": self.automation_style_prompt,
             "last_auto_run_date": self.last_auto_run_date,
             "script_structure": self.script_structure,
+            "youtube_connected": bool(self.youtube_refresh_token),
+            "youtube_channel_title": self.youtube_channel_title,
             "video_count": len(self.videos) if self.videos else 0
         }
 
@@ -136,6 +149,7 @@ class Video(Base):
     channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False)
     folder_id = Column(String(36), ForeignKey("folders.id"), nullable=True)
     input_type = Column(String(50), nullable=False, default="text")
+    title = Column(String(255), nullable=True)  # set for auto-generated videos; used as the YouTube upload title
     script_text = Column(Text, nullable=True, default="")
     audio_input_path = Column(String(512), nullable=True)
     status = Column(String(50), nullable=False, default=VideoStatus.QUEUED.value)
@@ -164,6 +178,11 @@ class Video(Base):
     # instead of the full pipeline. JSON: {"type": "image"|"subtitle_text"|"audio",
     # "scene_index": int, "text": str|null}. Cleared once the worker picks it up.
     pending_edit = Column(JSON, nullable=True)
+    # Set once the worker successfully auto-publishes this video to the
+    # channel's connected YouTube account (auto-mode channels only).
+    youtube_video_id = Column(String(32), nullable=True)
+    youtube_published_at = Column(DateTime, nullable=True)
+    youtube_publish_error = Column(Text, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -175,6 +194,7 @@ class Video(Base):
             "channel_name": self.channel.name if self.channel else None,
             "folder_id": self.folder_id,
             "input_type": self.input_type,
+            "title": self.title,
             "script_text": self.script_text,
             "audio_input_path": self.audio_input_path,
             "status": self.status,
@@ -190,4 +210,7 @@ class Video(Base):
             "purged_at": self.purged_at.isoformat() if self.purged_at else None,
             "editable": bool(self.status == VideoStatus.DONE.value and self.output_path and not self.edit_assets_purged_at),
             "transcribe_audio": self.transcribe_audio,
+            "youtube_video_id": self.youtube_video_id,
+            "youtube_published_at": self.youtube_published_at.isoformat() if self.youtube_published_at else None,
+            "youtube_publish_error": self.youtube_publish_error,
         }

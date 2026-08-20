@@ -14,6 +14,7 @@ from src.pipeline.orchestrator import (
     regenerate_scene_audio,
 )
 from src.pipeline.transcode import try_ensure_sd_variant
+from src.pipeline import youtube_publisher
 from src.config import STORAGE_PATH
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
@@ -151,6 +152,14 @@ def process_single_queued_video() -> bool:
         # "Vidéo prête" shows immediately regardless of how long this takes.
         try_ensure_sd_variant(output_mp4)
 
+        # Zero-human-input loop's final step: for a channel on full autopilot
+        # with a connected YouTube account, publish the finished video right
+        # away instead of leaving it for the creator to download and upload
+        # themselves. A failure here never fails the render — the video stays
+        # available in NicheCut either way, just not yet on YouTube.
+        if channel.automation_mode == "auto" and channel.youtube_refresh_token:
+            try_publish_to_youtube(db, channel, video, output_mp4)
+
         return True
 
     except Exception as e:
@@ -168,6 +177,22 @@ def process_single_queued_video() -> bool:
         return False
     finally:
         db.close()
+
+def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path) -> None:
+    title = video.title or f"{channel.name} — {datetime.utcnow().strftime('%d/%m/%Y')}"
+    description = (video.script_text or "").strip()[:400]
+    try:
+        video_id = youtube_publisher.publish_video_for_channel(channel, output_mp4, title, description)
+        video.youtube_video_id = video_id
+        video.youtube_published_at = datetime.utcnow()
+        video.youtube_publish_error = None
+        db.commit()
+        logger.info(f"Auto-published video {video.id} to YouTube (channel {channel.id}) as {video_id}.")
+    except Exception as e:
+        video.youtube_publish_error = str(e)[:500]
+        db.commit()
+        logger.warning(f"YouTube auto-publish failed for video {video.id} (channel {channel.id}): {e}")
+
 
 MAX_AUTO_RESTARTS = 4
 
@@ -379,6 +404,7 @@ def run_daily_automation():
 
             video = Video(
                 channel_id=channel.id,
+                title=result["title"],
                 script_text=result["script_text"],
                 input_type="text",
                 audio_input_path=None,
