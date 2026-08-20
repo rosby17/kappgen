@@ -92,6 +92,7 @@ class ChannelCreate(BaseModel):
     voice_name: Optional[str] = None
     voice_settings: Optional[dict] = None
     publish_mode: str = "manual"  # "auto" | "scheduled" | "manual"
+    publish_time_mode: str = "range"  # "fixed" (publish_schedule_hour) | "range" (automation_window_*)
     publish_schedule_hour: int = 8
     publish_schedule_day_offset: int = 1
     timezone: str = "Africa/Douala"  # IANA name, auto-detected client-side
@@ -116,6 +117,7 @@ class ChannelUpdate(BaseModel):
     voice_name: Optional[str] = None
     voice_settings: Optional[dict] = None
     publish_mode: Optional[str] = None
+    publish_time_mode: Optional[str] = None
     publish_schedule_hour: Optional[int] = None
     publish_schedule_day_offset: Optional[int] = None
     timezone: Optional[str] = None

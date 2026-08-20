@@ -310,6 +310,7 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         voice_name=payload.voice_name,
         voice_settings=payload.voice_settings,
         publish_mode=payload.publish_mode or "manual",
+        publish_time_mode=payload.publish_time_mode or "range",
         publish_schedule_hour=payload.publish_schedule_hour,
         publish_schedule_day_offset=payload.publish_schedule_day_offset,
         timezone=payload.timezone or "Africa/Douala",
@@ -393,6 +394,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.voice_settings = payload.voice_settings
     if payload.publish_mode is not None:
         channel.publish_mode = payload.publish_mode
+    if payload.publish_time_mode is not None:
+        channel.publish_time_mode = payload.publish_time_mode
     if payload.publish_schedule_hour is not None:
         channel.publish_schedule_hour = payload.publish_schedule_hour
     if payload.publish_schedule_day_offset is not None:

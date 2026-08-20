@@ -240,14 +240,20 @@ def _channel_zone(channel: Channel) -> ZoneInfo:
 
 def compute_scheduled_publish_at(channel: Channel, video_id: str = "") -> datetime:
     """A finished video is scheduled `publish_schedule_day_offset` days out,
-    then placed at a randomized time inside the channel's own publish window
-    (automation_window_start/end_hour — despite the name, this window now
-    governs WHEN videos go live, not when scripts get written; see
-    run_daily_automation for why that gating was removed from script
-    generation), rolled forward to the next day allowed by `active_days` if
-    the target day isn't one of them. Falls back to the legacy single
-    publish_schedule_hour when no window is configured, so existing channels
-    that only ever set that field keep behaving the same."""
+    at an hour that depends on `publish_time_mode`:
+    - "fixed": exactly `publish_schedule_hour`, every time.
+    - "range" (default): a randomized time inside the channel's own publish
+      window (automation_window_start/end_hour — despite the name, this
+      window now governs WHEN videos go live, not when scripts get written;
+      see run_daily_automation for why that gating was removed from script
+      generation).
+    Either way, rolled forward to the next day allowed by `active_days` if
+    the target day isn't one of them.
+    automation_window_start/end_hour always have a non-null DB default
+    (7/11), so before publish_time_mode existed this function had no way to
+    tell "fixed" and "range" apart — it silently ignored publish_schedule_hour
+    for every channel. publish_time_mode is what "Heure fixe" vs
+    "Plage horaire" in the wizard actually controls now."""
     import random
     zone = _channel_zone(channel)
     local_now = datetime.now(zone)
@@ -259,15 +265,15 @@ def compute_scheduled_publish_at(channel: Channel, video_id: str = "") -> dateti
                 break
             target_date += timedelta(days=1)
 
-    start_hour = channel.automation_window_start_hour
-    end_hour = channel.automation_window_end_hour
-    if start_hour is not None and end_hour is not None:
+    if (channel.publish_time_mode or "range") == "fixed":
+        target_hour = channel.publish_schedule_hour or 8
+    else:
+        start_hour = channel.automation_window_start_hour if channel.automation_window_start_hour is not None else 7
+        end_hour = channel.automation_window_end_hour if channel.automation_window_end_hour is not None else 11
         if end_hour <= start_hour:
             end_hour = start_hour + 1
         rng = random.Random(f"{channel.id}-{target_date.isoformat()}-{video_id}")
         target_hour = rng.randint(start_hour, end_hour - 1)
-    else:
-        target_hour = channel.publish_schedule_hour or 8
 
     target_local = datetime(
         target_date.year, target_date.month, target_date.day,

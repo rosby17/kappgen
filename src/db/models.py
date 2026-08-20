@@ -149,6 +149,12 @@ class Channel(Base):
     # "manual" (default): never auto-publish — the creator downloads and
     #   posts it themselves, or publishes on demand from NicheCut.
     publish_mode = Column(String(20), nullable=False, default="manual")
+    # "fixed": always publish_schedule_hour, exactly. "range" (default): a
+    # randomized time inside automation_window_start/end_hour — those columns
+    # always have a non-null default (7/11), so without this flag the worker
+    # can't tell "fixed" and "range" apart and silently ignores whichever
+    # hour the creator actually meant.
+    publish_time_mode = Column(String(20), nullable=False, default="range")
     publish_schedule_hour = Column(Integer, nullable=False, default=8)  # 0-23, channel's own timezone
     publish_schedule_day_offset = Column(Integer, nullable=False, default=1)  # 0 = same day, 1 = next day
 
@@ -210,6 +216,7 @@ class Channel(Base):
             "voice_name": self.voice_name,
             "voice_settings": self.voice_settings or {"speed": 0.845, "stability": 0.8, "similarity_boost": 0.9, "style": 0.0},
             "publish_mode": self.publish_mode or "manual",
+            "publish_time_mode": self.publish_time_mode or "range",
             "publish_schedule_hour": self.publish_schedule_hour,
             "publish_schedule_day_offset": self.publish_schedule_day_offset,
             "youtube_connected": bool(self.youtube_refresh_token),
