@@ -12,8 +12,12 @@ IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
 # How many videos the worker renders at once (each with its own TTS/STT calls),
-# instead of the old strictly-sequential one-at-a-time queue.
-MAX_CONCURRENT_RENDERS = int(os.getenv("MAX_CONCURRENT_RENDERS", "4"))
+# instead of the old strictly-sequential one-at-a-time queue. Kept modest by
+# default (3) because the actual video assembly (ffmpeg) is CPU-bound and this
+# runs on a shared 4-vCPU VPS alongside Supabase/Coolify/other apps — going
+# much higher would just make every concurrent render slower via CPU
+# contention instead of finishing faster. Raise via env var on beefier hardware.
+MAX_CONCURRENT_RENDERS = int(os.getenv("MAX_CONCURRENT_RENDERS", "3"))
 # Separate, tighter cap on simultaneous Izivoice TTS/STT calls specifically —
 # Izivoice rate-limits aggressively, so this stays below MAX_CONCURRENT_RENDERS
 # even when more videos are rendering in parallel (the rest of each pipeline —
