@@ -34,7 +34,7 @@ def get_db():
         db.close()
 
 def init_db():
-    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset  # ensure models are imported
+    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order  # ensure models are imported
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration: create_all only adds missing tables, not missing
@@ -79,6 +79,9 @@ def init_db():
             "izivoice_api_key_encrypted": "ALTER TABLE users ADD COLUMN izivoice_api_key_encrypted TEXT",
             "izivoice_key_prefix": "ALTER TABLE users ADD COLUMN izivoice_key_prefix VARCHAR(20)",
             "izivoice_connected_at": "ALTER TABLE users ADD COLUMN izivoice_connected_at TIMESTAMP",
+            "is_admin": "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE NOT NULL",
+            "free_video_quota_granted": "ALTER TABLE users ADD COLUMN free_video_quota_granted INTEGER DEFAULT 3 NOT NULL",
+            "free_videos_used": "ALTER TABLE users ADD COLUMN free_videos_used INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in migrations.items():

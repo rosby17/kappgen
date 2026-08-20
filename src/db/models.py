@@ -20,9 +20,19 @@ class User(Base):
     izivoice_connected_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    is_admin = Column(Boolean, nullable=False, default=False)
+    # Free-tier quota: set once at registration (see register_user), never
+    # recomputed later — the first 20 accounts ever created get a bigger
+    # trial (10), every account after that gets 3. free_videos_used only
+    # increments while under quota; once a paid Subscription exists it's
+    # irrelevant (see src/utils/billing.py: user_can_render).
+    free_video_quota_granted = Column(Integer, nullable=False, default=3)
+    free_videos_used = Column(Integer, nullable=False, default=0)
+
     # Relationships
     channels = relationship("Channel", back_populates="user", cascade="all, delete-orphan")
     api_keys = relationship("ApiKey", back_populates="user", cascade="all, delete-orphan")
+    subscriptions = relationship("Subscription", back_populates="user", foreign_keys="Subscription.user_id", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -36,7 +46,10 @@ class User(Base):
             "izivoice_key_prefix": self.izivoice_key_prefix,
             "izivoice_connected_at": self.izivoice_connected_at.isoformat() if self.izivoice_connected_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "channel_count": len(self.channels) if self.channels else 0
+            "channel_count": len(self.channels) if self.channels else 0,
+            "is_admin": self.is_admin,
+            "free_video_quota_granted": self.free_video_quota_granted,
+            "free_videos_used": self.free_videos_used,
         }
 
 
@@ -339,4 +352,93 @@ class Video(Base):
             "youtube_description": self.youtube_description,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
+        }
+
+
+class Plan(Base):
+    """Subscription tiers — deliberately not hardcoded in code: the admin
+    dashboard creates/edits these, since pricing is the operator's call."""
+    __tablename__ = "plans"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False)
+    price_fcfa = Column(Integer, nullable=False)
+    duration_days = Column(Integer, nullable=False, default=30)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "price_fcfa": self.price_fcfa,
+            "duration_days": self.duration_days,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Subscription(Base):
+    """A user's paid (or admin-comped) access window. status="active" and
+    expires_at in the future is what user_can_render()/user_has_active_subscription()
+    (src/utils/billing.py) check — a user can have several rows over time
+    (renewals, admin grants), only the latest active/unexpired one matters."""
+    __tablename__ = "subscriptions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    plan_id = Column(String(36), ForeignKey("plans.id"), nullable=True)  # null when admin-granted without a plan
+    status = Column(String(20), nullable=False, default="active")  # "active" | "expired" | "cancelled"
+    started_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    # Set when an admin comps this from the dashboard instead of a real payment.
+    granted_by_admin_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    note = Column(Text, nullable=True)
+
+    user = relationship("User", back_populates="subscriptions", foreign_keys=[user_id])
+    plan = relationship("Plan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "plan_id": self.plan_id,
+            "plan_name": self.plan.name if self.plan else None,
+            "status": self.status,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "granted_by_admin_id": self.granted_by_admin_id,
+            "note": self.note,
+        }
+
+
+class Order(Base):
+    """One payment attempt through Maketou or Tara Money. status flips
+    pending->success exactly once (atomic claim in billing.py) to prevent a
+    webhook + a poll + the reverify cron from double-crediting the same
+    order if they race."""
+    __tablename__ = "orders"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    plan_id = Column(String(36), ForeignKey("plans.id"), nullable=False)
+    provider = Column(String(20), nullable=False)  # "maketou" | "tarapay"
+    provider_ref = Column(String(255), nullable=True)  # Maketou cart id / Tara paymentId
+    amount_fcfa = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")  # "pending" | "success" | "failed" | "flagged_underpaid"
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+    plan = relationship("Plan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "plan_id": self.plan_id,
+            "provider": self.provider,
+            "provider_ref": self.provider_ref,
+            "amount_fcfa": self.amount_fcfa,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }

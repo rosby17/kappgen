@@ -11,7 +11,7 @@ if str(BASE_DIR) not in sys.path:
 
 from src.config import STORAGE_PATH
 from src.db.session import init_db
-from src.api.routes import channels, videos, auth, folders, api_keys
+from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin
 
 app = FastAPI(
     title="NicheCut SaaS API",
@@ -37,6 +37,8 @@ app.include_router(channels.router)
 app.include_router(videos.router)
 app.include_router(folders.router)
 app.include_router(api_keys.router)
+app.include_router(billing.router)
+app.include_router(admin.router)
 
 @app.on_event("startup")
 def on_startup():

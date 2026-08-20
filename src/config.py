@@ -26,6 +26,20 @@ MAX_CONCURRENT_IZIVOICE_CALLS = int(os.getenv("MAX_CONCURRENT_IZIVOICE_CALLS", "
 # Used to encrypt connected customers' Izivoice API keys at rest. In production
 # set a long, stable random value; changing it invalidates stored connections.
 CREDENTIAL_ENCRYPTION_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
+# Signs session tokens (src/utils/auth.py). Every route that trusts "who the
+# caller is" depends on this being a real secret in production — falling back
+# to a fixed dev value only so local/test runs don't crash without a .env.
+SECRET_KEY = os.getenv("SECRET_KEY", "") or "dev-insecure-secret-change-me"
+
+# Maketou + Tara Money (dklo.co) — same merchant credentials already used by
+# the sibling izivoice project (reused deliberately, per the user).
+MAKETOU_API_KEY = os.getenv("MAKETOU_API_KEY", "")
+MAKETOU_PRODUCT_ID = os.getenv("MAKETOU_PRODUCT_ID", "")
+TARA_API_KEY = os.getenv("TARA_API_KEY", "")
+TARA_BUSINESS_ID = os.getenv("TARA_BUSINESS_ID", "")
+# Not reused from izivoice — this only has to match what NicheCut itself
+# sends as the webHookUrl query param at checkout time.
+TARA_WEBHOOK_SECRET = os.getenv("TARA_WEBHOOK_SECRET", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 # Separate from the login flow above (which only verifies an id_token client-side).
 # YouTube publishing needs a full server-side OAuth2 authorization-code exchange
@@ -34,6 +48,9 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 YOUTUBE_OAUTH_REDIRECT_URI = os.getenv("YOUTUBE_OAUTH_REDIRECT_URI", "")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://nichecut.tools-cl.com")
+# This backend's own public URL — needed to build webhook callback URLs (Tara
+# Money) that point back at the server, not the frontend.
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://api-nichecut.tools-cl.com")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
 BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "")
 BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "NicheCut")

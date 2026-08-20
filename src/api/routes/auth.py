@@ -12,12 +12,28 @@ from src.db.session import get_db
 from src.db.models import PasswordReset, User
 from src.models.project import UserCreate, UserLogin, ForgotPasswordPayload, ChangePasswordPayload, ResetPasswordPayload
 from src.utils.logger import logger
+from src.utils.auth import create_session_token, get_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 RESET_CODE_LIFETIME_MINUTES = 10
 RESET_MAX_REQUESTS_PER_HOUR = 5
 RESET_MAX_ATTEMPTS = 5
 RESET_GENERIC_MESSAGE = "Si un compte correspond à cette adresse, un code de vérification vient d'être envoyé."
+# The first 20 accounts ever created get a bigger free trial (10 videos)
+# instead of the standard 3 — confirmed by the user, a one-time early-user
+# bonus, not a recurring promotion.
+EARLY_USER_COUNT = 20
+EARLY_USER_FREE_QUOTA = 10
+STANDARD_FREE_QUOTA = 3
+
+
+def _free_quota_for_new_user(db: Session) -> int:
+    existing_count = db.query(User).count()
+    return EARLY_USER_FREE_QUOTA if existing_count < EARLY_USER_COUNT else STANDARD_FREE_QUOTA
+
+
+def _auth_response(user: User) -> dict:
+    return {"user": user.to_dict(), "token": create_session_token(user.id)}
 
 
 class GoogleAuthPayload(BaseModel):
@@ -56,12 +72,13 @@ def register_user(payload: UserCreate, db: Session = Depends(get_db)):
     user = User(
         email=email_clean,
         name=default_name,
-        hashed_password=hash_password(payload.password)
+        hashed_password=hash_password(payload.password),
+        free_video_quota_granted=_free_quota_for_new_user(db),
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    return user.to_dict()
+    return _auth_response(user)
 
 @router.post("/login")
 def login_user(payload: UserLogin, db: Session = Depends(get_db)):
@@ -69,14 +86,16 @@ def login_user(payload: UserLogin, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == email_clean).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect.")
-    return user.to_dict()
+    return _auth_response(user)
 
 @router.post("/change-password")
-def change_password(payload: ChangePasswordPayload, db: Session = Depends(get_db)):
+def change_password(payload: ChangePasswordPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if payload.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     user = db.query(User).filter(User.id == payload.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
-        
+
     if not verify_password(payload.old_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="L'ancien mot de passe est incorrect.")
         
@@ -215,6 +234,7 @@ def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
             hashed_password=hash_password(os.urandom(32).hex()),
             picture_url=picture_url,
             auth_provider="google",
+            free_video_quota_granted=_free_quota_for_new_user(db),
         )
         db.add(user)
         db.commit()
@@ -223,11 +243,13 @@ def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
         user.picture_url = picture_url
         db.commit()
         db.refresh(user)
-    return user.to_dict()
+    return _auth_response(user)
 
 
 @router.get("/me/{user_id}")
-def get_user_profile(user_id: str, db: Session = Depends(get_db)):
+def get_user_profile(user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
@@ -240,7 +262,9 @@ class ProfileUpdate(BaseModel):
 
 
 @router.patch("/me/{user_id}")
-def update_user_profile(user_id: str, payload: ProfileUpdate, db: Session = Depends(get_db)):
+def update_user_profile(user_id: str, payload: ProfileUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")

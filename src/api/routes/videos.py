@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import Channel, Video
+from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY
@@ -16,6 +16,8 @@ from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
+from src.utils.auth import get_current_user
+from src.utils.billing import user_can_render
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -68,13 +70,20 @@ async def submit_video_subject(
     audio_files: Optional[List[UploadFile]] = File(None),
     transcribe_audio: bool = Form(True),
     voice_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     validate_channel_visual_source(channel)
-        
+
+    can_render, reason = user_can_render(db, current_user)
+    if not can_render:
+        raise HTTPException(status_code=402, detail=reason)
+
     created_videos = []
     uploads_dir = STORAGE_PATH / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -125,11 +134,16 @@ async def submit_video_subject(
             )
             db.add(video)
             created_videos.append(video)
-            
+
+        if current_user.free_videos_used < current_user.free_video_quota_granted:
+            current_user.free_videos_used = min(
+                current_user.free_video_quota_granted,
+                current_user.free_videos_used + len(created_videos),
+            )
         db.commit()
         for v in created_videos:
             db.refresh(v)
-            
+
         return [v.to_dict() for v in created_videos]
         
     else: # input_type == "text"
@@ -157,25 +171,36 @@ async def submit_video_subject(
             voice_id=voice_id.strip() if voice_id else channel.voice_id,
         )
         db.add(video)
+        if current_user.free_videos_used < current_user.free_video_quota_granted:
+            current_user.free_videos_used += 1
         db.commit()
         db.refresh(video)
-        
+
         return [video.to_dict()]
 
 @router.get("")
-def list_all_videos(user_id: Optional[str] = None, db: Session = Depends(get_db)):
-    query = db.query(Video)
-    if user_id:
-        query = query.join(Channel, Video.channel_id == Channel.id).filter(Channel.user_id == user_id)
-    videos = query.order_by(Video.created_at.desc()).all()
+def list_all_videos(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    videos = (
+        db.query(Video)
+        .join(Channel, Video.channel_id == Channel.id)
+        .filter(Channel.user_id == current_user.id)
+        .order_by(Video.created_at.desc())
+        .all()
+    )
     return [v.to_dict() for v in videos]
 
-@router.get("/{video_id}")
-def get_video_status(video_id: str, db: Session = Depends(get_db)):
-    video = db.query(Video).filter(Video.id == video_id).first()
+def _get_owned_video(db: Session, video_id: str, current_user: User) -> Video:
+    video = db.query(Video).join(Channel, Video.channel_id == Channel.id).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    return video.to_dict()
+    if video.channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    return video
+
+
+@router.get("/{video_id}")
+def get_video_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _get_owned_video(db, video_id, current_user).to_dict()
 
 @router.get("/{video_id}/download")
 def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get_db)):
@@ -378,19 +403,18 @@ def regenerate_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 @router.get("/channel/{channel_id}")
-def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):
+def list_channel_videos(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     videos = db.query(Video).filter(Video.channel_id == channel_id).order_by(Video.created_at.desc()).all()
     return [v.to_dict() for v in videos]
 
 @router.post("/{video_id}/retry")
-def retry_video(video_id: str, db: Session = Depends(get_db)):
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-        
+def retry_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
     video.status = VideoStatus.QUEUED.value
     video.error_message = None
     video.progress_stage = "En attente du moteur de rendu"
@@ -407,10 +431,8 @@ class VideoUpdate(BaseModel):
     approved_for_publish: Optional[bool] = None
 
 @router.patch("/{video_id}")
-def update_video(video_id: str, payload: VideoUpdate, db: Session = Depends(get_db)):
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
 
     if payload.title is not None:
         title = payload.title.strip()
@@ -634,10 +656,8 @@ def close_video_edit(video_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{video_id}")
-def delete_video(video_id: str, db: Session = Depends(get_db)):
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+def delete_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
     db.delete(video)
     db.commit()
     return {"message": "Video deleted successfully"}

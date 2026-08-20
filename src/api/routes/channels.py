@@ -19,6 +19,8 @@ from datetime import datetime
 from src.pipeline import youtube_publisher
 from src.pipeline.niche_detector import suggest_niche
 from src.utils.credentials import encrypt_credential, izivoice_key_for_user
+from src.utils.auth import get_current_user
+from src.utils.billing import user_has_active_subscription
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -266,11 +268,8 @@ def suggest_niche_endpoint(payload: NicheSuggestRequest, db: Session = Depends(g
     return {"niche": niche}
 
 @router.get("", response_model=List[Dict[str, Any]])
-def list_channels(user_id: Optional[str] = None, db: Session = Depends(get_db)):
-    query = db.query(Channel)
-    if user_id:
-        query = query.filter(Channel.user_id == user_id)
-    channels = query.order_by(Channel.created_at.desc()).all()
+def list_channels(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channels = db.query(Channel).filter(Channel.user_id == current_user.id).order_by(Channel.created_at.desc()).all()
     result = []
     for c in channels:
         data = c.to_dict()
@@ -282,15 +281,9 @@ def list_channels(user_id: Optional[str] = None, db: Session = Depends(get_db)):
     return result
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = Depends(get_db)):
-    valid_user_id = None
-    if user_id:
-        user_exists = db.query(User).filter(User.id == user_id).first()
-        if user_exists:
-            valid_user_id = user_id
-
+def create_channel(payload: ChannelCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = Channel(
-        user_id=valid_user_id,
+        user_id=current_user.id,
         name=payload.name,
         description=payload.description,
         niche=payload.niche,
@@ -321,10 +314,12 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
     return channel.to_dict()
 
 @router.get("/{channel_id}")
-def get_channel(channel_id: str, db: Session = Depends(get_db)):
+def get_channel(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     data = channel.to_dict()
     data["queued_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.QUEUED.value).count()
     data["rendering_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.RENDERING.value).count()
@@ -351,11 +346,19 @@ def get_channel_library_preview(channel_id: str, db: Session = Depends(get_db)):
     return response
 
 @router.put("/{channel_id}")
-def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depends(get_db)):
+def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-        
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    # Watermark removal is a paid feature — without this, any user could
+    # just flip the toggle themselves regardless of subscription status.
+    if payload.effects_config is not None and not payload.effects_config.watermark_enabled:
+        if not user_has_active_subscription(db, current_user):
+            raise HTTPException(status_code=403, detail="Un abonnement actif est requis pour retirer le filigrane NicheCut.")
+
     if payload.name is not None:
         channel.name = payload.name
     if payload.description is not None:
@@ -929,10 +932,12 @@ def disconnect_youtube(channel_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{channel_id}")
-def delete_channel(channel_id: str, db: Session = Depends(get_db)):
+def delete_channel(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     db.delete(channel)
     db.commit()
     return {"message": "Channel deleted successfully"}
