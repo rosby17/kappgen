@@ -107,7 +107,14 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
             logger.warning(f"AI thumbnail background generation failed, falling back to a video frame: {exc}")
     if image is None:
         try:
-            run_ffmpeg(["ffmpeg", "-y", "-ss", "00:00:02", "-i", str(video_path), "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720", str(frame_path)])
+            # ffmpeg's `thumbnail` filter scores ~100 frames and picks the most
+            # representative one, instead of grabbing a fixed timestamp — most of
+            # these videos fade in from black over their first couple of seconds,
+            # so a hardcoded "-ss 2s" grab reliably produced a near-black thumbnail
+            # whenever the AI background above also failed.
+            # Capped to the first 60s so this doesn't decode a full 1h video just to
+            # score candidate frames — there's plenty of representative footage early on.
+            run_ffmpeg(["ffmpeg", "-y", "-i", str(video_path), "-t", "60", "-frames:v", "1", "-vf", "thumbnail,scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720", str(frame_path)])
             image = Image.open(frame_path).convert("RGB")
         except Exception:
             image = Image.new("RGB", (1280, 720), "#07111f")

@@ -191,7 +191,7 @@ def process_single_queued_video() -> bool:
 
         try:
             youtube_metadata.generate_thumbnail(
-                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or "", channel=channel
+                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel
             )
         except Exception as e:
             logger.warning(f"Could not pre-generate thumbnail for video {video.id}: {e}")

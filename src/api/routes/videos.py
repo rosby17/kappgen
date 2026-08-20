@@ -350,7 +350,7 @@ def resync_youtube_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if not access_token:
         raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
 
-    thumbnail_path = generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.title or "", channel=channel)
+    thumbnail_path = generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel)
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
