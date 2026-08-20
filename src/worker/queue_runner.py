@@ -491,17 +491,23 @@ def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     return local_now.strftime("%Y-%m-%d"), seconds_into_day
 
 
-def _channel_target_seconds_today(channel_id: str, today_str: str, index: int = 0, total: int = 1) -> int:
-    """A per-channel-per-day random target time inside the automation window,
-    deterministic from (channel_id, date, index) so it doesn't change across
-    worker restarts (would otherwise let a channel fire twice, or miss its
-    slot, on every redeploy). When a channel generates more than one video a
-    day (videos_per_day > 1), the window is split into `total` equal
-    sub-slots so they land spread through the morning instead of clustering."""
+def _channel_target_seconds_today(channel: Channel, today_str: str, index: int = 0, total: int = 1) -> int:
+    """A per-channel-per-day random target time inside the channel's own
+    configurable publication window (start/end hour — every creator picks
+    their own instead of a single 7h-11h imposed on everyone), deterministic
+    from (channel_id, date, index) so it doesn't change across worker
+    restarts (would otherwise let a channel fire twice, or miss its slot, on
+    every redeploy). When a channel generates more than one video a day
+    (videos_per_day > 1), the window is split into `total` equal sub-slots so
+    they land spread through it instead of clustering."""
     import random
-    rng = random.Random(f"{channel_id}-{today_str}-{index}")
-    window_s = (AUTOMATION_WINDOW_END_HOUR - AUTOMATION_WINDOW_START_HOUR) * 3600
-    base_s = AUTOMATION_WINDOW_START_HOUR * 3600
+    start_hour = channel.automation_window_start_hour if channel.automation_window_start_hour is not None else AUTOMATION_WINDOW_START_HOUR
+    end_hour = channel.automation_window_end_hour if channel.automation_window_end_hour is not None else AUTOMATION_WINDOW_END_HOUR
+    if end_hour <= start_hour:
+        end_hour = start_hour + 1
+    rng = random.Random(f"{channel.id}-{today_str}-{index}")
+    window_s = (end_hour - start_hour) * 3600
+    base_s = start_hour * 3600
     total = max(1, total)
     sub_start = base_s + (window_s * index) // total
     sub_end = base_s + (window_s * (index + 1)) // total
@@ -583,7 +589,7 @@ def run_daily_automation():
             if already >= quota:
                 continue
 
-            target_seconds = _channel_target_seconds_today(channel.id, today_str, index=already, total=quota)
+            target_seconds = _channel_target_seconds_today(channel, today_str, index=already, total=quota)
             if seconds_into_day < target_seconds:
                 continue  # this slot hasn't arrived yet for this channel
 

@@ -101,6 +101,11 @@ class Channel(Base):
     # "auto" only) — each gets its own randomized slot inside the window,
     # spread evenly so they don't all land back-to-back.
     videos_per_day = Column(Integer, nullable=False, default=1)
+    # Daily window (in the channel's own timezone) the auto-mode agent is
+    # allowed to generate/publish within — every creator picks their own,
+    # instead of a single window imposed on everyone.
+    automation_window_start_hour = Column(Integer, nullable=False, default=7)
+    automation_window_end_hour = Column(Integer, nullable=False, default=11)
     # Which weekdays the daily pipeline is allowed to run on — a list of ints
     # 0=Monday..6=Sunday. Null/empty means every day. Lets creators who post
     # once a week, three times a week, weekdays only, etc. use full automation
@@ -170,6 +175,8 @@ class Channel(Base):
             "automation_mode": self.automation_mode or "manual",
             "automation_style_prompt": self.automation_style_prompt,
             "videos_per_day": self.videos_per_day or 1,
+            "automation_window_start_hour": self.automation_window_start_hour if self.automation_window_start_hour is not None else 7,
+            "automation_window_end_hour": self.automation_window_end_hour if self.automation_window_end_hour is not None else 11,
             "active_days": self.active_days,
             "last_auto_run_date": self.last_auto_run_date,
             "timezone": self.timezone or "Africa/Douala",

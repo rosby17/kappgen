@@ -109,6 +109,8 @@ def init_db():
             "publish_schedule_day_offset": "ALTER TABLE channels ADD COLUMN publish_schedule_day_offset INTEGER DEFAULT 1 NOT NULL",
             "timezone": "ALTER TABLE channels ADD COLUMN timezone VARCHAR(64) DEFAULT 'Africa/Douala' NOT NULL",
             "videos_per_day": "ALTER TABLE channels ADD COLUMN videos_per_day INTEGER DEFAULT 1 NOT NULL",
+            "automation_window_start_hour": "ALTER TABLE channels ADD COLUMN automation_window_start_hour INTEGER DEFAULT 7 NOT NULL",
+            "automation_window_end_hour": "ALTER TABLE channels ADD COLUMN automation_window_end_hour INTEGER DEFAULT 11 NOT NULL",
             "active_days": "ALTER TABLE channels ADD COLUMN active_days JSON",
             "auto_videos_generated_today": "ALTER TABLE channels ADD COLUMN auto_videos_generated_today INTEGER DEFAULT 0 NOT NULL",
         }

@@ -199,6 +199,8 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         automation_mode=payload.automation_mode or "manual",
         automation_style_prompt=payload.automation_style_prompt,
         videos_per_day=max(1, payload.videos_per_day or 1),
+        automation_window_start_hour=payload.automation_window_start_hour if payload.automation_window_start_hour is not None else 7,
+        automation_window_end_hour=payload.automation_window_end_hour if payload.automation_window_end_hour is not None else 11,
         active_days=payload.active_days,
         script_structure=payload.script_structure,
         voice_id=payload.voice_id,
@@ -270,6 +272,10 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.automation_style_prompt = payload.automation_style_prompt
     if payload.videos_per_day is not None:
         channel.videos_per_day = max(1, payload.videos_per_day)
+    if payload.automation_window_start_hour is not None:
+        channel.automation_window_start_hour = payload.automation_window_start_hour
+    if payload.automation_window_end_hour is not None:
+        channel.automation_window_end_hour = payload.automation_window_end_hour
     if payload.active_days is not None:
         channel.active_days = payload.active_days
     if payload.script_structure is not None:
