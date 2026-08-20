@@ -16,10 +16,10 @@ def _fallback_metadata(video, channel) -> dict:
     niche = (channel.niche or "").strip()
     description = (
         f"{title}\n\n"
-        f"Une vidéo originale de {channel.name}, créée avec NicheCut.\n\n"
+        f"Une vidéo originale de {channel.name}, créée avec KappGen.\n\n"
         f"Abonne-toi à la chaîne pour découvrir les prochaines vidéos."
     )
-    tags = [tag for tag in [niche, channel.name, "NicheCut"] if tag]
+    tags = [tag for tag in [niche, channel.name, "KappGen"] if tag]
     return {"title": title, "description": description, "tags": tags, "thumbnail_text": title[:55]}
 
 
@@ -31,7 +31,7 @@ def generate_metadata(video, channel) -> dict:
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         script = (video.script_text or "")[:12000]
-        prompt = f"""Tu es l'Agent éditorial NicheCut. Prépare la publication YouTube de cette vidéo.
+        prompt = f"""Tu es l'Agent éditorial KappGen. Prépare la publication YouTube de cette vidéo.
 Chaîne: {channel.name}. Niche: {channel.niche}. Langue du script à conserver.
 Le contenu doit être original, fidèle au script, sans clickbait trompeur et conforme aux règles YouTube.
 Script: {script}

@@ -213,13 +213,13 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
         raise HTTPException(status_code=404, detail="Video file not found on disk")
 
     if quality != "sd":
-        return FileResponse(source_path, media_type="video/mp4", filename=f"nichecut-{video_id}-hd.mp4")
+        return FileResponse(source_path, media_type="video/mp4", filename=f"kappgen-{video_id}-hd.mp4")
 
     # Normally already pre-generated right after the render finished (see
     # queue_runner.py) so this resolves instantly; only actually transcodes
     # here as a fallback if that background step hasn't completed yet.
     cached_path = ensure_sd_variant(source_path)
-    return FileResponse(cached_path, media_type="video/mp4", filename=f"nichecut-{video_id}-sd.mp4")
+    return FileResponse(cached_path, media_type="video/mp4", filename=f"kappgen-{video_id}-sd.mp4")
 
 @router.get("/{video_id}/audio")
 def download_video_audio(video_id: str, db: Session = Depends(get_db)):
@@ -233,7 +233,7 @@ def download_video_audio(video_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Video file not found on disk")
 
     audio_path = ensure_extracted_audio(source_path)
-    return FileResponse(audio_path, media_type="audio/mp4", filename=f"nichecut-{video_id}-audio.m4a")
+    return FileResponse(audio_path, media_type="audio/mp4", filename=f"kappgen-{video_id}-audio.m4a")
 
 
 @router.post("/{video_id}/youtube/publish")

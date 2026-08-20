@@ -357,7 +357,7 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     # just flip the toggle themselves regardless of subscription status.
     if payload.effects_config is not None and not payload.effects_config.watermark_enabled:
         if not user_has_active_subscription(db, current_user):
-            raise HTTPException(status_code=403, detail="Un abonnement actif est requis pour retirer le filigrane NicheCut.")
+            raise HTTPException(status_code=403, detail="Un abonnement actif est requis pour retirer le filigrane KappGen.")
 
     if payload.name is not None:
         channel.name = payload.name

@@ -10,7 +10,7 @@ class User(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
-    name = Column(String(255), nullable=False, default="Créateur NicheCut")
+    name = Column(String(255), nullable=False, default="Créateur KappGen")
     hashed_password = Column(String(255), nullable=False)
     picture_url = Column(String(1024), nullable=True)
     phone = Column(String(50), nullable=True)

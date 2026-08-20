@@ -14,7 +14,7 @@ from src.db.session import init_db
 from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin
 
 app = FastAPI(
-    title="NicheCut SaaS API",
+    title="KappGen SaaS API",
     description="Automated long-form video pipeline for YouTube niche channels.",
     version="1.0.0"
 )
@@ -46,7 +46,7 @@ def on_startup():
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "app": "NicheCut Video Pipeline MVP"}
+    return {"status": "ok", "app": "KappGen Video Pipeline MVP"}
 
 @app.get("/api/db-status")
 def get_db_status():

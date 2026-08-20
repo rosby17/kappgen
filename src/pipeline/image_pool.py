@@ -6,7 +6,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from src.utils.logger import logger
 from src.config import ASSETS_PATH, STORAGE_PATH
 
-def generate_fallback_image(path: Path, index: int, label: str = "Nichecut Scene"):
+def generate_fallback_image(path: Path, index: int, label: str = "KappGen Scene"):
     """
     Generates a stunning, high-definition 1920x1080 artistic illustration using Pillow.
     Features atmospheric landscape silhouettes, glowing celestial lighting, and rich color gradients.

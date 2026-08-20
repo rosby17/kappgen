@@ -108,27 +108,27 @@ def change_password(payload: ChangePasswordPayload, current_user: User = Depends
 
 def send_password_reset_email(email: str, code: str) -> None:
     if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
-        raise RuntimeError("Brevo n'est pas configuré pour NicheCut.")
+        raise RuntimeError("Brevo n'est pas configuré pour KappGen.")
 
     response = httpx.post(
         "https://api.brevo.com/v3/smtp/email",
         headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
         json={
-            "sender": {"email": BREVO_SENDER_EMAIL, "name": BREVO_SENDER_NAME or "NicheCut"},
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": BREVO_SENDER_NAME or "KappGen"},
             "to": [{"email": email}],
-            "subject": f"{code} — Code de récupération NicheCut",
+            "subject": f"{code} — Code de récupération KappGen",
             "htmlContent": f"""
               <div style="background:#07101a;padding:36px;font-family:Arial,sans-serif;color:#eaf6ff">
                 <div style="max-width:520px;margin:auto;background:#101a27;border:1px solid #26364a;border-radius:20px;padding:32px">
-                  <div style="color:#57d9ff;font-size:12px;font-weight:700;letter-spacing:1.4px">NICHECUT</div>
+                  <div style="color:#57d9ff;font-size:12px;font-weight:700;letter-spacing:1.4px">KAPPGEN</div>
                   <h1 style="font-size:25px;margin:18px 0 10px">Réinitialise ton mot de passe</h1>
-                  <p style="color:#9badc0;line-height:1.7">Saisis ce code dans NicheCut. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes et ne peut être utilisé qu’une fois.</p>
+                  <p style="color:#9badc0;line-height:1.7">Saisis ce code dans KappGen. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes et ne peut être utilisé qu’une fois.</p>
                   <div style="font-size:34px;font-weight:800;letter-spacing:9px;text-align:center;background:#07101a;border-radius:14px;padding:20px;margin:26px 0;color:#66ddff">{code}</div>
                   <p style="color:#65788e;font-size:12px;line-height:1.6">Si tu n’as pas demandé ce code, ignore simplement cet email. Ton mot de passe ne sera pas modifié.</p>
                 </div>
               </div>
             """,
-            "textContent": f"Ton code de récupération NicheCut est {code}. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes.",
+            "textContent": f"Ton code de récupération KappGen est {code}. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes.",
         },
         timeout=15.0,
     )

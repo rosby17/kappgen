@@ -64,7 +64,7 @@ def create_tarapay_checkout(order_id: str, amount_fcfa: int, plan_name: str) -> 
         "apiKey": TARA_API_KEY,
         "businessId": TARA_BUSINESS_ID,
         "productId": order_id,
-        "productName": f"Abonnement NicheCut — {plan_name}",
+        "productName": f"Abonnement KappGen — {plan_name}",
         "productPrice": amount_fcfa,
         "productDescription": f"Abonnement {plan_name}, {amount_fcfa} FCFA. Aucun montant supérieur ne sera débité.",
         "returnUrl": f"{FRONTEND_BASE_URL}/billing/success?order_id={order_id}&provider=tarapay",
