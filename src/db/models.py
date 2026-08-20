@@ -161,6 +161,18 @@ class Channel(Base):
     videos = relationship("Video", back_populates="channel", cascade="all, delete-orphan")
 
     def to_dict(self):
+        # A channel can be saved (and reopened later to finish configuring)
+        # before it's actually ready to render a video — completion tracks
+        # the two things a render genuinely needs: a voice, and a visual
+        # source with real content behind it. Identity/niche are always set
+        # (they default), so they don't gate this.
+        image_style = self.image_style or {}
+        visuals_ready = bool(
+            (image_style.get("source") == "ai_generated" and image_style.get("style_prompt"))
+            or (image_style.get("source") in ("library", "hybrid") and (image_style.get("library_image_count") or 0) > 0)
+        )
+        voice_ready = bool(self.voice_id)
+        completion_percent = 50 + (25 if voice_ready else 0) + (25 if visuals_ready else 0)
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -172,6 +184,8 @@ class Channel(Base):
             "music_preference": self.music_preference,
             "image_style": self.image_style,
             "effects_config": self.effects_config,
+            "completion_percent": completion_percent,
+            "is_render_ready": voice_ready and visuals_ready,
             "automation_mode": self.automation_mode or "manual",
             "automation_style_prompt": self.automation_style_prompt,
             "videos_per_day": self.videos_per_day or 1,

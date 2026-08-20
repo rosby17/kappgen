@@ -76,12 +76,23 @@ def list_voice_catalog(language: Optional[str] = None, user_id: Optional[str] = 
     _, api_key = _user_and_izivoice_key(db, user_id)
     if not api_key:
         raise HTTPException(status_code=503, detail="Le catalogue de voix n'est pas configuré.")
-    params = {"page": 1, "page_size": 100}
-    if language:
-        params["language"] = language
-    response = httpx.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params=params, timeout=30)
-    response.raise_for_status()
-    return {"voices": ((response.json().get("data") or {}).get("voices")) or []}
+    # Izivoice's `page` is 0-indexed — page=1 silently returns the *second*
+    # page (empty for most accounts), which is why the picker only ever
+    # showed the 4 hardcoded fallback voices instead of the real catalog.
+    all_voices = []
+    with httpx.Client(timeout=30) as client:
+        for page in range(0, 4):  # up to ~400 voices; plenty for a picker
+            params = {"page": page, "page_size": 100}
+            if language:
+                params["language"] = language
+            response = client.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params=params)
+            response.raise_for_status()
+            data = (response.json().get("data") or {})
+            batch = data.get("voices") or []
+            all_voices.extend(batch)
+            if not data.get("has_more") or not batch:
+                break
+    return {"voices": all_voices}
 
 @router.post("/{channel_id}/voice/clone")
 async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), user_id: Optional[str] = Form(None), db: Session = Depends(get_db)):
@@ -111,7 +122,32 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_co
         raise HTTPException(status_code=502, detail="Izivoice n'a retourné aucun identifiant de voix.")
     return {"voice_id": voice_id, "name": name.strip(), "cloned": True}
 
-async def save_valid_library_images(files: List[UploadFile], target_dir: Path):
+async def save_valid_library_images(files: List[UploadFile], target_dir: Path, append: bool = False):
+    """append=True writes straight into target_dir (creating it if needed)
+    alongside whatever's already there — used when the frontend splits a
+    large folder into several requests (Cloudflare hard-caps a single
+    request body at 100MB, so a 140-photo folder has to arrive in batches).
+    append=False keeps the original atomic swap-replace behavior for a
+    single-shot upload."""
+    if append:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        existing = list(target_dir.glob("img_*"))
+        start_index = len(existing)
+        saved = 0
+        rejected = 0
+        for file in files:
+            ext = Path(file.filename or "").suffix.lower()
+            if ext not in ALLOWED_LIBRARY_EXTENSIONS:
+                rejected += 1
+                continue
+            contents = await file.read()
+            if not contents:
+                rejected += 1
+                continue
+            (target_dir / f"img_{start_index + saved:04d}_{uuid.uuid4().hex[:8]}{ext}").write_bytes(contents)
+            saved += 1
+        return saved, rejected
+
     incoming_dir = target_dir.with_name(f".{target_dir.name}.incoming-{uuid.uuid4()}")
     incoming_dir.mkdir(parents=True, exist_ok=False)
     saved = 0
@@ -491,7 +527,14 @@ async def analyze_style_image(file: UploadFile = File(...)):
     return {"style_prompt": style_prompt}
 
 @router.post("/library-images/staging")
-async def stage_channel_library_images(files: List[UploadFile] = File(...)):
+async def stage_channel_library_images(
+    files: List[UploadFile] = File(...),
+    staging_token: Optional[str] = Form(None),
+):
+    """Large folders (Cloudflare hard-caps a single request body at 100MB)
+    arrive here in several requests: the first call gets no staging_token and
+    starts a fresh batch; the frontend then repeats the call with that same
+    token for every subsequent batch, appended into the same staging dir."""
     staging_root = STORAGE_PATH / "staging" / "channel-libraries"
     staging_root.mkdir(parents=True, exist_ok=True)
 
@@ -501,9 +544,18 @@ async def stage_channel_library_images(files: List[UploadFile] = File(...)):
         if old_dir.is_dir() and old_dir.stat().st_mtime < cutoff:
             shutil.rmtree(old_dir, ignore_errors=True)
 
-    token = str(uuid.uuid4())
-    saved, rejected = await save_valid_library_images(files, staging_root / token)
-    return {"staging_token": token, "library_image_count": saved, "rejected_count": rejected}
+    if staging_token:
+        try:
+            token = str(uuid.UUID(staging_token))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Import temporaire invalide.")
+        saved, rejected = await save_valid_library_images(files, staging_root / token, append=True)
+        total = len([item for item in (staging_root / token).iterdir() if item.is_file()])
+    else:
+        token = str(uuid.uuid4())
+        saved, rejected = await save_valid_library_images(files, staging_root / token)
+        total = saved
+    return {"staging_token": token, "library_image_count": total, "batch_saved": saved, "rejected_count": rejected}
 
 @router.post("/{channel_id}/library-images/staging")
 def attach_staged_channel_library(
@@ -545,15 +597,19 @@ def attach_staged_channel_library(
     return channel.to_dict()
 
 @router.post("/{channel_id}/library-images")
-async def upload_channel_library_images(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+async def upload_channel_library_images(
+    channel_id: str,
+    files: List[UploadFile] = File(...),
+    append: bool = Form(False),
+    db: Session = Depends(get_db),
+):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    saved, rejected = await save_valid_library_images(
-        files,
-        STORAGE_PATH / "channels" / channel.id / "library",
-    )
+    library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+    _, rejected = await save_valid_library_images(files, library_dir, append=append)
+    saved = len([item for item in library_dir.iterdir() if item.is_file()]) if library_dir.is_dir() else 0
 
     image_style = dict(channel.image_style or {})
     image_style["library_path"] = f"channels/{channel.id}/library"
