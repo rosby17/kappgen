@@ -180,9 +180,17 @@ def process_single_queued_video() -> bool:
         db.close()
 
 def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path) -> None:
+    # video.status is already DONE at this point — progress_stage is reused
+    # purely as a visible "what's happening now" signal so the client sees
+    # this extra step too, not just the render itself.
+    video.progress_stage = "Préparation de la publication YouTube"
+    db.commit()
+
     meta = youtube_metadata.generate_metadata(video, channel)
     thumbnail_path = None
     try:
+        video.progress_stage = "Génération de la miniature"
+        db.commit()
         thumbnail_path = youtube_metadata.generate_thumbnail(
             output_mp4, output_mp4.with_name("thumbnail.jpg"), meta.get("thumbnail_text") or meta["title"]
         )
@@ -190,6 +198,8 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         logger.warning(f"Thumbnail generation failed for video {video.id}, publishing without a custom one: {e}")
 
     try:
+        video.progress_stage = "Publication sur YouTube"
+        db.commit()
         video_id = youtube_publisher.publish_video_for_channel(
             channel, output_mp4, meta["title"], meta["description"],
             thumbnail_path=thumbnail_path, tags=meta.get("tags"),
@@ -197,10 +207,12 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         video.youtube_video_id = video_id
         video.youtube_published_at = datetime.utcnow()
         video.youtube_publish_error = None
+        video.progress_stage = "Vidéo publiée sur YouTube"
         db.commit()
         logger.info(f"Auto-published video {video.id} to YouTube (channel {channel.id}) as {video_id}.")
     except Exception as e:
         video.youtube_publish_error = str(e)[:500]
+        video.progress_stage = "Échec de la publication YouTube"
         db.commit()
         logger.warning(f"YouTube auto-publish failed for video {video.id} (channel {channel.id}): {e}")
 
