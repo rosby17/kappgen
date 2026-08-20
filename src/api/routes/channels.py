@@ -10,18 +10,108 @@ import re
 import shutil
 import time
 import uuid
+import httpx
 from src.db.session import get_db
 from src.db.models import Channel, Video, User
-from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, FRONTEND_BASE_URL
+from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL
 from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
+from src.utils.credentials import encrypt_credential, izivoice_key_for_user
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+
+def _user_and_izivoice_key(db: Session, user_id: Optional[str]):
+    user = db.query(User).filter(User.id == user_id).first() if user_id else None
+    return user, izivoice_key_for_user(user) if user else IZIVOICE_API_KEY
+
+
+@router.get("/izivoice/status")
+def izivoice_status(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    return {"connected": bool(user.izivoice_api_key_encrypted), "key_prefix": user.izivoice_key_prefix, "mode": "personal" if user.izivoice_api_key_encrypted else "nichecut"}
+
+
+@router.post("/izivoice/connect")
+def connect_izivoice(payload: IzivoiceConnectionPayload, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == payload.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    api_key = payload.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Saisissez une clé API Izivoice.")
+    try:
+        response = httpx.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params={"page": 1, "page_size": 1}, timeout=30)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Izivoice est temporairement inaccessible.") from exc
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=400, detail="Cette clé API Izivoice est invalide ou révoquée.")
+    if not response.is_success:
+        raise HTTPException(status_code=502, detail="Impossible de vérifier cette clé auprès d’Izivoice.")
+    user.izivoice_api_key_encrypted = encrypt_credential(api_key)
+    user.izivoice_key_prefix = f"{api_key[:8]}…{api_key[-4:]}" if len(api_key) > 14 else f"{api_key[:4]}…"
+    user.izivoice_connected_at = datetime.utcnow()
+    db.commit()
+    return {"connected": True, "key_prefix": user.izivoice_key_prefix, "mode": "personal"}
+
+
+@router.delete("/izivoice/connect")
+def disconnect_izivoice(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    user.izivoice_api_key_encrypted = None
+    user.izivoice_key_prefix = None
+    user.izivoice_connected_at = None
+    db.commit()
+    return {"connected": False, "key_prefix": None, "mode": "nichecut"}
+
+
+@router.get("/voice/catalog")
+def list_voice_catalog(language: Optional[str] = None, user_id: Optional[str] = None, db: Session = Depends(get_db)):
+    _, api_key = _user_and_izivoice_key(db, user_id)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Le catalogue de voix n'est pas configuré.")
+    params = {"page": 1, "page_size": 100}
+    if language:
+        params["language"] = language
+    response = httpx.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params=params, timeout=30)
+    response.raise_for_status()
+    return {"voices": ((response.json().get("data") or {}).get("voices")) or []}
+
+@router.post("/{channel_id}/voice/clone")
+async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), user_id: Optional[str] = Form(None), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if not consent_confirmed:
+        raise HTTPException(status_code=400, detail="Le consentement du propriétaire de la voix est obligatoire.")
+    contents = await audio.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="L'échantillon audio est vide.")
+    owner_id = user_id or channel.user_id
+    _, api_key = _user_and_izivoice_key(db, owner_id)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Izivoice n'est pas configuré.")
+    response = httpx.post(
+        f"{IZIVOICE_BASE_URL}/clone",
+        headers={"Authorization": f"Bearer {api_key}"},
+        files={"file": (audio.filename or "voice-sample.wav", contents, audio.content_type or "audio/wav")},
+        data={"name": name.strip(), "removeNoise": "true", "optimizeAccent": "true"},
+        timeout=180,
+    )
+    response.raise_for_status()
+    data = response.json()
+    voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
+    if not voice_id:
+        raise HTTPException(status_code=502, detail="Izivoice n'a retourné aucun identifiant de voix.")
+    return {"voice_id": voice_id, "name": name.strip(), "cloned": True}
 
 async def save_valid_library_images(files: List[UploadFile], target_dir: Path):
     incoming_dir = target_dir.with_name(f".{target_dir.name}.incoming-{uuid.uuid4()}")
@@ -107,6 +197,12 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
         automation_mode=payload.automation_mode or "manual",
         automation_style_prompt=payload.automation_style_prompt,
         script_structure=payload.script_structure,
+        voice_id=payload.voice_id,
+        voice_name=payload.voice_name,
+        voice_settings=payload.voice_settings,
+        publish_mode=payload.publish_mode or "manual",
+        publish_schedule_hour=payload.publish_schedule_hour,
+        publish_schedule_day_offset=payload.publish_schedule_day_offset,
     )
     db.add(channel)
     db.commit()
@@ -169,6 +265,18 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         channel.automation_style_prompt = payload.automation_style_prompt
     if payload.script_structure is not None:
         channel.script_structure = payload.script_structure
+    if payload.voice_id is not None:
+        channel.voice_id = payload.voice_id
+    if payload.voice_name is not None:
+        channel.voice_name = payload.voice_name
+    if payload.voice_settings is not None:
+        channel.voice_settings = payload.voice_settings
+    if payload.publish_mode is not None:
+        channel.publish_mode = payload.publish_mode
+    if payload.publish_schedule_hour is not None:
+        channel.publish_schedule_hour = payload.publish_schedule_hour
+    if payload.publish_schedule_day_offset is not None:
+        channel.publish_schedule_day_offset = payload.publish_schedule_day_offset
 
     db.commit()
     db.refresh(channel)

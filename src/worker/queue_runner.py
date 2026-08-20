@@ -64,6 +64,8 @@ def process_single_queued_video() -> bool:
         channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
         if not channel:
             raise ValueError(f"Channel {video.channel_id} not found in database.")
+        from src.utils.credentials import izivoice_key_for_user
+        izivoice_api_key = izivoice_key_for_user(channel.user)
 
         video_dir = STORAGE_PATH / "channels" / str(channel.id) / "videos" / str(video.id)
 
@@ -75,6 +77,7 @@ def process_single_queued_video() -> bool:
             edit = video.pending_edit or {}
             edit_type = edit.get("type", "image")
             channel_config = channel.to_dict()
+            channel_config["voice_id"] = video.voice_id
             if edit_type == "subtitle_text":
                 output_mp4 = edit_scene_subtitle_text(
                     channel_config=channel_config,
@@ -88,6 +91,7 @@ def process_single_queued_video() -> bool:
                     output_dir=video_dir,
                     scene_index=edit["scene_index"],
                     new_text=edit.get("text") or "",
+                    izivoice_api_key=izivoice_api_key,
                 )
                 # Keep the database's canonical script aligned with the
                 # scene-level narration edits. YouTube metadata generation and
@@ -140,6 +144,9 @@ def process_single_queued_video() -> bool:
             pre_recorded_audio_path=pre_audio_path,
             progress_callback=update_progress,
             transcribe_audio=video.transcribe_audio,
+            voice_id=video.voice_id,
+            izivoice_api_key=izivoice_api_key,
+            voice_settings=(channel.to_dict().get("voice_settings") or {}),
         )
 
         try:
@@ -179,13 +186,19 @@ def process_single_queued_video() -> bool:
             except Exception as e:
                 logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
-        # Zero-human-input loop's final step: for a channel on full autopilot
-        # with a connected YouTube account, publish the finished video right
-        # away instead of leaving it for the creator to download and upload
-        # themselves. A failure here never fails the render — the video stays
-        # available in NicheCut either way, just not yet on YouTube.
-        if channel.automation_mode == "auto" and channel.youtube_refresh_token:
-            try_publish_to_youtube(db, channel, video, output_mp4)
+        # How this finished video actually reaches YouTube is always the
+        # creator's own choice (channel.publish_mode), independent of whether
+        # the *script* was auto-generated. A failure here never fails the
+        # render — the video stays available in NicheCut either way.
+        if channel.youtube_refresh_token:
+            if channel.publish_mode == "auto":
+                try_publish_to_youtube(db, channel, video, output_mp4)
+            elif channel.publish_mode == "scheduled":
+                video.scheduled_publish_at = compute_scheduled_publish_at(channel)
+                db.commit()
+                logger.info(f"Video {video.id} scheduled to publish at {video.scheduled_publish_at} (channel {channel.id}).")
+            # "manual": leave the video as-is — the creator downloads it or
+            # publishes on demand from NicheCut.
 
         return True
 
@@ -204,6 +217,49 @@ def process_single_queued_video() -> bool:
         return False
     finally:
         db.close()
+
+def compute_scheduled_publish_at(channel: Channel) -> datetime:
+    """Cameroon (WAT) is a fixed UTC+1, no DST. A finished video is scheduled
+    `publish_schedule_day_offset` days out, at `publish_schedule_hour` WAT —
+    the same fixed daily rule for every video on this channel."""
+    wat_now = datetime.utcnow() + timedelta(hours=1)
+    target_date = wat_now.date() + timedelta(days=channel.publish_schedule_day_offset or 0)
+    target_wat = datetime(target_date.year, target_date.month, target_date.day, channel.publish_schedule_hour or 8)
+    return target_wat - timedelta(hours=1)  # back to UTC for storage
+
+
+SCHEDULED_PUBLISH_CHECK_INTERVAL_SECONDS = 300  # every 5 min is plenty for a daily-granularity schedule
+
+
+def run_scheduled_publishes():
+    """Publishes any video whose channel is in publish_mode='scheduled' and
+    whose scheduled_publish_at has arrived."""
+    db = SessionLocal()
+    try:
+        due = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.youtube_video_id.is_(None))
+            .filter(Video.scheduled_publish_at.isnot(None))
+            .filter(Video.scheduled_publish_at <= datetime.utcnow())
+            .all()
+        )
+        for video in due:
+            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+            if not channel or channel.publish_mode != "scheduled" or not channel.youtube_refresh_token:
+                continue
+            if not video.output_path:
+                continue
+            output_mp4 = STORAGE_PATH / video.output_path
+            if not output_mp4.exists():
+                logger.warning(f"Scheduled publish skipped for video {video.id}: output file missing on disk.")
+                continue
+            try_publish_to_youtube(db, channel, video, output_mp4)
+    except Exception as e:
+        logger.warning(f"Scheduled-publish pass failed: {e}")
+    finally:
+        db.close()
+
 
 def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path) -> None:
     # video.status is already DONE at this point — progress_stage is reused
@@ -466,6 +522,7 @@ def run_daily_automation():
                 audio_input_path=None,
                 status=VideoStatus.QUEUED.value,
                 estimated_duration_seconds=max(3.0, len(result["script_text"].split()) / 2.5),
+                voice_id=getattr(channel, "voice_id", None),
             )
             db.add(video)
             channel.last_auto_run_date = today_str
@@ -501,6 +558,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     logger.info("Starting Nichecut Background Queue Worker...")
     last_purge = 0.0
     last_automation_check = 0.0
+    last_scheduled_publish_check = 0.0
     while True:
         processed = process_single_queued_video()
         if single_run or _shutdown_requested:
@@ -513,6 +571,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_automation_check > AUTOMATION_CHECK_INTERVAL_SECONDS:
             run_daily_automation()
             last_automation_check = now
+        if now - last_scheduled_publish_check > SCHEDULED_PUBLISH_CHECK_INTERVAL_SECONDS:
+            run_scheduled_publishes()
+            last_scheduled_publish_check = now
         if not processed:
             time.sleep(poll_interval_seconds)
 

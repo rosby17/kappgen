@@ -22,6 +22,9 @@ def run_video_pipeline(
     pre_recorded_audio_path: Optional[Path] = None,
     progress_callback: Optional[Callable[[str, int], None]] = None,
     transcribe_audio: bool = True,
+    voice_id: Optional[str] = None,
+    izivoice_api_key: Optional[str] = None,
+    voice_settings: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Orchestrates the entire video generation pipeline for a given script/audio and channel configuration.
@@ -56,7 +59,7 @@ def run_video_pipeline(
             # the filename-derived title), so transcribe via Izivoice speech-to-text
             # to get accurate subtitle text and word-level timing. This is billable
             # (Izivoice STT credits) — callers can opt out via transcribe_audio=False.
-            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré")
+            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré", api_key=izivoice_api_key)
         else:
             # Skips the paid STT call entirely — subtitles fall back to the video's
             # title evenly spread over the audio's duration (same fallback already
@@ -72,7 +75,7 @@ def run_video_pipeline(
     else:
         progress("Génération de la voix et transcription", 8)
         logger.info("Step 1/7: Generating voiceover audio via TTS...")
-        _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path)
+        _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path, voice_id=voice_id, api_key=izivoice_api_key, voice_settings=voice_settings)
 
     (source_dir / "transcript.json").write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
     
@@ -115,17 +118,29 @@ def run_video_pipeline(
     # to the raw narration prompts above if this fails or isn't configured —
     # library-only channels skip this entirely since prompts aren't used.
     image_style_cfg = channel_config.get("image_style") or {}
+    # AI image credits are capped to the first ten minutes. The resulting
+    # per-video pool is shuffled for later scenes by fetch_or_generate_images.
+    # Library/hybrid modes keep their existing behavior because they either use
+    # creator-owned assets or already generate only half of the requested set.
+    ai_original_window_seconds = 10 * 60
+    ai_unique_scene_count = sum(1 for segment in segments if segment["start"] < ai_original_window_seconds)
     if image_style_cfg.get("source") in ("ai_generated", "hybrid"):
+        prompt_source = prompts[:ai_unique_scene_count] if image_style_cfg.get("source") == "ai_generated" else prompts
         directed_prompts = build_scene_prompts(
             script_text=script_text or "",
-            segment_texts=prompts,
+            segment_texts=prompt_source,
             style_prompt=image_style_cfg.get("style_prompt", ""),
             niche=channel_config.get("niche", ""),
         )
         if directed_prompts:
-            prompts = directed_prompts
+            prompts = directed_prompts + prompts[len(directed_prompts):]
 
-    image_paths = fetch_or_generate_images(prompts, images_dir, image_style_cfg)
+    image_paths = fetch_or_generate_images(
+        prompts,
+        images_dir,
+        image_style_cfg,
+        unique_generation_count=ai_unique_scene_count if image_style_cfg.get("source") == "ai_generated" else None,
+    )
     
     # 5. Generate Subtitles ASS file
     logger.info("Step 4/7: Formatting ASS subtitles...")
@@ -256,7 +271,7 @@ def run_video_pipeline(
 
     # 8. Assemble Final Video Output
     logger.info("Step 7/7: Assembling final 1080p MP4...")
-    progress("Assemblage du MP4 final", 90)
+    progress("Montage final", 90)
     final_output_path = output_dir / "output.mp4"
     assemble_final_video(
         clip_paths=clip_paths,
@@ -417,6 +432,7 @@ def regenerate_scene_audio(
     output_dir: Path,
     scene_index: int,
     new_text: str,
+    izivoice_api_key: Optional[str] = None,
 ) -> Path:
     """
     Re-records one scene's narration via TTS and re-times the whole video
@@ -444,7 +460,13 @@ def regenerate_scene_audio(
     # 1. Re-record this scene's narration.
     audio_segments_dir = source_dir / "audio_segments"
     tmp_audio_path = audio_segments_dir / f"_tmp_scene_{scene_index}.mp3"
-    _, snippet_transcript = generate_voiceover(new_text, tmp_audio_path)
+    _, snippet_transcript = generate_voiceover(
+        new_text,
+        tmp_audio_path,
+        voice_id=channel_config.get("voice_id"),
+        api_key=izivoice_api_key,
+        voice_settings=channel_config.get("voice_settings") or {},
+    )
     new_duration = max(snippet_transcript.get("duration", 0.5), 0.5)
     old_duration = scene["duration"]
     delta_duration = new_duration - old_duration

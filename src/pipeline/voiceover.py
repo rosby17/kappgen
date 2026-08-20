@@ -39,8 +39,8 @@ def synthetic_word_timings(text: str, duration: float) -> List[Dict[str, Any]]:
     return timings
 
 
-def _izivoice_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
+def _izivoice_headers(api_key: Optional[str] = None) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {api_key or IZIVOICE_API_KEY}"}
 
 
 def _post_with_retry(client: httpx.Client, url: str, max_retries: int = 5, **kwargs) -> httpx.Response:
@@ -60,7 +60,7 @@ def _post_with_retry(client: httpx.Client, url: str, max_retries: int = 5, **kwa
     return resp
 
 
-def _poll_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
+def _poll_task(task_id: str, client: httpx.Client, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Polls GET /tasks/{task_id} until status is 'done' or 'error' (or timeout).
     Transient 5xx/429 responses (observed intermittently from Izivoice) are
     retried instead of aborting the whole transcription — the underlying task
@@ -68,7 +68,7 @@ def _poll_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     elapsed = 0.0
     while elapsed < TASK_POLL_TIMEOUT_SECONDS:
         try:
-            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(), timeout=30.0)
+            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(api_key), timeout=30.0)
             if resp.status_code == 429 or resp.status_code >= 500:
                 logger.warning(f"Izivoice task poll for {task_id} returned {resp.status_code}, retrying...")
                 time.sleep(TASK_POLL_INTERVAL_SECONDS)
@@ -91,17 +91,20 @@ def _poll_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     raise TimeoutError(f"Izivoice task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s")
 
 
-def _get_default_voice_id(client: httpx.Client) -> str:
+def _get_default_voice_id(client: httpx.Client, api_key: Optional[str] = None) -> str:
     """Returns the configured voice_id, or auto-picks the first available voice and caches it."""
     global _cached_voice_id
     if IZIVOICE_VOICE_ID:
         return IZIVOICE_VOICE_ID
-    if _cached_voice_id:
+    # The global cache belongs only to NicheCut's shared account. Reusing it
+    # for BYOK accounts could select a voice that does not exist for that user.
+    is_personal_key = bool(api_key and api_key != IZIVOICE_API_KEY)
+    if _cached_voice_id and not is_personal_key:
         return _cached_voice_id
 
     resp = client.get(
         f"{IZIVOICE_BASE_URL}/voices",
-        headers=_izivoice_headers(),
+        headers=_izivoice_headers(api_key),
         params={"page": 1, "page_size": 1, "language": "fr"},
         timeout=30.0
     )
@@ -112,7 +115,7 @@ def _get_default_voice_id(client: httpx.Client) -> str:
         # Retry without language filter as a fallback
         resp = client.get(
             f"{IZIVOICE_BASE_URL}/voices",
-            headers=_izivoice_headers(),
+            headers=_izivoice_headers(api_key),
             params={"page": 1, "page_size": 1},
             timeout=30.0
         )
@@ -122,9 +125,11 @@ def _get_default_voice_id(client: httpx.Client) -> str:
     if not voices:
         raise RuntimeError("No voice_id configured and Izivoice /voices returned no voices to auto-select.")
 
-    _cached_voice_id = voices[0]["voice_id"]
-    logger.info(f"Auto-selected Izivoice voice_id={_cached_voice_id} ({voices[0].get('name')})")
-    return _cached_voice_id
+    selected_id = voices[0]["voice_id"]
+    if not is_personal_key:
+        _cached_voice_id = selected_id
+    logger.info(f"Auto-selected Izivoice voice_id={selected_id} ({voices[0].get('name')})")
+    return selected_id
 
 
 def generate_mock_voiceover(script_text: str, output_audio_path: Path) -> Tuple[Path, Dict[str, Any]]:
@@ -269,7 +274,7 @@ def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
     return sorted(chunk_dir.glob("chunk_*.mp3"))
 
 
-def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict[str, Any]:
+def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None) -> Dict[str, Any]:
     """
     Transcribes an audio file via Izivoice's speech-to-text, chunking long files
     (10min+/3h videos) to stay under the API's per-request size limit, and stitching
@@ -295,13 +300,13 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
                         resp = _post_with_retry(
                             client,
                             f"{IZIVOICE_BASE_URL}/speech-to-text",
-                            headers=_izivoice_headers(),
+                            headers=_izivoice_headers(api_key),
                             files={"file": (chunk_path.name, f, "audio/mpeg")},
                             timeout=60.0
                         )
                     resp.raise_for_status()
                     task_id = resp.json()["task_id"]
-                    task = _poll_task(task_id, client)
+                    task = _poll_task(task_id, client, api_key)
                     metadata = task.get("metadata", {}) or {}
                     chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
                 except Exception as chunk_err:
@@ -352,13 +357,13 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "") -> Dict
     return {"text": full_text, "duration": total_duration, "words": all_words}
 
 
-def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "") -> Dict[str, Any]:
+def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None) -> Dict[str, Any]:
     """
     Public entrypoint used by the orchestrator for pre-recorded/uploaded audio:
     real transcription via Izivoice speech-to-text when configured, else a
     synthetic even-split alignment over the fallback title/text.
     """
-    if not IZIVOICE_API_KEY:
+    if not (api_key or IZIVOICE_API_KEY):
         logger.info("IZIVOICE_API_KEY not set. Using synthetic subtitle timing for uploaded audio.")
         duration = get_audio_duration(audio_path)
         return {
@@ -368,7 +373,7 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "") -> 
         }
 
     try:
-        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text)
+        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key)
     except Exception as e:
         logger.warning(f"Izivoice speech-to-text failed ({e}). Falling back to synthetic subtitle timing.")
         duration = get_audio_duration(audio_path)
@@ -379,7 +384,7 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "") -> 
         }
 
 
-def generate_voiceover(script_text: str, output_audio_path: Path) -> Tuple[Path, Dict[str, Any]]:
+def generate_voiceover(script_text: str, output_audio_path: Path, voice_id: Optional[str] = None, api_key: Optional[str] = None, voice_settings: Optional[Dict[str, Any]] = None) -> Tuple[Path, Dict[str, Any]]:
     """
     Generates voiceover TTS audio via the Izivoice API (or local fallback when no key is set),
     then derives word-level subtitle timing via Izivoice speech-to-text on the resulting audio
@@ -387,27 +392,36 @@ def generate_voiceover(script_text: str, output_audio_path: Path) -> Tuple[Path,
     """
     script_text = clean_script_text(script_text)
 
-    if not IZIVOICE_API_KEY:
+    effective_key = api_key or IZIVOICE_API_KEY
+    if not effective_key:
         logger.info("IZIVOICE_API_KEY not set. Using local TTS fallback.")
         return generate_mock_voiceover(script_text, output_audio_path)
 
     try:
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
         with httpx.Client() as client:
-            voice_id = _get_default_voice_id(client)
+            voice_id = voice_id or _get_default_voice_id(client, effective_key)
 
             logger.info("Requesting voiceover from Izivoice /text-to-speech...")
             resp = _post_with_retry(
                 client,
                 f"{IZIVOICE_BASE_URL}/text-to-speech",
-                headers=_izivoice_headers(),
-                json={"text": script_text, "voice_id": voice_id},
+                headers=_izivoice_headers(effective_key),
+                data={
+                    "text": script_text,
+                    "voice_id": voice_id,
+                    "speed": str((voice_settings or {}).get("speed", 0.845)),
+                    "with_transcript": "false",
+                    "stability": str((voice_settings or {}).get("stability", 0.8)),
+                    "similarity_boost": str((voice_settings or {}).get("similarity_boost", 0.9)),
+                    "style": str((voice_settings or {}).get("style", 0.0)),
+                },
                 timeout=30.0
             )
             resp.raise_for_status()
             task_id = resp.json()["task_id"]
 
-            task = _poll_task(task_id, client)
+            task = _poll_task(task_id, client, effective_key)
             audio_url = (task.get("metadata") or {}).get("audio_url")
             if not audio_url:
                 raise ValueError(f"Unexpected Izivoice text-to-speech response: {task}")
@@ -416,7 +430,7 @@ def generate_voiceover(script_text: str, output_audio_path: Path) -> Tuple[Path,
             audio_resp.raise_for_status()
             output_audio_path.write_bytes(audio_resp.content)
 
-        transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text)
+        transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key)
         return output_audio_path, transcript_info
 
     except Exception as e:

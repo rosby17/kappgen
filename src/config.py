@@ -11,6 +11,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
+# Used to encrypt connected customers' Izivoice API keys at rest. In production
+# set a long, stable random value; changing it invalidates stored connections.
+CREDENTIAL_ENCRYPTION_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 # Separate from the login flow above (which only verifies an id_token client-side).
 # YouTube publishing needs a full server-side OAuth2 authorization-code exchange

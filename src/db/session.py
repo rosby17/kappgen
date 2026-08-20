@@ -54,12 +54,14 @@ def init_db():
             "is_reassembly": "ALTER TABLE videos ADD COLUMN is_reassembly BOOLEAN DEFAULT FALSE NOT NULL",
             "edit_assets_purged_at": "ALTER TABLE videos ADD COLUMN edit_assets_purged_at TIMESTAMP",
             "transcribe_audio": "ALTER TABLE videos ADD COLUMN transcribe_audio BOOLEAN DEFAULT TRUE NOT NULL",
+            "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
             "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",
             "youtube_video_id": "ALTER TABLE videos ADD COLUMN youtube_video_id VARCHAR(32)",
             "youtube_published_at": "ALTER TABLE videos ADD COLUMN youtube_published_at TIMESTAMP",
             "youtube_publish_error": "ALTER TABLE videos ADD COLUMN youtube_publish_error TEXT",
             "youtube_description": "ALTER TABLE videos ADD COLUMN youtube_description TEXT",
+            "scheduled_publish_at": "ALTER TABLE videos ADD COLUMN scheduled_publish_at TIMESTAMP",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
@@ -73,6 +75,9 @@ def init_db():
             "picture_url": "ALTER TABLE users ADD COLUMN picture_url VARCHAR(1024)",
             "phone": "ALTER TABLE users ADD COLUMN phone VARCHAR(50)",
             "auth_provider": "ALTER TABLE users ADD COLUMN auth_provider VARCHAR(50) DEFAULT 'password'",
+            "izivoice_api_key_encrypted": "ALTER TABLE users ADD COLUMN izivoice_api_key_encrypted TEXT",
+            "izivoice_key_prefix": "ALTER TABLE users ADD COLUMN izivoice_key_prefix VARCHAR(20)",
+            "izivoice_connected_at": "ALTER TABLE users ADD COLUMN izivoice_connected_at TIMESTAMP",
         }
         with engine.begin() as conn:
             for col_name, ddl in migrations.items():
@@ -87,6 +92,9 @@ def init_db():
             "automation_style_prompt": "ALTER TABLE channels ADD COLUMN automation_style_prompt TEXT",
             "last_auto_run_date": "ALTER TABLE channels ADD COLUMN last_auto_run_date VARCHAR(10)",
             "script_structure": "ALTER TABLE channels ADD COLUMN script_structure JSON",
+            "voice_id": "ALTER TABLE channels ADD COLUMN voice_id VARCHAR(255)",
+            "voice_name": "ALTER TABLE channels ADD COLUMN voice_name VARCHAR(255)",
+            "voice_settings": "ALTER TABLE channels ADD COLUMN voice_settings JSON",
             "youtube_channel_id": "ALTER TABLE channels ADD COLUMN youtube_channel_id VARCHAR(64)",
             "youtube_channel_title": "ALTER TABLE channels ADD COLUMN youtube_channel_title VARCHAR(255)",
             "youtube_channel_handle": "ALTER TABLE channels ADD COLUMN youtube_channel_handle VARCHAR(255)",
@@ -95,6 +103,9 @@ def init_db():
             "youtube_refresh_token": "ALTER TABLE channels ADD COLUMN youtube_refresh_token TEXT",
             "youtube_token_expiry": "ALTER TABLE channels ADD COLUMN youtube_token_expiry TIMESTAMP",
             "youtube_connected_at": "ALTER TABLE channels ADD COLUMN youtube_connected_at TIMESTAMP",
+            "publish_mode": "ALTER TABLE channels ADD COLUMN publish_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
+            "publish_schedule_hour": "ALTER TABLE channels ADD COLUMN publish_schedule_hour INTEGER DEFAULT 8 NOT NULL",
+            "publish_schedule_day_offset": "ALTER TABLE channels ADD COLUMN publish_schedule_day_offset INTEGER DEFAULT 1 NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

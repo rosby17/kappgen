@@ -117,8 +117,9 @@ def assemble_final_video(
     logo_full_path = (STORAGE_PATH / logo_path_str) if logo_path_str else None
     has_logo = bool(branding.get("logo_enabled", True) and logo_full_path and logo_full_path.exists())
 
-    # NicheCut watermark, bottom-left, small — on by default (free-tier), toggleable
-    # per channel via effects_config.watermark_enabled.
+    # Free-tier NicheCut watermark. The official horizontal logo is deliberately
+    # large and centered: a corner mark can be removed with a trivial crop or
+    # covered by another logo. Paid plans disable it through watermark_enabled.
     has_watermark = bool(effects.get("watermark_enabled", True) and WATERMARK_PATH.exists())
 
     # Crossfade chain needs each clip's real duration to compute cumulative
@@ -191,10 +192,10 @@ def assemble_final_video(
 
     if has_watermark:
         watermark_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
-        # Small, semi-transparent, bottom-right — a discreet "made with NicheCut"
-        # mark rather than a competing brand element.
-        filter_parts.append(f"[{watermark_index}:v]scale=200:-1,format=rgba,colorchannelmixer=aa=0.75[wm]")
-        filter_parts.append(f"[{base_label}][wm]overlay=W-w-30:H-h-30[v_wm]")
+        # Roughly 47% of a 1920px frame, with low opacity so the content remains
+        # watchable while the free export cannot be cleaned by cropping a corner.
+        filter_parts.append(f"[{watermark_index}:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.14[wm]")
+        filter_parts.append(f"[{base_label}][wm]overlay=(W-w)/2:(H-h)/2[v_wm]")
         base_label = "v_wm"
 
     if filter_parts:

@@ -70,7 +70,7 @@ class EffectsConfig(BaseModel):
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
-    watermark_enabled: bool = True       # small "Créé avec NicheCut" mark, bottom-left — free-tier default; toggleable
+    watermark_enabled: bool = True       # large centered official logo at low opacity — free-tier default
 
 class ChannelCreate(BaseModel):
     name: str
@@ -83,6 +83,12 @@ class ChannelCreate(BaseModel):
     automation_mode: str = "manual"  # "manual" | "auto"
     automation_style_prompt: Optional[str] = None
     script_structure: Optional[dict] = None
+    voice_id: Optional[str] = None
+    voice_name: Optional[str] = None
+    voice_settings: Optional[dict] = None
+    publish_mode: str = "manual"  # "auto" | "scheduled" | "manual"
+    publish_schedule_hour: int = 8
+    publish_schedule_day_offset: int = 1
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -95,6 +101,12 @@ class ChannelUpdate(BaseModel):
     automation_mode: Optional[str] = None
     automation_style_prompt: Optional[str] = None
     script_structure: Optional[dict] = None
+    voice_id: Optional[str] = None
+    voice_name: Optional[str] = None
+    voice_settings: Optional[dict] = None
+    publish_mode: Optional[str] = None
+    publish_schedule_hour: Optional[int] = None
+    publish_schedule_day_offset: Optional[int] = None
 
 class VideoCreate(BaseModel):
     channel_id: str
@@ -126,6 +138,10 @@ class ResetPasswordPayload(BaseModel):
     email: str
     code: str
     new_password: str
+
+class IzivoiceConnectionPayload(BaseModel):
+    user_id: str
+    api_key: str
 
 class UserResponse(BaseModel):
     id: str

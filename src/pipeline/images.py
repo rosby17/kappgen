@@ -1,5 +1,6 @@
 import json
 import time
+import random
 import httpx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -82,7 +83,8 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client) -> P
 def fetch_or_generate_images(
     prompts: List[str],
     output_dir: Path,
-    image_style: Optional[dict] = None
+    image_style: Optional[dict] = None,
+    unique_generation_count: Optional[int] = None,
 ) -> List[Path]:
     """
     Fetches images for each scene: either generated via the ai33.pro AI image API
@@ -93,6 +95,22 @@ def fetch_or_generate_images(
     source_type = image_style.get("source", "library") if image_style else "library"
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
+
+    def expand_randomly(unique_images: List[Path], required_count: int) -> List[Path]:
+        """Fill a long timeline from a per-video original pool without obvious
+        adjacent repeats. Every cycle is reshuffled, so two videos with the
+        same duration still receive a different illustration sequence."""
+        if not unique_images:
+            return []
+        result = list(unique_images[:required_count])
+        while len(result) < required_count:
+            cycle = list(unique_images)
+            random.shuffle(cycle)
+            if result and len(cycle) > 1 and cycle[0] == result[-1]:
+                swap_index = random.randrange(1, len(cycle))
+                cycle[0], cycle[swap_index] = cycle[swap_index], cycle[0]
+            result.extend(cycle)
+        return result[:required_count]
 
     def generate_images(ai_prompts: List[str], prefix: str = "ai_img") -> List[Path]:
         if not IZIVOICE_API_KEY:
@@ -137,7 +155,20 @@ def fetch_or_generate_images(
         return generated_paths
 
     if source_type == "ai_generated":
-        return generate_images(prompts)
+        # Generate an original visual pool only for the opening window (10 min
+        # by default, calculated by the orchestrator), then reuse that video's
+        # own pool in a fresh random order. This caps image credits for a 1-hour
+        # video at the same cost as a 10-minute one while keeping each video's
+        # visual identity original.
+        generation_count = min(len(prompts), unique_generation_count or len(prompts))
+        originals = generate_images(prompts[:generation_count])
+        sequence = expand_randomly(originals, len(prompts))
+        reused = max(0, len(sequence) - len(originals))
+        logger.info(
+            f"AI visual budget: generated {len(originals)} original image(s), "
+            f"reused them across {reused} later scene(s)."
+        )
+        return sequence
 
     if source_type == "hybrid":
         local_count = (len(prompts) + 1) // 2

@@ -67,6 +67,7 @@ async def submit_video_subject(
     script_text: Optional[str] = Form(""),
     audio_files: Optional[List[UploadFile]] = File(None),
     transcribe_audio: bool = Form(True),
+    voice_id: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -120,6 +121,7 @@ async def submit_video_subject(
                 status=VideoStatus.QUEUED.value,
                 estimated_duration_seconds=estimated_duration,
                 transcribe_audio=transcribe_audio,
+                voice_id=voice_id.strip() if voice_id else channel.voice_id,
             )
             db.add(video)
             created_videos.append(video)
@@ -152,6 +154,7 @@ async def submit_video_subject(
             audio_input_path=None,
             status=VideoStatus.QUEUED.value,
             estimated_duration_seconds=estimated_duration,
+            voice_id=voice_id.strip() if voice_id else channel.voice_id,
         )
         db.add(video)
         db.commit()

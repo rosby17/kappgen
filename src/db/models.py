@@ -15,6 +15,9 @@ class User(Base):
     picture_url = Column(String(1024), nullable=True)
     phone = Column(String(50), nullable=True)
     auth_provider = Column(String(50), nullable=False, default="password")  # "password" | "google"
+    izivoice_api_key_encrypted = Column(Text, nullable=True)
+    izivoice_key_prefix = Column(String(20), nullable=True)
+    izivoice_connected_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -29,6 +32,9 @@ class User(Base):
             "picture_url": self.picture_url,
             "phone": self.phone,
             "auth_provider": self.auth_provider,
+            "izivoice_connected": bool(self.izivoice_api_key_encrypted),
+            "izivoice_key_prefix": self.izivoice_key_prefix,
+            "izivoice_connected_at": self.izivoice_connected_at.isoformat() if self.izivoice_connected_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "channel_count": len(self.channels) if self.channels else 0
         }
@@ -97,6 +103,21 @@ class Channel(Base):
     # See src/pipeline/script_writer.py DEFAULT_SCRIPT_STRUCTURE for the shape
     # and fallback used when this is null.
     script_structure = Column(JSON, nullable=True)
+    voice_id = Column(String(255), nullable=True)
+    voice_name = Column(String(255), nullable=True)
+    voice_settings = Column(JSON, nullable=True)
+
+    # How a *finished* video actually reaches YouTube — independent of
+    # automation_mode (which only governs whether the script/topic itself is
+    # picked automatically). Always the creator's choice:
+    # "auto": publish immediately once the render finishes.
+    # "scheduled": wait for a fixed daily time (publish_schedule_hour, WAT),
+    #   publish_schedule_day_offset days after the render finishes.
+    # "manual" (default): never auto-publish — the creator downloads and
+    #   posts it themselves, or publishes on demand from NicheCut.
+    publish_mode = Column(String(20), nullable=False, default="manual")
+    publish_schedule_hour = Column(Integer, nullable=False, default=8)  # 0-23, WAT
+    publish_schedule_day_offset = Column(Integer, nullable=False, default=1)  # 0 = same day, 1 = next day
 
     # YouTube connection (per channel) — OAuth2 refresh token lets the worker
     # publish auto-generated videos with zero human input. access_token +
@@ -131,6 +152,12 @@ class Channel(Base):
             "automation_style_prompt": self.automation_style_prompt,
             "last_auto_run_date": self.last_auto_run_date,
             "script_structure": self.script_structure,
+            "voice_id": self.voice_id,
+            "voice_name": self.voice_name,
+            "voice_settings": self.voice_settings or {"speed": 0.845, "stability": 0.8, "similarity_boost": 0.9, "style": 0.0},
+            "publish_mode": self.publish_mode or "manual",
+            "publish_schedule_hour": self.publish_schedule_hour,
+            "publish_schedule_day_offset": self.publish_schedule_day_offset,
             "youtube_connected": bool(self.youtube_refresh_token),
             "youtube_channel_title": self.youtube_channel_title,
             "youtube_channel_handle": self.youtube_channel_handle,
@@ -189,6 +216,7 @@ class Video(Base):
     # credits transcribing the upload for accurate subtitles, or skip it (free,
     # approximate title-based captions instead). Opt-out toggle in the wizard.
     transcribe_audio = Column(Boolean, nullable=False, default=True)
+    voice_id = Column(String(255), nullable=True)
     # Set alongside is_reassembly=True + status=QUEUED by the Studio editor's
     # scene endpoints; tells the worker which lightweight edit function to run
     # instead of the full pipeline. JSON: {"type": "image"|"subtitle_text"|"audio",
@@ -203,6 +231,9 @@ class Video(Base):
     # (alongside `title`, reused for this) so the creator can review/edit both
     # before publishing instead of only seeing them at the moment of upload.
     youtube_description = Column(Text, nullable=True)
+    # Set when the channel's publish_mode is "scheduled" — the worker leaves
+    # this video alone until this time, then publishes it automatically.
+    scheduled_publish_at = Column(DateTime, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -230,8 +261,10 @@ class Video(Base):
             "purged_at": self.purged_at.isoformat() if self.purged_at else None,
             "editable": bool(self.status == VideoStatus.DONE.value and self.output_path and not self.edit_assets_purged_at),
             "transcribe_audio": self.transcribe_audio,
+            "voice_id": self.voice_id,
             "youtube_video_id": self.youtube_video_id,
             "youtube_published_at": self.youtube_published_at.isoformat() if self.youtube_published_at else None,
             "youtube_publish_error": self.youtube_publish_error,
             "youtube_description": self.youtube_description,
+            "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
         }
