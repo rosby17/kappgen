@@ -683,6 +683,15 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
             # Replace the placeholder identity set during setup with the
             # creator's real YouTube channel name, now that we know it.
             channel.name = channel_info["title"]
+            # A manually-uploaded logo otherwise always wins over the YouTube
+            # avatar in the UI (an explicit creator choice) — but connecting
+            # is itself an explicit "sync my real identity" action, so any
+            # earlier placeholder logo gets cleared to let the real photo
+            # show through. Uploading a new one afterward still overrides it.
+            branding = dict(channel.branding or {})
+            if branding.get("logo_path"):
+                branding["logo_path"] = None
+                channel.branding = branding
             suggested_niche = _suggest_niche_for_channel(db, channel_info["title"], channel_info.get("description", ""))
             if suggested_niche:
                 channel.niche = suggested_niche
