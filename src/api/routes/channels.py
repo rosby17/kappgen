@@ -107,7 +107,14 @@ def list_voice_catalog(
             response = client.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params=params)
             response.raise_for_status()
             data = (response.json().get("data") or {})
-        return {"voices": data.get("voices") or [], "has_more": bool(data.get("has_more")), "page": page}
+        batch = data.get("voices") or []
+        # Izivoice's `has_more` flag has been unreliable (see note above about
+        # page indexing) — a full page back is treated as "there might be
+        # more" regardless of what the flag says, so the picker never stops
+        # short of the real end of the catalog. Only a short/empty page is
+        # trusted as the actual end.
+        has_more = bool(data.get("has_more")) or len(batch) >= 100
+        return {"voices": batch, "has_more": has_more, "page": page}
 
     max_pages = 3 if search else 10
     all_voices = []
@@ -124,8 +131,11 @@ def list_voice_catalog(
             data = (response.json().get("data") or {})
             batch = data.get("voices") or []
             all_voices.extend(batch)
-            has_more = bool(data.get("has_more"))
-            if not has_more or not batch:
+            # Same unreliable-flag issue as the single-page branch above: a
+            # full page is treated as "keep going" even if the provider's
+            # has_more says otherwise, so we don't cut the catalog short.
+            has_more = bool(data.get("has_more")) or len(batch) >= 100
+            if not batch:
                 break
     return {"voices": all_voices, "has_more": has_more, "next_page": max_pages}
 
