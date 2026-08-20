@@ -89,6 +89,17 @@ def process_single_queued_video() -> bool:
                     scene_index=edit["scene_index"],
                     new_text=edit.get("text") or "",
                 )
+                # Keep the database's canonical script aligned with the
+                # scene-level narration edits. YouTube metadata generation and
+                # the Studio header both consume this field later.
+                try:
+                    import json
+                    transcript_path = video_dir / "source" / "transcript.json"
+                    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+                    if transcript.get("text"):
+                        video.script_text = transcript["text"]
+                except Exception as sync_err:
+                    logger.warning(f"Could not sync edited script for video {video.id}: {sync_err}")
             else:
                 output_mp4 = reassemble_video_output(channel_config=channel_config, output_dir=video_dir)
             video.pending_edit = None
@@ -153,6 +164,21 @@ def process_single_queued_video() -> bool:
         # "Vidéo prête" shows immediately regardless of how long this takes.
         try_ensure_sd_variant(output_mp4)
 
+        # Propose a ready-to-publish YouTube title/description as soon as the
+        # video exists, for every channel — not just auto-mode ones — so the
+        # creator always has something reviewable/editable rather than a blank
+        # field until the moment they hit "Publier".
+        if not video.title or not video.youtube_description:
+            try:
+                meta = youtube_metadata.generate_metadata(video, channel)
+                if not video.title:
+                    video.title = meta["title"]
+                if not video.youtube_description:
+                    video.youtube_description = meta["description"]
+                db.commit()
+            except Exception as e:
+                logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
+
         # Zero-human-input loop's final step: for a channel on full autopilot
         # with a connected YouTube account, publish the finished video right
         # away instead of leaving it for the creator to download and upload
@@ -186,7 +212,14 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     video.progress_stage = "Préparation de la publication YouTube"
     db.commit()
 
+    # Reuse the title/description already proposed (and possibly edited by
+    # the creator) right after the render finished, instead of silently
+    # regenerating and overwriting them at the last second.
     meta = youtube_metadata.generate_metadata(video, channel)
+    if video.title:
+        meta["title"] = video.title
+    if video.youtube_description:
+        meta["description"] = video.youtube_description
     thumbnail_path = None
     try:
         video.progress_stage = "Génération de la miniature"

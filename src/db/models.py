@@ -199,6 +199,10 @@ class Video(Base):
     youtube_video_id = Column(String(32), nullable=True)
     youtube_published_at = Column(DateTime, nullable=True)
     youtube_publish_error = Column(Text, nullable=True)
+    # AI-proposed YouTube description, generated as soon as the render finishes
+    # (alongside `title`, reused for this) so the creator can review/edit both
+    # before publishing instead of only seeing them at the moment of upload.
+    youtube_description = Column(Text, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -229,4 +233,5 @@ class Video(Base):
             "youtube_video_id": self.youtube_video_id,
             "youtube_published_at": self.youtube_published_at.isoformat() if self.youtube_published_at else None,
             "youtube_publish_error": self.youtube_publish_error,
+            "youtube_description": self.youtube_description,
         }

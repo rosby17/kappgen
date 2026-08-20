@@ -1,5 +1,6 @@
 import uuid
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
@@ -13,6 +14,8 @@ from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_d
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
+from src.pipeline import youtube_publisher
+from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -204,6 +207,123 @@ def download_video_audio(video_id: str, db: Session = Depends(get_db)):
     audio_path = ensure_extracted_audio(source_path)
     return FileResponse(audio_path, media_type="audio/mp4", filename=f"nichecut-{video_id}-audio.m4a")
 
+
+@router.post("/{video_id}/youtube/publish")
+def publish_video_to_youtube(video_id: str, db: Session = Depends(get_db)):
+    """Generate the packaging and immediately publish a ready video."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Vidéo introuvable.")
+    if video.status != VideoStatus.DONE.value or not video.output_path:
+        raise HTTPException(status_code=409, detail="La vidéo doit être prête avant sa publication.")
+    if video.youtube_video_id:
+        return {
+            "status": "already_published",
+            "youtube_video_id": video.youtube_video_id,
+            "youtube_url": f"https://youtu.be/{video.youtube_video_id}",
+            "video": video.to_dict(),
+        }
+
+    channel = video.channel
+    if not channel or not channel.youtube_refresh_token:
+        auth_url = None
+        if channel and youtube_publisher.is_configured():
+            auth_url = youtube_publisher.build_auth_url(channel.id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "youtube_auth_required",
+                "message": "Connecte cette chaîne à YouTube avant de publier.",
+                "auth_url": auth_url,
+            },
+        )
+
+    video_path = STORAGE_PATH / video.output_path
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+
+    metadata = generate_metadata(video, channel)
+    # Honor whatever title/description the creator is currently looking at
+    # (proposed right after render, editable via PATCH /{id}/youtube-metadata)
+    # instead of silently regenerating and replacing it at publish time.
+    if video.title:
+        metadata["title"] = video.title[:100]
+    if video.youtube_description:
+        metadata["description"] = video.youtube_description[:5000]
+    publication_dir = video_path.parent / "publication"
+    thumbnail_path = generate_thumbnail(
+        video_path,
+        publication_dir / "youtube-thumbnail.jpg",
+        metadata["thumbnail_text"],
+    )
+    try:
+        youtube_id = youtube_publisher.publish_video_for_channel(
+            channel,
+            video_path,
+            metadata["title"],
+            metadata["description"],
+            thumbnail_path=thumbnail_path,
+        )
+        video.title = metadata["title"]
+        video.youtube_video_id = youtube_id
+        video.youtube_published_at = datetime.utcnow()
+        video.youtube_publish_error = None
+        db.commit()
+        db.refresh(video)
+        return {
+            "status": "published",
+            "youtube_video_id": youtube_id,
+            "youtube_url": f"https://youtu.be/{youtube_id}",
+            "metadata": metadata,
+            "video": video.to_dict(),
+        }
+    except Exception as exc:
+        db.rollback()
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if video:
+            video.youtube_publish_error = str(exc)[:500]
+            db.commit()
+        raise HTTPException(status_code=502, detail=f"Publication YouTube impossible : {str(exc)[:300]}")
+
+class YoutubeMetadataUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+@router.patch("/{video_id}/youtube-metadata")
+def update_youtube_metadata(video_id: str, payload: YoutubeMetadataUpdate, db: Session = Depends(get_db)):
+    """Lets the creator review/edit the AI-proposed YouTube title (max 100
+    chars, YouTube's own limit) and description before publishing."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if payload.title is not None:
+        title = payload.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="Le titre ne peut pas être vide.")
+        video.title = title[:100]
+    if payload.description is not None:
+        video.youtube_description = payload.description.strip()[:5000]
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+@router.post("/{video_id}/youtube-metadata/regenerate")
+def regenerate_youtube_metadata(video_id: str, db: Session = Depends(get_db)):
+    """Asks the AI for a fresh title/description proposal, discarding whatever
+    is currently set — used by the "Régénérer le titre" action."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    channel = video.channel
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    metadata = generate_metadata(video, channel)
+    video.title = metadata["title"][:100]
+    video.youtube_description = metadata["description"][:5000]
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -285,7 +405,10 @@ def list_video_scenes(video_id: str, db: Session = Depends(get_db)):
             "duration": s["duration"],
             "text": s.get("text", ""),
             "editable_text": s.get("word_start_idx") is not None,
-            "image_url": f"/api/videos/{video_id}/scenes/{s['index']}/image",
+            # API_BASE already ends in /api on the frontend; returning /api/...
+            # here produced /api/api/... and broke every Studio thumbnail.
+            "image_url": f"/videos/{video_id}/scenes/{s['index']}/image",
+            "image_version": int(Path(s["image_path"]).stat().st_mtime) if Path(s["image_path"]).exists() else 0,
         }
         for s in scenes
     ]
@@ -446,7 +569,6 @@ def close_video_edit(video_id: str, db: Session = Depends(get_db)):
         return video.to_dict()
 
     from src.worker.queue_runner import purge_edit_assets
-    from datetime import datetime
     purge_edit_assets(video)
     video.edit_assets_purged_at = datetime.utcnow()
     db.commit()

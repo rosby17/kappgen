@@ -59,6 +59,7 @@ def init_db():
             "youtube_video_id": "ALTER TABLE videos ADD COLUMN youtube_video_id VARCHAR(32)",
             "youtube_published_at": "ALTER TABLE videos ADD COLUMN youtube_published_at TIMESTAMP",
             "youtube_publish_error": "ALTER TABLE videos ADD COLUMN youtube_publish_error TEXT",
+            "youtube_description": "ALTER TABLE videos ADD COLUMN youtube_description TEXT",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
