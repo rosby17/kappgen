@@ -51,6 +51,9 @@ def assemble_final_video(
     # color grade / intensity settings underneath (they just don't apply for now).
     effects_enabled = effects.get("enabled", True)
 
+    # Every grade below is a real, tested ffmpeg filter chain (eq/colorbalance/
+    # colorchannelmixer/hue) — no placeholder options that don't actually change
+    # the render.
     color_mode = effects.get("color_grade", "warm") if effects_enabled else "none"
     if color_mode == "warm":
         video_filters.append("eq=gamma=1.05:saturation=1.15")
@@ -58,6 +61,19 @@ def assemble_final_video(
         video_filters.append("colorbalance=rs=0.1:gs=-0.05:bs=-0.1,eq=saturation=0.85")
     elif color_mode == "dramatic":
         video_filters.append("eq=contrast=1.2:saturation=0.9")
+    elif color_mode == "cool":
+        video_filters.append("colorbalance=rs=-0.08:gs=0.02:bs=0.15,eq=saturation=1.05")
+    elif color_mode == "noir":
+        video_filters.append("hue=s=0,eq=contrast=1.25:brightness=-0.02")
+    elif color_mode == "sepia":
+        video_filters.append("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131:0")
+    elif color_mode == "vibrant":
+        video_filters.append("eq=saturation=1.5:contrast=1.1")
+    elif color_mode == "faded":
+        video_filters.append("eq=contrast=0.82:brightness=0.05:saturation=0.85")
+    elif color_mode == "cinematic":
+        # Teal shadows / orange highlights — the classic blockbuster grade.
+        video_filters.append("colorbalance=rs=0.15:bs=-0.15:rh=-0.05:bh=0.1,eq=contrast=1.1:saturation=1.05")
 
     # Overlay effects — textures layered on top of the whole video, distinct from
     # the color grade above. A channel can combine any number of them at once.
@@ -96,6 +112,25 @@ def assemble_final_video(
         video_filters.append(f"noise=alls={white_noise_alls}:allf=t+u")
     if "vignette" in overlay_effects:
         video_filters.append(f"vignette={vignette_angle:.4f}")
+
+    # Extra textures — each a real, independent, linearly-chainable ffmpeg
+    # filter (no fake/no-op options): fixed-strength since these are meant as
+    # quick stylistic toggles rather than sliders like grain/vignette above.
+    if "chromatic_aberration" in overlay_effects:
+        # Shifts the red/blue channels apart horizontally — the classic lens/VHS fringe look.
+        video_filters.append("rgbashift=rh=3:bh=-3")
+    if "old_film" in overlay_effects:
+        # Composite: heavy grain + tight vignette + desaturation, like scanned archival footage.
+        video_filters.append("noise=alls=22:allf=t+u,vignette=0.35,eq=saturation=0.7:contrast=1.05")
+    if "flicker" in overlay_effects:
+        # Subtle time-varying brightness pulse — projector/old-film flicker.
+        video_filters.append("eq=eval=frame:brightness='0.035*sin(2*PI*t*3)'")
+    if "soft_focus" in overlay_effects:
+        # Gentle blur only (no blend) — a cheap, real "dreamy" filmic softness.
+        video_filters.append("gblur=sigma=1.4")
+    if "sharpen" in overlay_effects:
+        # Crisper "HD clarity" look — the opposite end of the texture spectrum from grain.
+        video_filters.append("unsharp=5:5:0.8:5:5:0.0")
 
     # Check if FFmpeg build has libass 'subtitles' filter, and whether the client
     # wants subtitles burned in at all (subtitle_style.enabled, default True).
