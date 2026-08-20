@@ -178,16 +178,20 @@ class Channel(Base):
     def to_dict(self):
         # A channel can be saved (and reopened later to finish configuring)
         # before it's actually ready to render a video — completion tracks
-        # the two things a render genuinely needs: a voice, and a visual
+        # the one thing a render genuinely can't proceed without: a visual
         # source with real content behind it. Identity/niche are always set
-        # (they default), so they don't gate this.
+        # (they default), so they don't gate this. The voice does NOT gate
+        # this either — generate_voiceover() auto-picks a default voice_id
+        # when the channel hasn't set one (see voiceover.py's
+        # _get_default_voice_id), so a channel is fully render-ready as
+        # soon as its visuals are, whether or not the creator ever opened
+        # the Voix Off step.
         image_style = self.image_style or {}
         visuals_ready = bool(
             (image_style.get("source") == "ai_generated" and image_style.get("style_prompt"))
             or (image_style.get("source") in ("library", "hybrid") and (image_style.get("library_image_count") or 0) > 0)
         )
-        voice_ready = bool(self.voice_id)
-        completion_percent = 50 + (25 if voice_ready else 0) + (25 if visuals_ready else 0)
+        completion_percent = 100 if visuals_ready else 50
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -202,7 +206,7 @@ class Channel(Base):
             "thumbnail_style": self.thumbnail_style,
             "effects_config": self.effects_config,
             "completion_percent": completion_percent,
-            "is_render_ready": voice_ready and visuals_ready,
+            "is_render_ready": visuals_ready,
             "automation_mode": self.automation_mode or "manual",
             "automation_style_prompt": self.automation_style_prompt,
             "videos_per_day": self.videos_per_day or 1,
