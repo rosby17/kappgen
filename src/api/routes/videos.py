@@ -357,6 +357,26 @@ def resync_youtube_thumbnail(video_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Échec de l'envoi de la miniature à YouTube : {str(exc)[:300]}")
     return {"status": "ok"}
 
+@router.post("/{video_id}/thumbnail/regenerate")
+def regenerate_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
+    """Regenerates this video's NicheCut card thumbnail (output_mp4's sibling
+    thumbnail.jpg) — for videos stuck with a near-black one from before the
+    fallback frame-grab was fixed to pick a representative frame instead of a
+    fixed timestamp. Independent of YouTube publishing (unlike the resync
+    route above), since this thumbnail is shown in the app regardless."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    channel = video.channel
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    video_path = STORAGE_PATH / video.output_path if video.output_path else None
+    if not video_path or not video_path.exists():
+        raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+
+    generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel)
+    return {"status": "ok"}
+
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
