@@ -407,14 +407,20 @@ def generate_voiceover(script_text: str, output_audio_path: Path, voice_id: Opti
                 client,
                 f"{IZIVOICE_BASE_URL}/text-to-speech",
                 headers=_izivoice_headers(effective_key),
-                data={
+                # Izivoice's /text-to-speech now requires a JSON body — sending
+                # this as form-urlencoded (the old `data=` kwarg) gets rejected
+                # with a generic 400 "Requête invalide" regardless of the
+                # voice_id or fields used (confirmed by reproducing the same
+                # 400 with a guaranteed-valid voice_id and minimal fields, then
+                # getting 200 by switching only the transport to `json=`).
+                json={
                     "text": script_text,
                     "voice_id": voice_id,
-                    "speed": str((voice_settings or {}).get("speed", 0.845)),
-                    "with_transcript": "false",
-                    "stability": str((voice_settings or {}).get("stability", 0.8)),
-                    "similarity_boost": str((voice_settings or {}).get("similarity_boost", 0.9)),
-                    "style": str((voice_settings or {}).get("style", 0.0)),
+                    "speed": (voice_settings or {}).get("speed", 0.845),
+                    "with_transcript": False,
+                    "stability": (voice_settings or {}).get("stability", 0.8),
+                    "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
+                    "style": (voice_settings or {}).get("style", 0.0),
                 },
                 timeout=30.0
             )
