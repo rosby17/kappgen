@@ -204,7 +204,7 @@ def process_single_queued_video() -> bool:
             if channel.publish_mode == "auto":
                 try_publish_to_youtube(db, channel, video, output_mp4)
             elif channel.publish_mode == "scheduled":
-                video.scheduled_publish_at = compute_scheduled_publish_at(channel)
+                video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
                 db.commit()
                 logger.info(f"Video {video.id} scheduled to publish at {video.scheduled_publish_at} (channel {channel.id}).")
             # "manual": leave the video as-is — the creator downloads it or
@@ -238,16 +238,40 @@ def _channel_zone(channel: Channel) -> ZoneInfo:
         return ZoneInfo("Africa/Douala")
 
 
-def compute_scheduled_publish_at(channel: Channel) -> datetime:
+def compute_scheduled_publish_at(channel: Channel, video_id: str = "") -> datetime:
     """A finished video is scheduled `publish_schedule_day_offset` days out,
-    at `publish_schedule_hour`, both read in the channel's own timezone —
-    the same daily rule for every video on this channel."""
+    then placed at a randomized time inside the channel's own publish window
+    (automation_window_start/end_hour — despite the name, this window now
+    governs WHEN videos go live, not when scripts get written; see
+    run_daily_automation for why that gating was removed from script
+    generation), rolled forward to the next day allowed by `active_days` if
+    the target day isn't one of them. Falls back to the legacy single
+    publish_schedule_hour when no window is configured, so existing channels
+    that only ever set that field keep behaving the same."""
+    import random
     zone = _channel_zone(channel)
     local_now = datetime.now(zone)
     target_date = local_now.date() + timedelta(days=channel.publish_schedule_day_offset or 0)
+
+    if channel.active_days:
+        for _ in range(8):  # at most one full week forward
+            if target_date.weekday() in channel.active_days:
+                break
+            target_date += timedelta(days=1)
+
+    start_hour = channel.automation_window_start_hour
+    end_hour = channel.automation_window_end_hour
+    if start_hour is not None and end_hour is not None:
+        if end_hour <= start_hour:
+            end_hour = start_hour + 1
+        rng = random.Random(f"{channel.id}-{target_date.isoformat()}-{video_id}")
+        target_hour = rng.randint(start_hour, end_hour - 1)
+    else:
+        target_hour = channel.publish_schedule_hour or 8
+
     target_local = datetime(
         target_date.year, target_date.month, target_date.day,
-        channel.publish_schedule_hour or 8, tzinfo=zone,
+        target_hour, tzinfo=zone,
     )
     return target_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)  # naive UTC for storage
 
@@ -512,8 +536,6 @@ def purge_old_videos_and_uploads():
         db.close()
 
 
-AUTOMATION_WINDOW_START_HOUR = 7
-AUTOMATION_WINDOW_END_HOUR = 11
 AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
 AUTOMATION_RECENT_TITLES_LIMIT = 20
 
@@ -525,29 +547,6 @@ def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     local_now = datetime.now(_channel_zone(channel))
     seconds_into_day = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
     return local_now.strftime("%Y-%m-%d"), seconds_into_day
-
-
-def _channel_target_seconds_today(channel: Channel, today_str: str, index: int = 0, total: int = 1) -> int:
-    """A per-channel-per-day random target time inside the channel's own
-    configurable publication window (start/end hour — every creator picks
-    their own instead of a single 7h-11h imposed on everyone), deterministic
-    from (channel_id, date, index) so it doesn't change across worker
-    restarts (would otherwise let a channel fire twice, or miss its slot, on
-    every redeploy). When a channel generates more than one video a day
-    (videos_per_day > 1), the window is split into `total` equal sub-slots so
-    they land spread through it instead of clustering."""
-    import random
-    start_hour = channel.automation_window_start_hour if channel.automation_window_start_hour is not None else AUTOMATION_WINDOW_START_HOUR
-    end_hour = channel.automation_window_end_hour if channel.automation_window_end_hour is not None else AUTOMATION_WINDOW_END_HOUR
-    if end_hour <= start_hour:
-        end_hour = start_hour + 1
-    rng = random.Random(f"{channel.id}-{today_str}-{index}")
-    window_s = (end_hour - start_hour) * 3600
-    base_s = start_hour * 3600
-    total = max(1, total)
-    sub_start = base_s + (window_s * index) // total
-    sub_end = base_s + (window_s * (index + 1)) // total
-    return rng.randint(sub_start, max(sub_start, sub_end - 1))
 
 
 def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
@@ -608,22 +607,25 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
 def run_daily_automation():
     """
     Zero-human-input daily pipeline: for every channel with automation_mode
-    == "auto", generates up to `videos_per_day` videos per local day, each in
-    its own randomized sub-slot inside the 7h-11h window, via
+    == "auto", generates up to `videos_per_day` videos per local day via
     generate_and_queue_auto_video — same pipeline from there on as a
     manually-submitted text video. `auto_videos_generated_today` tracks how
     many have fired so far today (reset to 0 the moment the local date rolls
     over) so this works without a timezone-aware "count today's videos" query.
+
+    Script generation itself is NOT time-windowed or day-gated — a creator
+    can write scripts whenever the pipeline gets to them; the schedule that
+    matters to the audience is when videos go LIVE, which is controlled
+    separately by automation_window_start/end_hour + active_days at publish
+    time (see compute_scheduled_publish_at). Generating scripts as soon as
+    the day's slot is free also means the daily quota is reliably met even
+    if the worker is briefly down during what used to be a narrow window.
     """
     db = SessionLocal()
     try:
         channels = db.query(Channel).filter(Channel.automation_mode == "auto").all()
         for channel in channels:
-            today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
-            if channel.active_days:
-                weekday = datetime.strptime(today_str, "%Y-%m-%d").weekday()  # 0=Monday..6=Sunday
-                if weekday not in channel.active_days:
-                    continue
+            today_str, _ = _channel_local_date_and_seconds(channel)
             if channel.last_auto_run_date != today_str:
                 channel.last_auto_run_date = today_str
                 channel.auto_videos_generated_today = 0
@@ -633,10 +635,6 @@ def run_daily_automation():
             already = channel.auto_videos_generated_today or 0
             if already >= quota:
                 continue
-
-            target_seconds = _channel_target_seconds_today(channel, today_str, index=already, total=quota)
-            if seconds_into_day < target_seconds:
-                continue  # this slot hasn't arrived yet for this channel
 
             video = generate_and_queue_auto_video(db, channel)
             if not video:
