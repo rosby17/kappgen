@@ -16,6 +16,7 @@ from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTE
 from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
+from src.pipeline.niche_detector import suggest_niche
 from src.utils.credentials import encrypt_credential, izivoice_key_for_user
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -198,6 +199,13 @@ def list_niches(db: Session = Depends(get_db)):
     """
     rows = db.query(Channel.niche).distinct().order_by(Channel.niche).all()
     return [r[0] for r in rows if r[0]]
+
+
+def _suggest_niche_for_channel(db: Session, title: str, description: str) -> Optional[str]:
+    """Best-effort — the creator's own choice (or the manual default) always
+    stays if this fails or isn't confident."""
+    existing = [r[0] for r in db.query(Channel.niche).distinct().all() if r[0]]
+    return suggest_niche(title, description, existing)
 
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(user_id: Optional[str] = None, db: Session = Depends(get_db)):
@@ -675,6 +683,9 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
             # Replace the placeholder identity set during setup with the
             # creator's real YouTube channel name, now that we know it.
             channel.name = channel_info["title"]
+            suggested_niche = _suggest_niche_for_channel(db, channel_info["title"], channel_info.get("description", ""))
+            if suggested_niche:
+                channel.niche = suggested_niche
         db.commit()
         return redirect_with("connected", channel_id=channel.id)
     except Exception as e:

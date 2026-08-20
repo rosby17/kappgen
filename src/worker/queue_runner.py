@@ -289,6 +289,39 @@ def run_scheduled_publishes():
         db.close()
 
 
+YOUTUBE_IDENTITY_SYNC_INTERVAL_SECONDS = 6 * 3600  # every 6 hours — a rename/avatar change on YouTube isn't urgent
+
+
+def run_youtube_identity_sync():
+    """Keeps every connected channel's name/handle/avatar in sync with the
+    real YouTube channel automatically — a creator renaming their channel or
+    changing its photo directly on YouTube used to require a manual 'resync'
+    click here; now it just catches up on its own within a few hours."""
+    db = SessionLocal()
+    try:
+        channels = db.query(Channel).filter(Channel.youtube_refresh_token.isnot(None)).all()
+        for channel in channels:
+            try:
+                access_token = youtube_publisher.get_valid_access_token(channel)
+                if not access_token:
+                    continue
+                channel_info = youtube_publisher.fetch_own_channel_info(access_token)
+                if not channel_info:
+                    continue
+                channel.youtube_channel_id = channel_info["id"]
+                channel.youtube_channel_title = channel_info["title"]
+                channel.youtube_channel_handle = channel_info.get("handle")
+                channel.youtube_channel_thumbnail_url = channel_info.get("thumbnail_url")
+                channel.name = channel_info["title"]
+                db.commit()
+            except Exception as e:
+                logger.warning(f"YouTube identity sync failed for channel {channel.id}: {e}")
+    except Exception as e:
+        logger.warning(f"YouTube identity sync pass failed: {e}")
+    finally:
+        db.close()
+
+
 def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path) -> None:
     # video.status is already DONE at this point — progress_stage is reused
     # purely as a visible "what's happening now" signal so the client sees
@@ -635,6 +668,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_purge = 0.0
     last_automation_check = 0.0
     last_scheduled_publish_check = 0.0
+    last_youtube_identity_sync = 0.0
     while True:
         processed = process_single_queued_video()
         if single_run or _shutdown_requested:
@@ -650,6 +684,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_scheduled_publish_check > SCHEDULED_PUBLISH_CHECK_INTERVAL_SECONDS:
             run_scheduled_publishes()
             last_scheduled_publish_check = now
+        if now - last_youtube_identity_sync > YOUTUBE_IDENTITY_SYNC_INTERVAL_SECONDS:
+            run_youtube_identity_sync()
+            last_youtube_identity_sync = now
         if not processed:
             time.sleep(poll_interval_seconds)
 

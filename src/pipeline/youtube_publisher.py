@@ -100,6 +100,7 @@ def fetch_own_channel_info(access_token: str) -> Optional[dict]:
             "title": snippet["title"],
             "handle": snippet.get("customUrl"),
             "thumbnail_url": thumbnail_url,
+            "description": snippet.get("description") or "",
         }
     except Exception as e:
         logger.warning(f"Failed to fetch YouTube channel info: {e}")
