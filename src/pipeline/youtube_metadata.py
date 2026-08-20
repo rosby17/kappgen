@@ -81,7 +81,12 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     from src.pipeline.images import generate_ai_image
     import httpx
 
-    style_prompt = ((channel.image_style or {}).get("style_prompt") or "").strip()
+    # A dedicated thumbnail reference image (channel.thumbnail_style) takes priority
+    # over the video's own body-image style, since creators often want a distinct
+    # thumbnail look (e.g. a consistent character/composition) that a generic
+    # per-scene style prompt wouldn't capture.
+    thumbnail_style_prompt = ((channel.thumbnail_style or {}).get("style_prompt") or "").strip()
+    style_prompt = thumbnail_style_prompt or ((channel.image_style or {}).get("style_prompt") or "").strip()
     niche = (channel.niche or "").strip()
     prompt = f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, cinematic, high detail, dramatic lighting, eye-catching, no text, no watermark, 16:9"
     ai_path = destination.with_suffix(".ai.jpg")

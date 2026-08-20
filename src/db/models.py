@@ -91,6 +91,11 @@ class Channel(Base):
     music_preference = Column(JSON, nullable=False, default=dict)
     image_style = Column(JSON, nullable=False, default=dict)
     effects_config = Column(JSON, nullable=False, default=dict)
+    # Optional, separate from image_style: a reference image + derived style_prompt
+    # used only for the YouTube thumbnail background, since creators often want a
+    # thumbnail look (e.g. a specific character/composition) distinct from the
+    # video's own body-image style. {"reference_image_path": str, "style_prompt": str}
+    thumbnail_style = Column(JSON, nullable=True)
 
     # Full-auto daily pipeline: "manual" (default, user submits each video)
     # or "auto" (Claude picks a fresh topic + writes the script itself once a
@@ -183,6 +188,7 @@ class Channel(Base):
             "branding": self.branding,
             "music_preference": self.music_preference,
             "image_style": self.image_style,
+            "thumbnail_style": self.thumbnail_style,
             "effects_config": self.effects_config,
             "completion_percent": completion_percent,
             "is_render_ready": voice_ready and visuals_ready,

@@ -396,7 +396,7 @@ def update_video(video_id: str, payload: VideoUpdate, db: Session = Depends(get_
         title = payload.title.strip()
         if not title:
             raise HTTPException(status_code=400, detail="Le titre ne peut pas être vide.")
-        video.script_text = title
+        video.title = title
 
     if payload.approved_for_publish is not None:
         video.approved_for_publish = payload.approved_for_publish

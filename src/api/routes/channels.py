@@ -534,6 +534,65 @@ async def analyze_style_image(file: UploadFile = File(...)):
 
     return {"style_prompt": style_prompt}
 
+@router.post("/{channel_id}/thumbnail-style")
+async def upload_channel_thumbnail_style(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Sets this channel's thumbnail-specific reference image: analyzes it via vision
+    into a reusable style prompt (kept separate from image_style, since the thumbnail
+    look is often deliberately different from the video's body-image style) and stores
+    both the prompt and the reference image itself."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    ext = Path(file.filename or "").suffix.lower()
+    media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
+    if not media_type:
+        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp).")
+
+    contents = await file.read()
+    from src.pipeline.vision import analyze_thumbnail_reference_image
+    try:
+        style_prompt = analyze_thumbnail_reference_image(contents, media_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Analyse de l'image impossible : {e}")
+
+    channel_dir = STORAGE_PATH / "channels" / channel.id
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    for old_ref in channel_dir.glob("thumbnail_reference.*"):
+        old_ref.unlink(missing_ok=True)
+    dest_file = channel_dir / f"thumbnail_reference{ext}"
+    dest_file.write_bytes(contents)
+
+    channel.thumbnail_style = {
+        "reference_image_path": f"channels/{channel.id}/thumbnail_reference{ext}",
+        "style_prompt": style_prompt,
+    }
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
+@router.delete("/{channel_id}/thumbnail-style")
+def delete_channel_thumbnail_style(channel_id: str, db: Session = Depends(get_db)):
+    """Reverts this channel's thumbnails to the default background source (video
+    frame, or image_style's own prompt) by clearing the dedicated thumbnail style."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    thumbnail_style = channel.thumbnail_style or {}
+    ref_path = thumbnail_style.get("reference_image_path")
+    if ref_path:
+        file_path = STORAGE_PATH / ref_path
+        if file_path.exists() and file_path.is_relative_to(STORAGE_PATH / "channels" / channel.id):
+            file_path.unlink(missing_ok=True)
+
+    channel.thumbnail_style = None
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
 @router.post("/library-images/staging")
 async def stage_channel_library_images(
     files: List[UploadFile] = File(...),

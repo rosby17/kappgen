@@ -113,6 +113,7 @@ def init_db():
             "automation_window_end_hour": "ALTER TABLE channels ADD COLUMN automation_window_end_hour INTEGER DEFAULT 11 NOT NULL",
             "active_days": "ALTER TABLE channels ADD COLUMN active_days JSON",
             "auto_videos_generated_today": "ALTER TABLE channels ADD COLUMN auto_videos_generated_today INTEGER DEFAULT 0 NOT NULL",
+            "thumbnail_style": "ALTER TABLE channels ADD COLUMN thumbnail_style JSON",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

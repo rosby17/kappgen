@@ -14,7 +14,20 @@ STYLE_ANALYSIS_INSTRUCTION = (
 )
 
 
-def _analyze_with_anthropic(image_bytes: bytes, media_type: str) -> str:
+THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION = (
+    "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
+    "Look at this reference thumbnail and write a single, dense image-generation prompt "
+    "(comma-separated descriptors, no full sentences, no preamble) that captures its "
+    "reusable visual identity: subject type/archetype (e.g. elderly bearded man in a robe, "
+    "praying), framing/composition, art style/medium, color palette, lighting, mood, and "
+    "level of detail. Unlike a generic style prompt, DO include the recurring subject "
+    "archetype if the thumbnail centers on a consistent character type — that's part of "
+    "this channel's identity. Do not mention any on-image text/typography, since that is "
+    "added separately. Reply with only the prompt text."
+)
+
+
+def _analyze_with_anthropic(image_bytes: bytes, media_type: str, instruction: str = STYLE_ANALYSIS_INSTRUCTION) -> str:
     import anthropic
 
     if not ANTHROPIC_API_KEY:
@@ -38,7 +51,7 @@ def _analyze_with_anthropic(image_bytes: bytes, media_type: str) -> str:
                             "data": b64_data,
                         },
                     },
-                    {"type": "text", "text": STYLE_ANALYSIS_INSTRUCTION},
+                    {"type": "text", "text": instruction},
                 ],
             }
         ],
@@ -50,7 +63,7 @@ def _analyze_with_anthropic(image_bytes: bytes, media_type: str) -> str:
     raise RuntimeError("Vision analysis returned no text content.")
 
 
-def _analyze_with_openai(image_bytes: bytes, media_type: str) -> str:
+def _analyze_with_openai(image_bytes: bytes, media_type: str, instruction: str = STYLE_ANALYSIS_INSTRUCTION) -> str:
     raise NotImplementedError(
         "OpenAI vision analysis isn't wired up yet — set VISION_PROVIDER=openai and "
         "OPENAI_API_KEY once available, and implement this function."
@@ -65,6 +78,18 @@ def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
     if VISION_PROVIDER == "openai":
         return _analyze_with_openai(image_bytes, media_type)
     return _analyze_with_anthropic(image_bytes, media_type)
+
+
+def analyze_thumbnail_reference_image(image_bytes: bytes, media_type: str) -> str:
+    """
+    Analyzes a reference YouTube thumbnail and returns a reusable image-generation
+    prompt for the thumbnail background, including its recurring subject archetype
+    (e.g. a consistent character) rather than stripping it out like the generic
+    per-video style prompt does.
+    """
+    if VISION_PROVIDER == "openai":
+        return _analyze_with_openai(image_bytes, media_type, THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION)
+    return _analyze_with_anthropic(image_bytes, media_type, THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION)
 
 
 MUSIC_PROMPT_INSTRUCTION = (
