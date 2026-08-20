@@ -92,6 +92,8 @@ class Channel(Base):
     # durable and gets exchanged for a fresh access_token as needed.
     youtube_channel_id = Column(String(64), nullable=True)
     youtube_channel_title = Column(String(255), nullable=True)
+    youtube_channel_handle = Column(String(255), nullable=True)  # e.g. "@somechannel"
+    youtube_channel_thumbnail_url = Column(String(1024), nullable=True)
     youtube_access_token = Column(Text, nullable=True)
     youtube_refresh_token = Column(Text, nullable=True)
     youtube_token_expiry = Column(DateTime, nullable=True)
@@ -119,6 +121,8 @@ class Channel(Base):
             "script_structure": self.script_structure,
             "youtube_connected": bool(self.youtube_refresh_token),
             "youtube_channel_title": self.youtube_channel_title,
+            "youtube_channel_handle": self.youtube_channel_handle,
+            "youtube_channel_thumbnail_url": self.youtube_channel_thumbnail_url,
             "video_count": len(self.videos) if self.videos else 0
         }
 

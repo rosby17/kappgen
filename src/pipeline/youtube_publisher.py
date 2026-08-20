@@ -80,8 +80,10 @@ def _refresh_access_token(refresh_token: str) -> dict:
 
 
 def fetch_own_channel_info(access_token: str) -> Optional[dict]:
-    """Returns {"id": ..., "title": ...} for the YouTube channel the granted
-    account owns, or None if the lookup fails."""
+    """Returns {"id", "title", "handle", "thumbnail_url"} for the YouTube
+    channel the granted account owns, or None if the lookup fails. Used to
+    replace NicheCut's placeholder channel identity with the creator's real
+    YouTube name/avatar/handle once they connect."""
     try:
         resp = httpx.get(YOUTUBE_CHANNELS_URL, params={"part": "snippet", "mine": "true"},
                           headers={"Authorization": f"Bearer {access_token}"}, timeout=20)
@@ -89,7 +91,15 @@ def fetch_own_channel_info(access_token: str) -> Optional[dict]:
         items = resp.json().get("items") or []
         if not items:
             return None
-        return {"id": items[0]["id"], "title": items[0]["snippet"]["title"]}
+        snippet = items[0]["snippet"]
+        thumbnails = snippet.get("thumbnails") or {}
+        thumbnail_url = (thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default") or {}).get("url")
+        return {
+            "id": items[0]["id"],
+            "title": snippet["title"],
+            "handle": snippet.get("customUrl"),
+            "thumbnail_url": thumbnail_url,
+        }
     except Exception as e:
         logger.warning(f"Failed to fetch YouTube channel info: {e}")
         return None

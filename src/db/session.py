@@ -88,6 +88,8 @@ def init_db():
             "script_structure": "ALTER TABLE channels ADD COLUMN script_structure JSON",
             "youtube_channel_id": "ALTER TABLE channels ADD COLUMN youtube_channel_id VARCHAR(64)",
             "youtube_channel_title": "ALTER TABLE channels ADD COLUMN youtube_channel_title VARCHAR(255)",
+            "youtube_channel_handle": "ALTER TABLE channels ADD COLUMN youtube_channel_handle VARCHAR(255)",
+            "youtube_channel_thumbnail_url": "ALTER TABLE channels ADD COLUMN youtube_channel_thumbnail_url VARCHAR(1024)",
             "youtube_access_token": "ALTER TABLE channels ADD COLUMN youtube_access_token TEXT",
             "youtube_refresh_token": "ALTER TABLE channels ADD COLUMN youtube_refresh_token TEXT",
             "youtube_token_expiry": "ALTER TABLE channels ADD COLUMN youtube_token_expiry TIMESTAMP",

@@ -435,15 +435,17 @@ def get_youtube_auth_url(channel_id: str, db: Session = Depends(get_db)):
 @router.get("/youtube/callback")
 def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None, db: Session = Depends(get_db)):
     """Google redirects here after the creator grants (or denies) YouTube access."""
-    def redirect_with(status_str: str, message: str = ""):
+    def redirect_with(status_str: str, message: str = "", channel_id: str = None):
+        from urllib.parse import quote
         params = f"youtube={status_str}"
         if message:
-            from urllib.parse import quote
             params += f"&youtube_message={quote(message)}"
+        if channel_id:
+            params += f"&youtube_channel_id={quote(channel_id)}"
         return RedirectResponse(f"{FRONTEND_BASE_URL}/channels?{params}")
 
     if error:
-        return redirect_with("error", error)
+        return redirect_with("error", error, channel_id=state)
     if not code or not state:
         return redirect_with("error", "Réponse OAuth incomplète.")
 
@@ -458,7 +460,7 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
         if not refresh_token:
             # Happens if the account already granted consent before without
             # "prompt=consent" forcing a fresh one — ask the creator to retry.
-            return redirect_with("error", "Aucun jeton de rafraîchissement reçu. Réessaie la connexion YouTube.")
+            return redirect_with("error", "Aucun jeton de rafraîchissement reçu. Réessaie la connexion YouTube.", channel_id=channel.id)
 
         channel_info = youtube_publisher.fetch_own_channel_info(access_token)
 
@@ -469,10 +471,15 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
         if channel_info:
             channel.youtube_channel_id = channel_info["id"]
             channel.youtube_channel_title = channel_info["title"]
+            channel.youtube_channel_handle = channel_info.get("handle")
+            channel.youtube_channel_thumbnail_url = channel_info.get("thumbnail_url")
+            # Replace the placeholder identity set during setup with the
+            # creator's real YouTube channel name, now that we know it.
+            channel.name = channel_info["title"]
         db.commit()
-        return redirect_with("connected")
+        return redirect_with("connected", channel_id=channel.id)
     except Exception as e:
-        return redirect_with("error", str(e)[:200])
+        return redirect_with("error", str(e)[:200], channel_id=channel.id)
 
 
 @router.post("/{channel_id}/youtube/disconnect")
