@@ -314,6 +314,8 @@ def run_youtube_identity_sync():
                 channel.youtube_channel_handle = channel_info.get("handle")
                 channel.youtube_channel_thumbnail_url = channel_info.get("thumbnail_url")
                 channel.name = channel_info["title"]
+                if not channel.description:
+                    channel.description = channel_info.get("description") or None
                 db.commit()
             except Exception as e:
                 logger.warning(f"YouTube identity sync failed for channel {channel.id}: {e}")
@@ -569,10 +571,19 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         )
     ]
 
+    # Folded together rather than threading a new parameter through
+    # script_writer's whole call chain: the channel description says what
+    # the channel is about, the style prompt says how the owner wants it
+    # told — both are just extra creative context for topic/script generation.
+    combined_style_prompt = "\n".join(filter(None, [
+        f"What this channel is about: {channel.description}" if channel.description else None,
+        channel.automation_style_prompt,
+    ])) or None
+
     result = generate_daily_script(
         niche=channel.niche,
         recent_titles=recent_titles,
-        style_prompt=channel.automation_style_prompt,
+        style_prompt=combined_style_prompt,
         script_structure=channel.script_structure,
     )
     if not result:

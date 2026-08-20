@@ -74,6 +74,7 @@ class EffectsConfig(BaseModel):
 
 class ChannelCreate(BaseModel):
     name: str
+    description: Optional[str] = None
     niche: str = "General"
     subtitle_style: SubtitleStyle = Field(default_factory=SubtitleStyle)
     branding: BrandingConfig = Field(default_factory=BrandingConfig)
@@ -97,6 +98,7 @@ class ChannelCreate(BaseModel):
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
+    description: Optional[str] = None
     niche: Optional[str] = None
     subtitle_style: Optional[SubtitleStyle] = None
     branding: Optional[BrandingConfig] = None

@@ -1,6 +1,7 @@
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import random
@@ -77,6 +78,7 @@ def list_voice_catalog(
     language: Optional[str] = None,
     user_id: Optional[str] = None,
     search: Optional[str] = None,
+    page: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     """Izivoice's real catalog holds 11 000+ voices — far too many to ever load
@@ -84,18 +86,35 @@ def list_voice_catalog(
     sized page (~1000) so the picker isn't limited to a handful of voices;
     with a search term we forward it straight to Izivoice (which searches its
     whole catalog server-side) and only fetch a couple of pages, since the
-    match set is already narrow."""
+    match set is already narrow.
+
+    Passing `page` switches to single-page mode: the picker uses this to load
+    further chunks past the initial ~1000 ("Charger plus de voix") instead of
+    eagerly fetching the whole catalog up front."""
     _, api_key = _user_and_izivoice_key(db, user_id)
     if not api_key:
         raise HTTPException(status_code=503, detail="Le catalogue de voix n'est pas configuré.")
     # Izivoice's `page` is 0-indexed — page=1 silently returns the *second*
     # page (empty for most accounts), which is why the picker only ever
     # showed the 4 hardcoded fallback voices instead of the real catalog.
+    if page is not None:
+        params = {"page": page, "page_size": 100}
+        if language:
+            params["language"] = language
+        if search:
+            params["search"] = search
+        with httpx.Client(timeout=30) as client:
+            response = client.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {api_key}"}, params=params)
+            response.raise_for_status()
+            data = (response.json().get("data") or {})
+        return {"voices": data.get("voices") or [], "has_more": bool(data.get("has_more")), "page": page}
+
     max_pages = 3 if search else 10
     all_voices = []
+    has_more = False
     with httpx.Client(timeout=30) as client:
-        for page in range(0, max_pages):
-            params = {"page": page, "page_size": 100}
+        for p in range(0, max_pages):
+            params = {"page": p, "page_size": 100}
             if language:
                 params["language"] = language
             if search:
@@ -105,9 +124,10 @@ def list_voice_catalog(
             data = (response.json().get("data") or {})
             batch = data.get("voices") or []
             all_voices.extend(batch)
-            if not data.get("has_more") or not batch:
+            has_more = bool(data.get("has_more"))
+            if not has_more or not batch:
                 break
-    return {"voices": all_voices}
+    return {"voices": all_voices, "has_more": has_more, "next_page": max_pages}
 
 @router.post("/{channel_id}/voice/clone")
 async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), user_id: Optional[str] = Form(None), db: Session = Depends(get_db)):
@@ -221,6 +241,20 @@ def _suggest_niche_for_channel(db: Session, title: str, description: str) -> Opt
     existing = [r[0] for r in db.query(Channel.niche).distinct().all() if r[0]]
     return suggest_niche(title, description, existing)
 
+
+class NicheSuggestRequest(BaseModel):
+    name: str = ""
+    description: str = ""
+
+
+@router.post("/suggest-niche")
+def suggest_niche_endpoint(payload: NicheSuggestRequest, db: Session = Depends(get_db)):
+    """Manual counterpart to the automatic YouTube-connect suggestion — lets the
+    wizard offer a niche guess from the name/description the creator just typed,
+    without requiring a YouTube connection."""
+    niche = _suggest_niche_for_channel(db, payload.name, payload.description)
+    return {"niche": niche}
+
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(user_id: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(Channel)
@@ -248,6 +282,7 @@ def create_channel(payload: ChannelCreate, user_id: str = None, db: Session = De
     channel = Channel(
         user_id=valid_user_id,
         name=payload.name,
+        description=payload.description,
         niche=payload.niche,
         subtitle_style=payload.subtitle_style.model_dump(),
         branding=payload.branding.model_dump(),
@@ -312,6 +347,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, db: Session = Depend
         
     if payload.name is not None:
         channel.name = payload.name
+    if payload.description is not None:
+        channel.description = payload.description
     if payload.niche is not None:
         channel.niche = payload.niche
     if payload.subtitle_style is not None:
@@ -805,6 +842,11 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
             # Replace the placeholder identity set during setup with the
             # creator's real YouTube channel name, now that we know it.
             channel.name = channel_info["title"]
+            # Only fill the description if the creator hasn't already written
+            # their own — YouTube's "About" text is a reasonable starting
+            # point, not something that should silently overwrite their input.
+            if not channel.description:
+                channel.description = channel_info.get("description") or None
             # A manually-uploaded logo otherwise always wins over the YouTube
             # avatar in the UI (an explicit creator choice) — but connecting
             # is itself an explicit "sync my real identity" action, so any
@@ -848,6 +890,8 @@ def refresh_youtube_identity(channel_id: str, db: Session = Depends(get_db)):
     channel.youtube_channel_handle = channel_info.get("handle")
     channel.youtube_channel_thumbnail_url = channel_info.get("thumbnail_url")
     channel.name = channel_info["title"]
+    if not channel.description:
+        channel.description = channel_info.get("description") or None
     db.commit()
     db.refresh(channel)
     return channel.to_dict()

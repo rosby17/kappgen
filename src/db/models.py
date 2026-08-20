@@ -82,6 +82,10 @@ class Channel(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     name = Column(String(255), nullable=False)
+    # Creator-provided (or YouTube-synced) summary of what the channel is about —
+    # feeds automatic niche detection and gives the auto-generation agent context
+    # beyond just the name/niche label.
+    description = Column(Text, nullable=True)
     niche = Column(String(255), nullable=False, default="General")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -182,6 +186,7 @@ class Channel(Base):
             "id": self.id,
             "user_id": self.user_id,
             "name": self.name,
+            "description": self.description,
             "niche": self.niche,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "subtitle_style": self.subtitle_style,
