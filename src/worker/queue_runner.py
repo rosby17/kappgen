@@ -33,6 +33,34 @@ EDIT_ASSETS_RETENTION_DAYS = 7
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
 
+# Shown to the creator instead of a raw exception/traceback when a render
+# fails because of an underlying paid-provider outage (exhausted API
+# credits, a locked account, a rate limit) — deliberately generic, no
+# mention of credits/quotas/API keys, which are our problem to fix, not
+# something a creator can act on.
+SERVICE_UNAVAILABLE_MESSAGE = "Les serveurs de KappGen sont temporairement indisponibles. Veuillez réessayer plus tard."
+
+# Case-insensitive substrings that reliably show up in a paid provider's own
+# error text when the problem is billing/quota/rate-limit related, across
+# Anthropic, OpenAI, fal.ai and Izivoice's actual wording seen in production.
+_BILLING_ERROR_MARKERS = (
+    "credit balance", "insufficient_quota", "insufficient quota", "quota exceeded",
+    "top_up", "top-up", "user is locked", "rate limit", "rate-limited", "429",
+    "payment required", "402", "billing", "plans & billing", "purchase credits",
+)
+
+
+def _client_facing_error_message(exc: Exception) -> str:
+    """Never surfaces a raw exception/traceback to a creator — those are for
+    server logs only. A billing/quota-shaped error from any paid provider
+    becomes the same generic outage message (see SERVICE_UNAVAILABLE_MESSAGE);
+    anything else keeps its own message (still no traceback) since it's
+    usually something the creator CAN act on (e.g. a corrupt upload)."""
+    text = str(exc)
+    if any(marker in text.lower() for marker in _BILLING_ERROR_MARKERS):
+        return SERVICE_UNAVAILABLE_MESSAGE
+    return text
+
 def process_single_queued_video() -> bool:
     """
     Picks the oldest 'queued' video, marks it 'rendering', runs pipeline, and records result.
@@ -220,13 +248,15 @@ def process_single_queued_video() -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Error processing video rendering: {e}")
+        # Full exception + traceback stays server-side only — the creator
+        # gets a clean, sanitized message (see _client_facing_error_message).
+        logger.error(f"Error processing video rendering: {e}\n{traceback.format_exc()}")
         if video:
             try:
                 db.refresh(video)
                 video.status = VideoStatus.FAILED.value
                 video.finished_at = datetime.utcnow()
-                video.error_message = f"{str(e)}\n{traceback.format_exc()}"
+                video.error_message = _client_facing_error_message(e)
                 video.progress_stage = "Échec du rendu"
                 db.commit()
             except Exception as db_err:
@@ -563,13 +593,6 @@ def purge_old_videos_and_uploads():
 AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
 AUTOMATION_RECENT_TITLES_LIMIT = 20
 
-# Shown to the creator when every configured AI text provider (Anthropic,
-# fal.ai, OpenAI) fails to write today's script — deliberately generic (no
-# mention of credits/quotas/API keys, which are our problem to fix, not
-# something a creator can act on) so it reads as "try again later" rather
-# than exposing internal billing/infra details.
-AUTOMATION_SCRIPT_FAILURE_MESSAGE = "Les serveurs de KappGen sont temporairement indisponibles. Veuillez réessayer plus tard."
-
 
 def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     """Today's date and seconds-into-day, read in this channel's own
@@ -594,7 +617,7 @@ def _record_automation_failure(db, channel: Channel) -> None:
         .filter(
             Video.channel_id == channel.id,
             Video.status == VideoStatus.FAILED.value,
-            Video.error_message == AUTOMATION_SCRIPT_FAILURE_MESSAGE,
+            Video.error_message == SERVICE_UNAVAILABLE_MESSAGE,
         )
         .order_by(Video.created_at.desc())
         .first()
@@ -608,7 +631,7 @@ def _record_automation_failure(db, channel: Channel) -> None:
         input_type="text",
         script_text="",
         status=VideoStatus.FAILED.value,
-        error_message=AUTOMATION_SCRIPT_FAILURE_MESSAGE,
+        error_message=SERVICE_UNAVAILABLE_MESSAGE,
         progress_stage="Échec",
         progress_percent=0,
     ))
