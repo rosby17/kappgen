@@ -27,24 +27,13 @@ router = APIRouter(prefix="/api/channels", tags=["channels"])
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
-def _user_and_izivoice_key(db: Session, user_id: Optional[str]):
-    user = db.query(User).filter(User.id == user_id).first() if user_id else None
-    return user, izivoice_key_for_user(user) if user else IZIVOICE_API_KEY
-
-
 @router.get("/izivoice/status")
-def izivoice_status(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
-    return {"connected": bool(user.izivoice_api_key_encrypted), "key_prefix": user.izivoice_key_prefix, "mode": "personal" if user.izivoice_api_key_encrypted else "nichecut"}
+def izivoice_status(current_user: User = Depends(get_current_user)):
+    return {"connected": bool(current_user.izivoice_api_key_encrypted), "key_prefix": current_user.izivoice_key_prefix, "mode": "personal" if current_user.izivoice_api_key_encrypted else "nichecut"}
 
 
 @router.post("/izivoice/connect")
-def connect_izivoice(payload: IzivoiceConnectionPayload, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == payload.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+def connect_izivoice(payload: IzivoiceConnectionPayload, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     api_key = payload.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="Saisissez une clé API Izivoice.")
@@ -64,10 +53,7 @@ def connect_izivoice(payload: IzivoiceConnectionPayload, db: Session = Depends(g
 
 
 @router.delete("/izivoice/connect")
-def disconnect_izivoice(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+def disconnect_izivoice(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     user.izivoice_api_key_encrypted = None
     user.izivoice_key_prefix = None
     user.izivoice_connected_at = None
@@ -78,9 +64,9 @@ def disconnect_izivoice(user_id: str, db: Session = Depends(get_db)):
 @router.get("/voice/catalog")
 def list_voice_catalog(
     language: Optional[str] = None,
-    user_id: Optional[str] = None,
     search: Optional[str] = None,
     page: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Izivoice's real catalog holds 11 000+ voices — far too many to ever load
@@ -93,7 +79,7 @@ def list_voice_catalog(
     Passing `page` switches to single-page mode: the picker uses this to load
     further chunks past the initial ~1000 ("Charger plus de voix") instead of
     eagerly fetching the whole catalog up front."""
-    _, api_key = _user_and_izivoice_key(db, user_id)
+    api_key = izivoice_key_for_user(current_user)
     if not api_key:
         raise HTTPException(status_code=503, detail="Le catalogue de voix n'est pas configuré.")
     # Izivoice's `page` is 0-indexed — page=1 silently returns the *second*
@@ -142,17 +128,18 @@ def list_voice_catalog(
     return {"voices": all_voices, "has_more": has_more, "next_page": max_pages}
 
 @router.post("/{channel_id}/voice/clone")
-async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), user_id: Optional[str] = Form(None), db: Session = Depends(get_db)):
+async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     if not consent_confirmed:
         raise HTTPException(status_code=400, detail="Le consentement du propriétaire de la voix est obligatoire.")
     contents = await audio.read()
     if not contents:
         raise HTTPException(status_code=400, detail="L'échantillon audio est vide.")
-    owner_id = user_id or channel.user_id
-    _, api_key = _user_and_izivoice_key(db, owner_id)
+    api_key = izivoice_key_for_user(current_user)
     if not api_key:
         raise HTTPException(status_code=503, detail="Izivoice n'est pas configuré.")
     response = httpx.post(
@@ -411,7 +398,7 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     return channel.to_dict()
 
 @router.post("/{channel_id}/generate-now")
-def generate_now(channel_id: str, db: Session = Depends(get_db)):
+def generate_now(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """On-demand equivalent of the daily auto pipeline for a single channel:
     only valid for automation_mode == "auto", where a creator clicking
     "Nouvelle vidéo" should never see the manual script/voice form — the
@@ -419,6 +406,8 @@ def generate_now(channel_id: str, db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     if channel.automation_mode != "auto":
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
 
@@ -429,10 +418,12 @@ def generate_now(channel_id: str, db: Session = Depends(get_db)):
     return video.to_dict()
 
 @router.post("/{channel_id}/logo")
-async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_LOGO_EXTENSIONS:
@@ -458,13 +449,15 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), db:
     return channel.to_dict()
 
 @router.post("/{channel_id}/avatar")
-async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Uploads the channel's app-facing profile picture — shown in channel cards,
     lists and the sidebar. Distinct from the logo (branding.logo_path), which is
     the high-quality asset burned into the rendered video and never resized."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_LOGO_EXTENSIONS:
@@ -494,6 +487,7 @@ async def preview_ai_music(
     ai_prompt: Optional[str] = Form(None),
     script_excerpt: Optional[str] = Form(None),
     duration: float = Form(20.0),
+    current_user: User = Depends(get_current_user),
 ):
     """Generates a short AI music preview on the spot, so the client can listen
     to it in the wizard before saving the channel — same prompt path used at
@@ -523,12 +517,14 @@ async def preview_ai_music(
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 
 @router.post("/{channel_id}/music")
-async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Uploads one or more of the client's own background tracks. One is picked at
     random per render — this is the channel's own music, never third-party stock."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     music_dir = STORAGE_PATH / "channels" / channel.id / "music"
     music_dir.mkdir(parents=True, exist_ok=True)
@@ -561,10 +557,12 @@ async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(.
     return channel.to_dict()
 
 @router.delete("/{channel_id}/music")
-def delete_channel_music_track(channel_id: str, track_path: str, db: Session = Depends(get_db)):
+def delete_channel_music_track(channel_id: str, track_path: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     music_pref = dict(channel.music_preference or {})
     tracks = list(music_pref.get("tracks") or [])
@@ -585,7 +583,7 @@ def delete_channel_music_track(channel_id: str, track_path: str, db: Session = D
 ALLOWED_STYLE_REFERENCE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 @router.post("/analyze-style-image")
-async def analyze_style_image(file: UploadFile = File(...)):
+async def analyze_style_image(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     """Analyzes a reference image and returns a reusable image-generation style prompt."""
     ext = Path(file.filename or "").suffix.lower()
     media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
@@ -614,7 +612,7 @@ def _thumbnail_reference_paths(thumbnail_style: dict) -> List[str]:
 
 
 @router.post("/{channel_id}/thumbnail-style")
-async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Adds one or more thumbnail-specific reference images for this channel, then
     re-analyzes ALL of them together (existing + newly uploaded) into a single
     reusable style prompt — kept separate from image_style, since the thumbnail
@@ -622,6 +620,8 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     channel_dir = STORAGE_PATH / "channels" / channel.id / "thumbnail_references"
     channel_dir.mkdir(parents=True, exist_ok=True)
@@ -660,13 +660,15 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
 
 
 @router.delete("/{channel_id}/thumbnail-style")
-def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = None, db: Session = Depends(get_db)):
+def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Without `image_path`: clears the whole thumbnail style (reverts to the default
     background source — video frame, or image_style's own prompt). With `image_path`:
     removes just that one reference image and re-analyzes the remaining ones."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     channel_dir = STORAGE_PATH / "channels" / channel.id
     existing_paths = _thumbnail_reference_paths(channel.thumbnail_style or {})
@@ -713,6 +715,7 @@ def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = 
 async def stage_channel_library_images(
     files: List[UploadFile] = File(...),
     staging_token: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
 ):
     """Large folders (Cloudflare hard-caps a single request body at 100MB)
     arrive here in several requests: the first call gets no staging_token and
@@ -744,11 +747,14 @@ async def stage_channel_library_images(
 def attach_staged_channel_library(
     channel_id: str,
     staging_token: str = Form(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     try:
         safe_token = str(uuid.UUID(staging_token))
     except ValueError:
@@ -784,11 +790,14 @@ async def upload_channel_library_images(
     channel_id: str,
     files: List[UploadFile] = File(...),
     append: bool = Form(False),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
 
     library_dir = STORAGE_PATH / "channels" / channel.id / "library"
     _, rejected = await save_valid_library_images(files, library_dir, append=append)
@@ -805,10 +814,12 @@ async def upload_channel_library_images(
     return channel.to_dict()
 
 @router.get("/{channel_id}/youtube/auth-url")
-def get_youtube_auth_url(channel_id: str, db: Session = Depends(get_db)):
+def get_youtube_auth_url(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     if not youtube_publisher.is_configured():
         raise HTTPException(status_code=503, detail="La connexion YouTube n'est pas configurée sur le serveur.")
     return {"auth_url": youtube_publisher.build_auth_url(channel_id)}
@@ -882,7 +893,7 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
 
 
 @router.post("/{channel_id}/youtube/refresh")
-def refresh_youtube_identity(channel_id: str, db: Session = Depends(get_db)):
+def refresh_youtube_identity(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Re-fetches the connected YouTube channel's name/handle/avatar — the
     creator may have renamed the channel or changed its photo directly on
     YouTube since the initial connection, and NicheCut only ever pulled that
@@ -890,6 +901,8 @@ def refresh_youtube_identity(channel_id: str, db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     if not channel.youtube_refresh_token:
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas connectée à YouTube.")
 
@@ -914,10 +927,12 @@ def refresh_youtube_identity(channel_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{channel_id}/youtube/disconnect")
-def disconnect_youtube(channel_id: str, db: Session = Depends(get_db)):
+def disconnect_youtube(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     channel.youtube_access_token = None
     channel.youtube_refresh_token = None
     channel.youtube_token_expiry = None

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import ApiKey, User
+from src.utils.auth import get_current_user
 
 router = APIRouter(prefix="/api/api-keys", tags=["api-keys"])
 
@@ -14,25 +15,20 @@ def _hash_key(raw_key: str) -> str:
 
 
 class ApiKeyCreate(BaseModel):
-    user_id: str
     name: str = "Clé API"
 
 
 @router.get("")
-def list_api_keys(user_id: str, db: Session = Depends(get_db)):
-    keys = db.query(ApiKey).filter(ApiKey.user_id == user_id).order_by(ApiKey.created_at.desc()).all()
+def list_api_keys(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    keys = db.query(ApiKey).filter(ApiKey.user_id == current_user.id).order_by(ApiKey.created_at.desc()).all()
     return [k.to_dict() for k in keys]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == payload.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utilisateur non trouvé.")
-
+def create_api_key(payload: ApiKeyCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     raw_key = f"nck_{secrets.token_urlsafe(32)}"
     api_key = ApiKey(
-        user_id=user.id,
+        user_id=current_user.id,
         name=(payload.name or "Clé API").strip() or "Clé API",
         key_prefix=raw_key[:12],
         hashed_key=_hash_key(raw_key),
@@ -49,10 +45,12 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{key_id}")
-def revoke_api_key(key_id: str, db: Session = Depends(get_db)):
+def revoke_api_key(key_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not api_key:
         raise HTTPException(status_code=404, detail="Clé API introuvable.")
+    if api_key.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
     db.delete(api_key)
     db.commit()
     return {"message": "Clé API révoquée."}

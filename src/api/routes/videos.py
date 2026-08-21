@@ -204,6 +204,8 @@ def get_video_status(video_id: str, current_user: User = Depends(get_current_use
 
 @router.get("/{video_id}/download")
 def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get_db)):
+    # Intentionally unauthenticated: reached via a plain download link/window.open,
+    # which can't carry a custom Authorization header. video_id is an opaque UUID.
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -223,7 +225,9 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
 
 @router.get("/{video_id}/audio")
 def download_video_audio(video_id: str, db: Session = Depends(get_db)):
-    """Extracts and returns this video's soundtrack, for the 'reuse audio' flow."""
+    """Extracts and returns this video's soundtrack, for the 'reuse audio' flow.
+    Intentionally unauthenticated: also used directly as an <audio src>, which
+    can't carry a custom Authorization header."""
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -237,11 +241,9 @@ def download_video_audio(video_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{video_id}/youtube/publish")
-def publish_video_to_youtube(video_id: str, db: Session = Depends(get_db)):
+def publish_video_to_youtube(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Generate the packaging and immediately publish a ready video."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Vidéo introuvable.")
+    video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value or not video.output_path:
         raise HTTPException(status_code=409, detail="La vidéo doit être prête avant sa publication.")
     if video.youtube_video_id:
@@ -319,12 +321,10 @@ class YoutubeMetadataUpdate(BaseModel):
     description: Optional[str] = None
 
 @router.patch("/{video_id}/youtube-metadata")
-def update_youtube_metadata(video_id: str, payload: YoutubeMetadataUpdate, db: Session = Depends(get_db)):
+def update_youtube_metadata(video_id: str, payload: YoutubeMetadataUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Lets the creator review/edit the AI-proposed YouTube title (max 100
     chars, YouTube's own limit) and description before publishing."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     if payload.title is not None:
         title = payload.title.strip()
         if not title:
@@ -337,12 +337,10 @@ def update_youtube_metadata(video_id: str, payload: YoutubeMetadataUpdate, db: S
     return video.to_dict()
 
 @router.post("/{video_id}/youtube-metadata/regenerate")
-def regenerate_youtube_metadata(video_id: str, db: Session = Depends(get_db)):
+def regenerate_youtube_metadata(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Asks the AI for a fresh title/description proposal, discarding whatever
     is currently set — used by the "Régénérer le titre" action."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     channel = video.channel
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -356,14 +354,12 @@ def regenerate_youtube_metadata(video_id: str, db: Session = Depends(get_db)):
     return video.to_dict()
 
 @router.post("/{video_id}/youtube-thumbnail/resync")
-def resync_youtube_thumbnail(video_id: str, db: Session = Depends(get_db)):
+def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Regenerates the thumbnail and re-uploads it to the already-published
     YouTube video — for videos published before thumbnail generation existed,
     or whose thumbnail upload silently failed (e.g. the channel wasn't phone-
     verified with YouTube yet at the time)."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     if not video.youtube_video_id:
         raise HTTPException(status_code=409, detail="Cette vidéo n'est pas encore publiée sur YouTube.")
     channel = video.channel
@@ -385,15 +381,13 @@ def resync_youtube_thumbnail(video_id: str, db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 @router.post("/{video_id}/thumbnail/regenerate")
-def regenerate_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
+def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Regenerates this video's NicheCut card thumbnail (output_mp4's sibling
     thumbnail.jpg) — for videos stuck with a near-black one from before the
     fallback frame-grab was fixed to pick a representative frame instead of a
     fixed timestamp. Independent of YouTube publishing (unlike the resync
     route above), since this thumbnail is shown in the app regardless."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     channel = video.channel
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -471,10 +465,8 @@ def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
 
 
 @router.get("/{video_id}/scenes")
-def list_video_scenes(video_id: str, db: Session = Depends(get_db)):
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+def list_video_scenes(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value:
         raise HTTPException(status_code=409, detail="La vidéo n’est pas encore prête.")
     scenes = _load_scenes_manifest(video)
@@ -497,6 +489,10 @@ def list_video_scenes(video_id: str, db: Session = Depends(get_db)):
 
 @router.get("/{video_id}/scenes/{scene_index}/image")
 def get_scene_image(video_id: str, scene_index: int, db: Session = Depends(get_db)):
+    # Intentionally unauthenticated: this URL is used directly as an <img src>
+    # in the Studio scene list, and browsers don't attach a custom
+    # Authorization header to plain image/media tag requests. video_id +
+    # scene_index are opaque UUID/int pairs, not enumerable in practice.
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -515,14 +511,13 @@ async def replace_scene_image(
     video_id: str,
     scene_index: int,
     image: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Swaps a single scene's source image and rebuilds just that scene's Ken
     Burns clip, then queues a lightweight reassembly (no TTS/pacing/other
     images touched) so a bad AI image doesn't require regenerating the video."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
         raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
 
@@ -576,12 +571,10 @@ class SceneSubtitleUpdate(BaseModel):
 
 
 @router.patch("/{video_id}/scenes/{scene_index}/subtitle")
-def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleUpdate, db: Session = Depends(get_db)):
+def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Corrects one scene's caption text only — no TTS/STT call, audio untouched.
     Queued the same way as an image swap; the worker calls edit_scene_subtitle_text."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
         raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
     text = payload.text.strip()
@@ -607,14 +600,12 @@ def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleU
 
 
 @router.post("/{video_id}/scenes/{scene_index}/regenerate-audio")
-def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: SceneSubtitleUpdate, db: Session = Depends(get_db)):
+def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: SceneSubtitleUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Re-records one scene's narration via TTS. Re-times that scene's clip and
     every later scene's position in the final video (their own clips are kept,
     only their timeline position moves) — queued for the worker to run
     regenerate_scene_audio, since it involves a real TTS call."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
         raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
     text = payload.text.strip()
@@ -640,12 +631,10 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
 
 
 @router.post("/{video_id}/close-edit")
-def close_video_edit(video_id: str, db: Session = Depends(get_db)):
+def close_video_edit(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Frees the heavy per-scene images/clips once the user leaves the editor,
     rather than waiting for the retention window — output.mp4 is untouched."""
-    video = db.query(Video).filter(Video.id == video_id).first()
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+    video = _get_owned_video(db, video_id, current_user)
     if video.edit_assets_purged_at:
         return video.to_dict()
 
