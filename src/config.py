@@ -55,11 +55,14 @@ BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
 BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "")
 BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "NicheCut")
 
-# Vision analysis (reference image -> style prompt) for AI image generation.
-# Provider-swappable: set VISION_PROVIDER to "anthropic" (default, Claude) or
-# "openai" once an OpenAI key is available — see src/pipeline/vision.py.
+# Claude-powered pipeline steps (vision analysis, music prompts, ...) try
+# providers in order: Anthropic direct -> fal.ai (Claude via OpenRouter,
+# billed against fal.ai credits) -> OpenAI. Whichever call in the chain
+# succeeds first is used; each key is optional, but at least one must be set.
+# See src/pipeline/vision.py for the fallback implementation.
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "anthropic")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+FAL_API_KEY = os.getenv("FAL_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # NOTE: NicheCut's database must always be its own, dedicated instance — never

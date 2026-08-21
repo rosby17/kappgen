@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from src.config import ANTHROPIC_API_KEY
+from src.config import ANTHROPIC_API_KEY, STORAGE_PATH, STORAGE_PATH
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
 
@@ -85,13 +85,30 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     # over the video's own body-image style, since creators often want a distinct
     # thumbnail look (e.g. a consistent character/composition) that a generic
     # per-scene style prompt wouldn't capture.
-    thumbnail_style_prompt = ((channel.thumbnail_style or {}).get("style_prompt") or "").strip()
+    thumbnail_style = channel.thumbnail_style or {}
+    thumbnail_style_prompt = (thumbnail_style.get("style_prompt") or "").strip()
     style_prompt = thumbnail_style_prompt or ((channel.image_style or {}).get("style_prompt") or "").strip()
     niche = (channel.niche or "").strip()
     prompt = f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, cinematic, high detail, dramatic lighting, eye-catching, no text, no watermark, 16:9"
     ai_path = destination.with_suffix(".ai.jpg")
+
+    # Feed the creator's own uploaded thumbnail references straight into the
+    # image model as conditioning images, not just as text (via style_prompt
+    # above) — a text description alone routinely drifts from the reference's
+    # actual look (character, palette, composition), which is what creators
+    # were complaining about ("aucune ressemblance").
+    reference_paths = [
+        STORAGE_PATH / rel_path
+        for rel_path in (thumbnail_style.get("reference_image_paths") or [])
+    ]
+    reference_paths = [p for p in reference_paths if p.exists()] or None
+
+    # Unlike the bulk per-scene image generation (many images, needs to fail fast to
+    # avoid stalling the whole render), this is the single standalone call for the
+    # thumbnail — the one image viewers judge the video by — so it's worth waiting
+    # longer for it rather than falling back to a plain video-frame grab.
     with httpx.Client(timeout=60.0) as client:
-        generate_ai_image(prompt, ai_path, client)
+        generate_ai_image(prompt, ai_path, client, poll_timeout_seconds=240, reference_image_paths=reference_paths)
     return ai_path
 
 
@@ -120,25 +137,42 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
             image = Image.new("RGB", (1280, 720), "#07111f")
     image = image.resize((1280, 720)) if image.size != (1280, 720) else image
     image = ImageEnhance.Contrast(image).enhance(1.12)
+    image = ImageEnhance.Color(image).enhance(1.1)
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle((0, 0, 1280, 720), fill=(3, 10, 22, 92))
-    draw.rectangle((0, 410, 1280, 720), fill=(2, 8, 18, 205))
+
     words, lines, current = text.upper().split(), [], ""
     for word in words:
         candidate = f"{current} {word}".strip()
-        if len(candidate) > 24 and current:
+        if len(candidate) > 18 and current:
             lines.append(current); current = word
         else:
             current = candidate
     if current: lines.append(current)
     lines = lines[:3]
-    font = _font(76 if len(lines) < 3 else 64)
-    y = 445
+
+    # Poster-style layout: a big bold title banked top-left over the AI visual
+    # (like a real thumbnail's headline), instead of a heavy bar across the
+    # bottom third that hides most of the generated image. Only a soft
+    # top-down gradient sits behind the text for legibility — the visual
+    # itself stays the star of the thumbnail.
+    font = _font(108 if len(lines) < 3 else 88)
+    line_height = 122 if len(lines) < 3 else 100
+    text_block_height = line_height * len(lines)
+    gradient_height = min(720, text_block_height + 170)
+    for row in range(gradient_height):
+        alpha = int(220 * (1 - row / gradient_height) ** 1.6)
+        draw.line([(0, row), (1280, row)], fill=(2, 8, 18, alpha))
+
+    y = 56
     for index, line in enumerate(lines):
         color = "#5edcff" if index == len(lines) - 1 else "white"
-        draw.text((64, y), line, font=font, fill=color, stroke_width=3, stroke_fill="#020812")
-        y += 86
+        draw.text((60, y), line, font=font, fill=color, stroke_width=5, stroke_fill="#020812")
+        y += line_height
+
+    # Thin brand accent bar along the bottom edge instead of a solid block.
+    draw.rectangle((0, 706, 1280, 720), fill=(0, 194, 255, 235))
+
     result = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     result.save(destination, "JPEG", quality=90, optimize=True)
     frame_path.unlink(missing_ok=True)

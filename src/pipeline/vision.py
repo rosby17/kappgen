@@ -1,6 +1,6 @@
 import base64
-from typing import Tuple
-from src.config import VISION_PROVIDER, ANTHROPIC_API_KEY, OPENAI_API_KEY
+import httpx
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
 from src.utils.logger import logger
 
 STYLE_ANALYSIS_INSTRUCTION = (
@@ -27,9 +27,33 @@ THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION = (
 )
 
 
-def _analyze_with_anthropic(image_bytes: bytes, media_type: str, instruction: str = STYLE_ANALYSIS_INSTRUCTION) -> str:
-    return _analyze_many_with_anthropic([(image_bytes, media_type)], instruction)
+THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
+    "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
+    "You are shown several reference thumbnails from the same channel. Write a single, "
+    "dense image-generation prompt (comma-separated descriptors, no full sentences, no "
+    "preamble) that captures the visual identity shared across ALL of them: recurring "
+    "subject archetype (e.g. elderly bearded man in a robe, praying) if consistent across "
+    "images, framing/composition, art style/medium, color palette, lighting, mood, and "
+    "level of detail. If the images disagree on a detail, favor whatever appears in most "
+    "of them. Do not mention any on-image text/typography, since that is added separately. "
+    "Reply with only the prompt text."
+)
 
+
+MUSIC_PROMPT_INSTRUCTION = (
+    "You are configuring an AI music generator for background music on a YouTube video. "
+    "Given the channel's niche and (optionally) an excerpt of this specific video's script, "
+    "write a single short, dense music-generation prompt (comma-separated descriptors, no "
+    "full sentences, no preamble): instrumentation, mood, tempo/BPM feel, genre. The track "
+    "must stay subtle and non-distracting under a voiceover — never suggest vocals, lyrics, "
+    "or anything that would compete with narration. Reply with only the prompt text."
+)
+
+
+# ---------------------------------------------------------------------------
+# Provider calls. Each raises on failure (missing key, HTTP error, no usable
+# credits, ...) so the fallback chain below can just try the next one.
+# ---------------------------------------------------------------------------
 
 def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     import anthropic
@@ -59,24 +83,147 @@ def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     for block in response.content:
         if block.type == "text":
             return block.text.strip()
-    raise RuntimeError("Vision analysis returned no text content.")
+    raise RuntimeError("Anthropic vision analysis returned no text content.")
 
 
-def _analyze_with_openai(image_bytes: bytes, media_type: str, instruction: str = STYLE_ANALYSIS_INSTRUCTION) -> str:
-    raise NotImplementedError(
-        "OpenAI vision analysis isn't wired up yet — set VISION_PROVIDER=openai and "
-        "OPENAI_API_KEY once available, and implement this function."
+def _analyze_many_with_fal(images: list, instruction: str) -> str:
+    """Runs Claude through fal.ai's OpenRouter vision router — a fallback that
+    burns fal.ai credits instead of Anthropic's, for when the Anthropic
+    account is out of credit."""
+    if not FAL_API_KEY:
+        raise RuntimeError("FAL_API_KEY is not configured on the server.")
+
+    image_urls = [
+        f"data:{media_type};base64,{base64.standard_b64encode(image_bytes).decode('utf-8')}"
+        for image_bytes, media_type in images
+    ]
+    resp = httpx.post(
+        "https://fal.run/openrouter/router/vision",
+        headers={"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "image_urls": image_urls,
+            "prompt": instruction,
+            "model": "anthropic/claude-sonnet-4.5",
+        },
+        timeout=60.0,
     )
+    resp.raise_for_status()
+    output = (resp.json() or {}).get("output")
+    if not output:
+        raise RuntimeError("fal.ai vision analysis returned no output.")
+    return output.strip()
 
+
+def _analyze_many_with_openai(images: list, instruction: str) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
+
+    content = [{"type": "text", "text": instruction}]
+    for image_bytes, media_type in images:
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}})
+
+    resp = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "gpt-4o",
+            "max_tokens": 400,
+            "messages": [{"role": "user", "content": content}],
+        },
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("OpenAI vision analysis returned no text content.")
+    return text.strip()
+
+
+def _generate_music_prompt_with_anthropic(user_text: str) -> str:
+    import anthropic
+
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model="claude-opus-5",
+        max_tokens=200,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    for block in response.content:
+        if block.type == "text":
+            return block.text.strip()
+    raise RuntimeError("Anthropic music prompt generation returned no text content.")
+
+
+def _generate_music_prompt_with_fal(user_text: str) -> str:
+    if not FAL_API_KEY:
+        raise RuntimeError("FAL_API_KEY is not configured on the server.")
+
+    resp = httpx.post(
+        "https://fal.run/openrouter/router/vision",
+        headers={"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"},
+        json={"prompt": user_text, "model": "anthropic/claude-sonnet-4.5"},
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    output = (resp.json() or {}).get("output")
+    if not output:
+        raise RuntimeError("fal.ai music prompt generation returned no output.")
+    return output.strip()
+
+
+def _generate_music_prompt_with_openai(user_text: str) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
+
+    resp = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "gpt-4o",
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content": user_text}],
+        },
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("OpenAI music prompt generation returned no text content.")
+    return text.strip()
+
+
+def _run_with_fallback(steps: list) -> str:
+    """Tries each (provider_name, fn) pair in order, moving to the next one
+    on any failure (missing key, no credit, network/HTTP error, ...). Raises
+    the last error if every provider failed."""
+    last_exc = None
+    for name, fn in steps:
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a fallback chain
+            logger.warning(f"[vision] provider '{name}' failed, trying next: {exc}")
+            last_exc = exc
+    raise RuntimeError(f"All AI providers failed for this request. Last error: {last_exc}")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
-    """
-    Analyzes a reference image and returns a reusable image-generation style prompt.
-    Provider is chosen via VISION_PROVIDER ("anthropic" | "openai").
-    """
-    if VISION_PROVIDER == "openai":
-        return _analyze_with_openai(image_bytes, media_type)
-    return _analyze_with_anthropic(image_bytes, media_type)
+    """Analyzes a reference image and returns a reusable image-generation style prompt.
+    Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI."""
+    return _run_with_fallback([
+        ("anthropic", lambda: _analyze_many_with_anthropic([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
+        ("fal.ai", lambda: _analyze_many_with_fal([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
+        ("openai", lambda: _analyze_many_with_openai([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
+    ])
 
 
 def analyze_thumbnail_reference_image(image_bytes: bytes, media_type: str) -> str:
@@ -89,73 +236,32 @@ def analyze_thumbnail_reference_image(image_bytes: bytes, media_type: str) -> st
     return analyze_thumbnail_reference_images([(image_bytes, media_type)])
 
 
-THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
-    "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
-    "You are shown several reference thumbnails from the same channel. Write a single, "
-    "dense image-generation prompt (comma-separated descriptors, no full sentences, no "
-    "preamble) that captures the visual identity shared across ALL of them: recurring "
-    "subject archetype (e.g. elderly bearded man in a robe, praying) if consistent across "
-    "images, framing/composition, art style/medium, color palette, lighting, mood, and "
-    "level of detail. If the images disagree on a detail, favor whatever appears in most "
-    "of them. Do not mention any on-image text/typography, since that is added separately. "
-    "Reply with only the prompt text."
-)
-
-
 def analyze_thumbnail_reference_images(images: list) -> str:
     """
     Analyzes one or more reference YouTube thumbnails together and returns a single
     reusable image-generation prompt synthesizing their shared visual identity.
     images: list of (image_bytes, media_type) tuples.
+    Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
     """
     instruction = THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION
-    if VISION_PROVIDER == "openai":
-        raise NotImplementedError(
-            "OpenAI vision analysis isn't wired up yet — set VISION_PROVIDER=openai and "
-            "OPENAI_API_KEY once available, and implement this function."
-        )
-    return _analyze_many_with_anthropic(images, instruction)
+    return _run_with_fallback([
+        ("anthropic", lambda: _analyze_many_with_anthropic(images, instruction)),
+        ("fal.ai", lambda: _analyze_many_with_fal(images, instruction)),
+        ("openai", lambda: _analyze_many_with_openai(images, instruction)),
+    ])
 
 
-MUSIC_PROMPT_INSTRUCTION = (
-    "You are configuring an AI music generator for background music on a YouTube video. "
-    "Given the channel's niche and (optionally) an excerpt of this specific video's script, "
-    "write a single short, dense music-generation prompt (comma-separated descriptors, no "
-    "full sentences, no preamble): instrumentation, mood, tempo/BPM feel, genre. The track "
-    "must stay subtle and non-distracting under a voiceover — never suggest vocals, lyrics, "
-    "or anything that would compete with narration. Reply with only the prompt text."
-)
-
-
-def _generate_music_prompt_with_anthropic(niche: str, script_excerpt: str) -> str:
-    import anthropic
-
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+def generate_music_prompt(niche: str, script_excerpt: str = "") -> str:
+    """Uses Claude to turn a channel's niche (and optionally this video's script) into a
+    focused instrumental-music generation prompt, instead of a naive template string.
+    Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI."""
     user_text = f"Channel niche: {niche or 'general'}\n"
     if script_excerpt:
         user_text += f"Video script excerpt: {script_excerpt[:800]}\n"
     user_text += "\n" + MUSIC_PROMPT_INSTRUCTION
 
-    response = client.messages.create(
-        model="claude-opus-5",
-        max_tokens=200,
-        messages=[{"role": "user", "content": user_text}],
-    )
-    for block in response.content:
-        if block.type == "text":
-            return block.text.strip()
-    raise RuntimeError("Music prompt generation returned no text content.")
-
-
-def generate_music_prompt(niche: str, script_excerpt: str = "") -> str:
-    """Uses Claude to turn a channel's niche (and optionally this video's script) into a
-    focused instrumental-music generation prompt, instead of a naive template string."""
-    if VISION_PROVIDER == "openai":
-        raise NotImplementedError(
-            "OpenAI music-prompt generation isn't wired up yet — implement alongside "
-            "_analyze_with_openai once OPENAI_API_KEY is available."
-        )
-    return _generate_music_prompt_with_anthropic(niche, script_excerpt)
+    return _run_with_fallback([
+        ("anthropic", lambda: _generate_music_prompt_with_anthropic(user_text)),
+        ("fal.ai", lambda: _generate_music_prompt_with_fal(user_text)),
+        ("openai", lambda: _generate_music_prompt_with_openai(user_text)),
+    ])
