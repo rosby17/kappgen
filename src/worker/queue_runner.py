@@ -563,6 +563,13 @@ def purge_old_videos_and_uploads():
 AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
 AUTOMATION_RECENT_TITLES_LIMIT = 20
 
+# Shown to the creator when every configured AI text provider (Anthropic,
+# fal.ai, OpenAI) fails to write today's script — deliberately generic (no
+# mention of credits/quotas/API keys, which are our problem to fix, not
+# something a creator can act on) so it reads as "try again later" rather
+# than exposing internal billing/infra details.
+AUTOMATION_SCRIPT_FAILURE_MESSAGE = "Les serveurs de KappGen sont temporairement indisponibles. Veuillez réessayer plus tard."
+
 
 def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     """Today's date and seconds-into-day, read in this channel's own
@@ -571,6 +578,41 @@ def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     local_now = datetime.now(_channel_zone(channel))
     seconds_into_day = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
     return local_now.strftime("%Y-%m-%d"), seconds_into_day
+
+
+def _record_automation_failure(db, channel: Channel) -> None:
+    """Surfaces a script-generation failure as a visible Échec card instead
+    of a server-log-only skip — a creator watching "Nouvelle Vidéo" do
+    nothing has no way to tell a real outage apart from the automation
+    simply not being set up right. Capped at one card per channel per local
+    day: the worker retries silently every ~10 min on a hard outage (like an
+    exhausted API credit balance), and a fresh Échec card every cycle would
+    flood the video list for something the creator can only wait out anyway."""
+    today_str, _ = _channel_local_date_and_seconds(channel)
+    last_failure = (
+        db.query(Video)
+        .filter(
+            Video.channel_id == channel.id,
+            Video.status == VideoStatus.FAILED.value,
+            Video.error_message == AUTOMATION_SCRIPT_FAILURE_MESSAGE,
+        )
+        .order_by(Video.created_at.desc())
+        .first()
+    )
+    if last_failure:
+        last_failure_zone = last_failure.created_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(_channel_zone(channel))
+        if last_failure_zone.strftime("%Y-%m-%d") == today_str:
+            return
+    db.add(Video(
+        channel_id=channel.id,
+        input_type="text",
+        script_text="",
+        status=VideoStatus.FAILED.value,
+        error_message=AUTOMATION_SCRIPT_FAILURE_MESSAGE,
+        progress_stage="Échec",
+        progress_percent=0,
+    ))
+    db.commit()
 
 
 def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
@@ -626,6 +668,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         script_structure=channel.script_structure,
     )
     if not result:
+        _record_automation_failure(db, channel)
         return None
 
     estimated_duration = max(3.0, len(result["script_text"].split()) / 2.5)
