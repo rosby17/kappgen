@@ -228,14 +228,12 @@ def lookup_voice_by_id(voice_id: str, current_user: User = Depends(get_current_u
 
 
 @router.post("/{channel_id}/voice/clone")
-async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def clone_channel_voice(channel_id: str, name: str = Form(...), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
-    if not consent_confirmed:
-        raise HTTPException(status_code=400, detail="Le consentement du propriétaire de la voix est obligatoire.")
     contents = await audio.read()
     if not contents:
         raise HTTPException(status_code=400, detail="L'échantillon audio est vide.")
