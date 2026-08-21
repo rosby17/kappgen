@@ -64,6 +64,9 @@ VISION_PROVIDER = os.getenv("VISION_PROVIDER", "anthropic")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 FAL_API_KEY = os.getenv("FAL_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Extra text-generation-only fallback (see src/pipeline/ai_text.py) — not
+# used by vision.py, which stays on the three providers above.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 # NOTE: NicheCut's database must always be its own, dedicated instance — never
 # shared with another project (see incident: an earlier setup pointed this at

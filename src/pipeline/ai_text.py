@@ -1,14 +1,28 @@
-"""Shared text-generation helper with the same provider fallback chain used
-for vision (see src/pipeline/vision.py): Anthropic direct -> fal.ai (Claude
-via OpenRouter, billed against fal.ai credits) -> OpenAI. Any Claude-driven
-text step (topic selection, script writing, niche detection, ...) should go
+"""Shared text-generation helper with a provider fallback chain, text-only
+(see src/pipeline/vision.py for the separate 3-provider vision chain):
+Anthropic direct -> fal.ai (Claude via OpenRouter, billed against fal.ai
+credits) -> OpenAI -> OpenRouter direct (free-tier model, last resort when
+all three paid providers are out of credits at once). Any Claude-driven text
+step (topic selection, script writing, niche detection, ...) should go
 through this instead of calling `anthropic.Anthropic` directly, so an
 exhausted Anthropic account doesn't silently break the whole feature."""
 import httpx
 from typing import Optional
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, PRICING
+
+# OpenRouter's own ":free" model catalog changes over time; this one has
+# stayed reliably available and free as of writing. Swap it if OpenRouter
+# retires/rate-limits it — nothing else here needs to change.
+OPENROUTER_FREE_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
+# This free reasoning model sometimes leaks its internal chain-of-thought
+# straight into the answer instead of keeping it in the separate `reasoning`
+# field — content starting with one of these reads as thinking-out-loud, not
+# a usable answer (e.g. it would inject "Okay, the user wants..." into a
+# script). Treated as a failure so the caller sees a clean error instead of
+# garbage text, rather than trying to salvage/strip it.
+_OPENROUTER_LEAKED_REASONING_PREFIXES = ("okay,", "let me", "i need to", "the user", "first,")
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
@@ -79,6 +93,36 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
     return text.strip()
 
 
+def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is not configured on the server.")
+    # OPENROUTER_FREE_MODEL is a reasoning model — it spends completion
+    # tokens on a hidden "reasoning" pass before the actual answer, invisibly
+    # eating into max_tokens. Without headroom, a tight budget (sized for a
+    # non-reasoning model upstream) burns entirely on reasoning and leaves
+    # the real content empty. Padding here only, so the other providers'
+    # actual token cost/limits stay exactly as configured by the caller.
+    resp = httpx.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+        json={"model": OPENROUTER_FREE_MODEL, "max_tokens": max_tokens + 500, "messages": [{"role": "user", "content": prompt}]},
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("OpenRouter text generation returned no text content.")
+    if text.strip().lower().startswith(_OPENROUTER_LEAKED_REASONING_PREFIXES):
+        raise RuntimeError("OpenRouter returned leaked reasoning instead of a real answer.")
+    log_usage(
+        "openrouter", usage_ctx.get("operation", "text"), 1, "request", 0.0,
+        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+        meta={"model": f"{OPENROUTER_FREE_MODEL} (free-tier fallback)"},
+    )
+    return text.strip()
+
+
 def generate_text(
     prompt: str,
     max_tokens: int = 1000,
@@ -101,6 +145,7 @@ def generate_text(
         ("anthropic", lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx)),
         ("fal.ai", lambda: _fal_complete(prompt, max_tokens, usage_ctx)),
         ("openai", lambda: _openai_complete(prompt, max_tokens, usage_ctx)),
+        ("openrouter", lambda: _openrouter_complete(prompt, max_tokens, usage_ctx)),
     ]:
         try:
             return fn()
