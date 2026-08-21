@@ -221,15 +221,11 @@ def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, 
             f"{IZIVOICE_BASE_URL}/clone",
             headers={"Authorization": f"Bearer {api_key}"},
             files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
-            # removeNoise=false routes Izivoice through their transcodeToWav
-            # path server-side — the one their own code comments confirm was
-            # actually fixed for "Failed to parse duration" (clone/route.ts).
-            # Their removeNoise=true path (cleanVoiceSample) reprocesses
-            # whatever we send through its own ffmpeg pipe regardless of how
-            # clean our upload already is, and still hits the same bug —
-            # which is exactly what kept failing even after our own
-            # pre-transcode to FLAC below.
-            data={"name": name, "removeNoise": "false", "optimizeAccent": "true"},
+            # Back to removeNoise=true (server-side noise cleanup) now that
+            # Izivoice has fixed the "Failed to parse duration" bug on that
+            # path too — it was temporarily forced to "false" to route
+            # around it (see git history for the full story).
+            data={"name": name, "removeNoise": "true", "optimizeAccent": "true"},
             timeout=280,
         )
         response.raise_for_status()
