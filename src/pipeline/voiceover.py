@@ -8,6 +8,7 @@ import httpx
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
+from src.utils.cost_tracking import log_usage, estimate_izivoice_tts_cost
 
 TASK_POLL_INTERVAL_SECONDS = 2.5
 TASK_POLL_TIMEOUT_SECONDS = 600  # per task (TTS call or one STT chunk)
@@ -394,7 +395,11 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
         }
 
 
-def generate_voiceover(script_text: str, output_audio_path: Path, voice_id: Optional[str] = None, api_key: Optional[str] = None, voice_settings: Optional[Dict[str, Any]] = None) -> Tuple[Path, Dict[str, Any]]:
+def generate_voiceover(
+    script_text: str, output_audio_path: Path, voice_id: Optional[str] = None, api_key: Optional[str] = None,
+    voice_settings: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None, channel_id: Optional[str] = None, video_id: Optional[str] = None,
+) -> Tuple[Path, Dict[str, Any]]:
     """
     Generates voiceover TTS audio via the Izivoice API (or local fallback when no key is set),
     then derives word-level subtitle timing via Izivoice speech-to-text on the resulting audio
@@ -446,6 +451,12 @@ def generate_voiceover(script_text: str, output_audio_path: Path, voice_id: Opti
             audio_resp = client.get(audio_url, timeout=60.0)
             audio_resp.raise_for_status()
             output_audio_path.write_bytes(audio_resp.content)
+
+        char_count = len(script_text)
+        log_usage(
+            "izivoice_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
+            user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id},
+        )
 
         transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key)
         return output_audio_path, transcript_info

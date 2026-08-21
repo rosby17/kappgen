@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY
 from src.utils.logger import logger
+from src.utils.cost_tracking import log_usage, estimate_image_cost
 from src.pipeline.image_pool import get_image_pool
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
@@ -153,6 +154,7 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
     img_resp.raise_for_status()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(img_resp.content)
+    log_usage("fal_image", "thumbnail", 1, "images", estimate_image_cost(1), meta={"model": endpoint})
     return output_path
 
 

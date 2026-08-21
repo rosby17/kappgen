@@ -34,7 +34,7 @@ def get_db():
         db.close()
 
 def init_db():
-    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order  # ensure models are imported
+    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog  # ensure models are imported
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration: create_all only adds missing tables, not missing

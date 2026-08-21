@@ -28,7 +28,7 @@ Niches déjà utilisées par d'autres chaînes (réutilise-en une si elle corres
 
 Réponds uniquement avec ce JSON, rien d'autre :
 {{"niche": "Nom de la niche en 1 à 3 mots, en français"}}"""
-        text = generate_text(prompt, max_tokens=200)
+        text = generate_text(prompt, max_tokens=200, operation='niche_detection')
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         niche = str(data.get("niche") or "").strip()

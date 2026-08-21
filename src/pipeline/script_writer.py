@@ -111,7 +111,7 @@ Titles of videos already published on this channel (never repeat these topics or
 Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet. Respond in {language} with ONLY this JSON object, no other text:
 {{"title": "short punchy video title"}}"""
     try:
-        raw_text = generate_text(instruction, max_tokens=300, model=SCRIPT_WRITER_MODEL)
+        raw_text = generate_text(instruction, max_tokens=300, model=SCRIPT_WRITER_MODEL, operation='script_topic')
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
         return title or None
@@ -157,7 +157,7 @@ Respond with ONLY the narration text for this section, nothing else — no title
 
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
-        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL).strip()
+        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script').strip()
         return text or None
     except Exception as e:
         logger.warning(f"Daily script part generation failed for part '{part.get('name')}': {e}")

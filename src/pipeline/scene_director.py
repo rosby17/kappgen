@@ -61,7 +61,7 @@ Respond with ONLY this JSON object, no other text:
 {{"visual_bible": "...", "scene_prompts": ["prompt for scene 1", "prompt for scene 2", ...]}}
 The scene_prompts array MUST have exactly {len(segment_texts)} entries, in order."""
 
-        raw_text = generate_text(instruction, max_tokens=4000, model=SCENE_DIRECTOR_MODEL)
+        raw_text = generate_text(instruction, max_tokens=4000, model=SCENE_DIRECTOR_MODEL, operation='scene_direction')
         data = _extract_json(raw_text)
         prompts = data.get("scene_prompts")
         if not isinstance(prompts, list) or len(prompts) != len(segment_texts):

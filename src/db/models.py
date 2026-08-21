@@ -479,3 +479,41 @@ class Order(Base):
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class ApiUsageLog(Base):
+    """One row per external API call that costs money (Anthropic/fal.ai/OpenAI
+    text generation, Izivoice voice, fal.ai image generation, ...) — powers
+    the admin "Coûts" page (see src/utils/cost_tracking.py for the pricing
+    table and src/api/routes/admin.py for the aggregation endpoint). Written
+    via a short-lived session inside log_usage() so instrumented call sites
+    never need to thread a db session through just to log a cost — this
+    means a logging failure can never fail the actual generation."""
+    __tablename__ = "api_usage_logs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider = Column(String(30), nullable=False, index=True)  # "anthropic" | "fal_text" | "openai" | "izivoice_tts" | "izivoice_stt" | "fal_image"
+    operation = Column(String(50), nullable=False)  # "script" | "voiceover" | "transcription" | "image" | ...
+    quantity = Column(Float, nullable=False, default=0)  # tokens, characters, seconds, or image count depending on provider
+    unit = Column(String(20), nullable=False, default="unit")  # "tokens" | "characters" | "seconds" | "images"
+    cost_usd = Column(Float, nullable=False, default=0)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=True, index=True)
+    video_id = Column(String(36), ForeignKey("videos.id"), nullable=True, index=True)
+    meta = Column(JSON, nullable=True)  # free-form extra detail (model name, provider fallback used, etc.)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "provider": self.provider,
+            "operation": self.operation,
+            "quantity": self.quantity,
+            "unit": self.unit,
+            "cost_usd": self.cost_usd,
+            "user_id": self.user_id,
+            "channel_id": self.channel_id,
+            "video_id": self.video_id,
+            "meta": self.meta,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

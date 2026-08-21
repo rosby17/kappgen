@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import User, Channel, Video, Plan, Subscription, Order
+from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog
 from src.utils.auth import get_current_admin
 from src.utils.billing import user_has_active_subscription
 
@@ -151,6 +151,53 @@ def admin_stats(admin: User = Depends(get_current_admin), db: Session = Depends(
         "total_revenue_fcfa": total_revenue,
         "total_videos": total_videos,
         "videos_today": videos_today,
+    }
+
+
+@router.get("/costs")
+def admin_costs(days: int = 30, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Estimated spend across every external API the pipeline calls (see
+    src/utils/cost_tracking.py — these are computed from token/character/
+    image counts against a published pricing table, not a live account
+    balance, since most providers don't expose one). Powers the admin
+    "Coûts" page: a total, a breakdown by provider and by operation, and the
+    most expensive recent videos."""
+    days = max(1, min(days, 365))
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = db.query(ApiUsageLog).filter(ApiUsageLog.created_at >= since).all()
+
+    total_cost = sum(r.cost_usd for r in rows)
+    by_provider: dict = {}
+    by_operation: dict = {}
+    by_video: dict = {}
+    for r in rows:
+        by_provider.setdefault(r.provider, {"cost_usd": 0.0, "calls": 0})
+        by_provider[r.provider]["cost_usd"] += r.cost_usd
+        by_provider[r.provider]["calls"] += 1
+
+        by_operation.setdefault(r.operation, {"cost_usd": 0.0, "calls": 0})
+        by_operation[r.operation]["cost_usd"] += r.cost_usd
+        by_operation[r.operation]["calls"] += 1
+
+        if r.video_id:
+            by_video.setdefault(r.video_id, 0.0)
+            by_video[r.video_id] += r.cost_usd
+
+    top_video_ids = sorted(by_video, key=by_video.get, reverse=True)[:10]
+    top_videos = []
+    if top_video_ids:
+        videos = {v.id: v for v in db.query(Video).filter(Video.id.in_(top_video_ids)).all()}
+        for vid in top_video_ids:
+            v = videos.get(vid)
+            top_videos.append({"video_id": vid, "title": v.title if v else None, "cost_usd": round(by_video[vid], 4)})
+
+    return {
+        "days": days,
+        "total_cost_usd": round(total_cost, 4),
+        "total_calls": len(rows),
+        "by_provider": {k: {"cost_usd": round(v["cost_usd"], 4), "calls": v["calls"]} for k, v in by_provider.items()},
+        "by_operation": {k: {"cost_usd": round(v["cost_usd"], 4), "calls": v["calls"]} for k, v in by_operation.items()},
+        "top_videos": top_videos,
     }
 
 
