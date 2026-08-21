@@ -349,6 +349,8 @@ def regenerate_youtube_metadata(video_id: str, db: Session = Depends(get_db)):
     metadata = generate_metadata(video, channel)
     video.title = metadata["title"][:100]
     video.youtube_description = metadata["description"][:5000]
+    if metadata.get("thumbnail_text"):
+        video.thumbnail_text = metadata["thumbnail_text"][:255]
     db.commit()
     db.refresh(video)
     return video.to_dict()
@@ -375,7 +377,7 @@ def resync_youtube_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if not access_token:
         raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
 
-    thumbnail_path = generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel)
+    thumbnail_path = generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel)
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
@@ -399,7 +401,7 @@ def regenerate_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
 
-    generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel)
+    generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel)
     return {"status": "ok"}
 
 @router.get("/channel/{channel_id}")
