@@ -94,9 +94,6 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll
     that request shape (4xx), retries once as a plain text-only prompt rather
     than failing the whole image — the caller's own broader failure fallback
     (e.g. a video frame grab for thumbnails) is reserved for when both fail."""
-    from src.config import DISABLE_AI_IMAGE_GENERATION
-    if DISABLE_AI_IMAGE_GENERATION:
-        raise RuntimeError("La génération d'images IA est désactivée sur le serveur.")
     try:
         data = _submit_izivoice_image_task(prompt, client, reference_image_paths)
     except httpx.HTTPStatusError as exc:

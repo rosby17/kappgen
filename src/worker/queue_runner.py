@@ -659,7 +659,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         logger.info(f"Daily automation: channel {channel.id} ('{channel.name}') skipped — {reason}")
         return None
     try:
-        validate_channel_visual_source(channel)
+        validate_channel_visual_source(channel, db)
     except Exception as exc:
         logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({exc})")
         return None

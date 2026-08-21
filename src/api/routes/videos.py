@@ -12,7 +12,7 @@ from src.db.session import get_db
 from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, DISABLE_AI_IMAGE_GENERATION
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
@@ -31,15 +31,29 @@ LIBRARY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 # very long CPU-bound renders that caused them) before they even start.
 MAX_VIDEO_DURATION_SECONDS = 60 * 60
 
-def validate_channel_visual_source(channel: Channel) -> None:
+def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     """Fail before TTS/queueing when the selected visual source cannot work."""
     image_style = channel.image_style or {}
     source = image_style.get("source", "library")
-    if source in {"ai_generated", "hybrid"} and (not IZIVOICE_API_KEY or DISABLE_AI_IMAGE_GENERATION):
-        raise HTTPException(
-            status_code=503,
-            detail="La génération d’images IA n’est pas configurée sur le serveur.",
-        )
+    if source in {"ai_generated", "hybrid"}:
+        if not IZIVOICE_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="La génération d’images IA n’est pas configurée sur le serveur.",
+            )
+        # AI image generation (ai33.pro, billed through Izivoice) burns real
+        # credits regardless of the creator's own free-video quota — gated
+        # behind an active subscription specifically, not just "can render at
+        # all", so free-tier usage can't run up the image-generation bill.
+        # Voiceover/TTS is unaffected — it's covered by the regular
+        # free-quota/subscription check in user_can_render at submission.
+        from src.utils.billing import user_has_active_subscription
+        owner = channel.user
+        if not owner or not user_has_active_subscription(db, owner):
+            raise HTTPException(
+                status_code=402,
+                detail="La génération d’images IA est réservée aux abonnés KappGen Pro. Passe à l’abonnement pour l’utiliser, ou choisis une bibliothèque d’images à la place.",
+            )
     if source in {"library", "hybrid"}:
         library_path = str(image_style.get("library_path") or "")
         expected_prefix = f"channels/{channel.id}/library"
@@ -82,7 +96,7 @@ async def submit_video_subject(
         raise HTTPException(status_code=404, detail="Channel not found")
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
-    validate_channel_visual_source(channel)
+    validate_channel_visual_source(channel, db)
 
     can_render, reason = user_can_render(db, current_user)
     if not can_render:
