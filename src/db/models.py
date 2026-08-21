@@ -15,6 +15,7 @@ class User(Base):
     picture_url = Column(String(1024), nullable=True)
     phone = Column(String(50), nullable=True)
     auth_provider = Column(String(50), nullable=False, default="password")  # "password" | "google"
+    locale = Column(String(5), nullable=False, default="fr")  # "fr" | "en" — detected from Accept-Language at signup
     izivoice_api_key_encrypted = Column(Text, nullable=True)
     izivoice_key_prefix = Column(String(20), nullable=True)
     izivoice_connected_at = Column(DateTime, nullable=True)
@@ -42,6 +43,7 @@ class User(Base):
             "picture_url": self.picture_url,
             "phone": self.phone,
             "auth_provider": self.auth_provider,
+            "locale": self.locale,
             "izivoice_connected": bool(self.izivoice_api_key_encrypted),
             "izivoice_key_prefix": self.izivoice_key_prefix,
             "izivoice_connected_at": self.izivoice_connected_at.isoformat() if self.izivoice_connected_at else None,

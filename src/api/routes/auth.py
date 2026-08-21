@@ -4,15 +4,16 @@ import secrets
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from src.config import BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME, GOOGLE_CLIENT_ID
+from src.config import GOOGLE_CLIENT_ID, FRONTEND_BASE_URL
 from src.db.session import get_db
 from src.db.models import PasswordReset, User
 from src.models.project import UserCreate, UserLogin, ForgotPasswordPayload, ChangePasswordPayload, ResetPasswordPayload
 from src.utils.logger import logger
 from src.utils.auth import create_session_token, get_current_user
+from src.utils.email import SUPPORTED_LOCALES, detect_locale, send_brevo_email, email_shell, EMAIL_ACCENT
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 RESET_CODE_LIFETIME_MINUTES = 10
@@ -57,27 +58,34 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register_user(payload: UserCreate, db: Session = Depends(get_db)):
+def register_user(payload: UserCreate, request: Request, db: Session = Depends(get_db)):
     email_clean = payload.email.strip().lower()
     if not email_clean:
         raise HTTPException(status_code=400, detail="L'adresse email est requise.")
     if len(payload.password) < 8:
         raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 8 caractères.")
-        
+
     existing = db.query(User).filter(User.email == email_clean).first()
     if existing:
         raise HTTPException(status_code=400, detail="Un compte existe déjà avec cette adresse email.")
-        
+
     default_name = email_clean.split('@')[0].capitalize()
     user = User(
         email=email_clean,
         name=default_name,
         hashed_password=hash_password(payload.password),
         free_video_quota_granted=_free_quota_for_new_user(db),
+        locale=detect_locale(request.headers.get("accept-language")),
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    try:
+        send_welcome_email(user.email, user.name, user.locale)
+    except Exception as exc:
+        logger.error(f"Welcome email failed for user {user.id}: {exc}")
+
     return _auth_response(user)
 
 @router.post("/login")
@@ -106,34 +114,95 @@ def change_password(payload: ChangePasswordPayload, current_user: User = Depends
     db.commit()
     return {"message": "Mot de passe modifié avec succès."}
 
-def send_password_reset_email(email: str, code: str) -> None:
-    if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
-        raise RuntimeError("Brevo n'est pas configuré pour KappGen.")
-
-    response = httpx.post(
-        "https://api.brevo.com/v3/smtp/email",
-        headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
-        json={
-            "sender": {"email": BREVO_SENDER_EMAIL, "name": BREVO_SENDER_NAME or "KappGen"},
-            "to": [{"email": email}],
+def send_password_reset_email(email: str, code: str, locale: str = "fr") -> None:
+    copy = {
+        "fr": {
+            "eyebrow": "Récupération de compte",
+            "title": "Réinitialise ton mot de passe",
+            "intro": f"Saisis ce code dans KappGen. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes et ne peut être utilisé qu'une fois.",
+            "footer": "Si tu n'as pas demandé ce code, ignore simplement cet email — ton mot de passe ne sera pas modifié.",
             "subject": f"{code} — Code de récupération KappGen",
-            "htmlContent": f"""
-              <div style="background:#07101a;padding:36px;font-family:Arial,sans-serif;color:#eaf6ff">
-                <div style="max-width:520px;margin:auto;background:#101a27;border:1px solid #26364a;border-radius:20px;padding:32px">
-                  <div style="color:#57d9ff;font-size:12px;font-weight:700;letter-spacing:1.4px">KAPPGEN</div>
-                  <h1 style="font-size:25px;margin:18px 0 10px">Réinitialise ton mot de passe</h1>
-                  <p style="color:#9badc0;line-height:1.7">Saisis ce code dans KappGen. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes et ne peut être utilisé qu’une fois.</p>
-                  <div style="font-size:34px;font-weight:800;letter-spacing:9px;text-align:center;background:#07101a;border-radius:14px;padding:20px;margin:26px 0;color:#66ddff">{code}</div>
-                  <p style="color:#65788e;font-size:12px;line-height:1.6">Si tu n’as pas demandé ce code, ignore simplement cet email. Ton mot de passe ne sera pas modifié.</p>
-                </div>
-              </div>
-            """,
-            "textContent": f"Ton code de récupération KappGen est {code}. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes.",
+            "preheader": f"Ton code de récupération KappGen : {code}",
+            "text": f"Ton code de récupération KappGen est {code}. Il expire dans {RESET_CODE_LIFETIME_MINUTES} minutes.",
         },
-        timeout=15.0,
+        "en": {
+            "eyebrow": "Account recovery",
+            "title": "Reset your password",
+            "intro": f"Enter this code in KappGen. It expires in {RESET_CODE_LIFETIME_MINUTES} minutes and can only be used once.",
+            "footer": "If you didn't request this code, just ignore this email — your password won't be changed.",
+            "subject": f"{code} — KappGen recovery code",
+            "preheader": f"Your KappGen recovery code: {code}",
+            "text": f"Your KappGen recovery code is {code}. It expires in {RESET_CODE_LIFETIME_MINUTES} minutes.",
+        },
+    }[locale if locale in SUPPORTED_LOCALES else "fr"]
+
+    body = f"""
+      <p style="color:{EMAIL_ACCENT};font-size:12px;font-weight:700;letter-spacing:1.4px;margin:0 0 16px;text-transform:uppercase">{copy['eyebrow']}</p>
+      <h1 style="color:#eaf6ff;font-size:24px;font-weight:700;margin:0 0 12px;line-height:1.3">{copy['title']}</h1>
+      <p style="color:#9badc0;font-size:15px;line-height:1.7;margin:0 0 24px">{copy['intro']}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center" style="background:#0d141f;border:1px solid #26364a;border-radius:12px;padding:20px">
+            <span style="color:{EMAIL_ACCENT};font-size:32px;font-weight:800;letter-spacing:8px;font-family:'Courier New',monospace">{code}</span>
+          </td>
+        </tr>
+      </table>
+      <p style="color:#5b6779;font-size:13px;line-height:1.6;margin:24px 0 0">{copy['footer']}</p>
+    """
+    send_brevo_email(
+        email,
+        copy["subject"],
+        email_shell(copy["preheader"], body),
+        copy["text"],
     )
-    if response.status_code >= 300:
-        raise RuntimeError(f"Brevo a refusé l'envoi ({response.status_code}).")
+
+
+def send_welcome_email(email: str, name: str, locale: str = "fr") -> None:
+    copy = {
+        "fr": {
+            "eyebrow": "Bienvenue",
+            "title": f"Salut {name}, ton compte est prêt 🎬",
+            "intro": "Tu peux dès maintenant déléguer tes chaînes à KappGen pour générer tes premières vidéos courtes.",
+            "cta": "Déléguer mes chaînes à KappGen",
+            "subject": "Bienvenue sur KappGen 🎬",
+            "preheader": f"Bienvenue sur KappGen, {name} !",
+            "text": f"Bienvenue sur KappGen, {name} ! Ton compte est prêt : {FRONTEND_BASE_URL}",
+        },
+        "en": {
+            "eyebrow": "Welcome",
+            "title": f"Hey {name}, your account is ready 🎬",
+            "intro": "You can now delegate your channels to KappGen to generate your first short-form videos.",
+            "cta": "Delegate my channels to KappGen",
+            "subject": "Welcome to KappGen 🎬",
+            "preheader": f"Welcome to KappGen, {name}!",
+            "text": f"Welcome to KappGen, {name}! Your account is ready: {FRONTEND_BASE_URL}",
+        },
+    }[locale if locale in SUPPORTED_LOCALES else "fr"]
+
+    body = f"""
+      <p style="color:{EMAIL_ACCENT};font-size:12px;font-weight:700;letter-spacing:1.4px;margin:0 0 16px;text-transform:uppercase">{copy['eyebrow']}</p>
+      <h1 style="color:#eaf6ff;font-size:24px;font-weight:700;margin:0 0 12px;line-height:1.3">{copy['title']}</h1>
+      <p style="color:#9badc0;font-size:15px;line-height:1.7;margin:0 0 28px">{copy['intro']}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center">
+            <table role="presentation" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:{EMAIL_ACCENT};border-radius:10px">
+                  <a href="{FRONTEND_BASE_URL}/channels/new" style="display:inline-block;padding:12px 24px;color:#07101a;font-size:15px;font-weight:700;text-decoration:none">{copy['cta']}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    """
+    send_brevo_email(
+        email,
+        copy["subject"],
+        email_shell(copy["preheader"], body),
+        copy["text"],
+    )
 
 
 @router.post("/forgot-password")
@@ -156,7 +225,7 @@ def forgot_password(payload: ForgotPasswordPayload, db: Session = Depends(get_db
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     try:
-        send_password_reset_email(email_clean, code)
+        send_password_reset_email(email_clean, code, user.locale)
     except Exception as exc:
         logger.error(f"Password reset email failed for user {user.id}: {exc}")
         raise HTTPException(status_code=503, detail="Impossible d'envoyer l'email pour le moment. Réessaie dans quelques minutes.")
@@ -259,6 +328,7 @@ def get_user_profile(user_id: str, current_user: User = Depends(get_current_user
 class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
+    locale: Optional[str] = None
 
 
 @router.patch("/me/{user_id}")
@@ -275,6 +345,10 @@ def update_user_profile(user_id: str, payload: ProfileUpdate, current_user: User
         user.name = name
     if payload.phone is not None:
         user.phone = payload.phone.strip() or None
+    if payload.locale is not None:
+        if payload.locale not in SUPPORTED_LOCALES:
+            raise HTTPException(status_code=400, detail="Langue non supportée.")
+        user.locale = payload.locale
     db.commit()
     db.refresh(user)
     return user.to_dict()

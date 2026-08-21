@@ -47,7 +47,7 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 # secret and a registered redirect URI on the same or a dedicated OAuth client.
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 YOUTUBE_OAUTH_REDIRECT_URI = os.getenv("YOUTUBE_OAUTH_REDIRECT_URI", "")
-FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://kappgen.com")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://app.kappgen.com")
 # This backend's own public URL — needed to build webhook callback URLs (Tara
 # Money) that point back at the server, not the frontend.
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://api.kappgen.com")

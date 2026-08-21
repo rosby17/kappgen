@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import Plan, Subscription, Order, User
 from src.utils.auth import get_current_user
-from src.config import TARA_WEBHOOK_SECRET
+from src.utils.logger import logger
+from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
+from src.config import TARA_WEBHOOK_SECRET, FRONTEND_BASE_URL
 from src.pipeline.payments import (
     create_maketou_checkout, poll_maketou_order, create_tarapay_checkout,
 )
@@ -92,7 +94,86 @@ def _activate_subscription(db: Session, order: Order) -> Subscription:
     )
     db.add(sub)
     db.commit()
+
+    try:
+        send_invoice_email(order.user, order, plan)
+    except Exception as exc:
+        logger.error(f"Invoice email failed for order {order.id}: {exc}")
+
     return sub
+
+
+def send_invoice_email(user: User, order: Order, plan: Plan) -> None:
+    locale = user.locale if user.locale in SUPPORTED_LOCALES else "fr"
+    amount_display = f"{order.amount_fcfa:,}".replace(",", " ")
+    paid_at = order.created_at.strftime("%d/%m/%Y") if locale == "fr" else order.created_at.strftime("%Y-%m-%d")
+
+    copy = {
+        "fr": {
+            "eyebrow": "Facture",
+            "title": "Merci pour ton paiement",
+            "intro": f"Ton abonnement KappGen « {plan.name} » est actif.",
+            "subject": f"Facture KappGen — {plan.name}",
+            "preheader": f"Reçu de paiement KappGen pour {plan.name}",
+            "labels": {"order": "N° de commande", "plan": "Offre", "amount": "Montant", "date": "Date", "method": "Moyen de paiement"},
+            "cta": "Voir mes vidéos",
+            "text": f"Merci pour ton paiement. Offre : {plan.name}. Montant : {amount_display} FCFA. Commande : {order.id}.",
+        },
+        "en": {
+            "eyebrow": "Invoice",
+            "title": "Thanks for your payment",
+            "intro": f"Your KappGen \"{plan.name}\" subscription is now active.",
+            "subject": f"KappGen invoice — {plan.name}",
+            "preheader": f"KappGen payment receipt for {plan.name}",
+            "labels": {"order": "Order #", "plan": "Plan", "amount": "Amount", "date": "Date", "method": "Payment method"},
+            "cta": "View my videos",
+            "text": f"Thanks for your payment. Plan: {plan.name}. Amount: {amount_display} FCFA. Order: {order.id}.",
+        },
+    }[locale]
+
+    rows = "".join(
+        f"""
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #26364a;color:#5b6779;font-size:13px">{label}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #26364a;color:#eaf6ff;font-size:13px;text-align:right">{value}</td>
+        </tr>
+        """
+        for label, value in [
+            (copy["labels"]["plan"], plan.name),
+            (copy["labels"]["amount"], f"{amount_display} FCFA"),
+            (copy["labels"]["date"], paid_at),
+            (copy["labels"]["method"], order.provider.capitalize()),
+            (copy["labels"]["order"], order.id),
+        ]
+    )
+
+    body = f"""
+      <p style="color:{EMAIL_ACCENT};font-size:12px;font-weight:700;letter-spacing:1.4px;margin:0 0 16px;text-transform:uppercase">{copy['eyebrow']}</p>
+      <h1 style="color:#eaf6ff;font-size:24px;font-weight:700;margin:0 0 12px;line-height:1.3">{copy['title']}</h1>
+      <p style="color:#9badc0;font-size:15px;line-height:1.7;margin:0 0 24px">{copy['intro']}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0d141f;border:1px solid #26364a;border-radius:12px;padding:4px 20px">
+        {rows}
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px">
+        <tr>
+          <td align="center">
+            <table role="presentation" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:{EMAIL_ACCENT};border-radius:10px">
+                  <a href="{FRONTEND_BASE_URL}/dashboard" style="display:inline-block;padding:12px 24px;color:#07101a;font-size:15px;font-weight:700;text-decoration:none">{copy['cta']}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    """
+    send_brevo_email(
+        user.email,
+        copy["subject"],
+        email_shell(copy["preheader"], body),
+        copy["text"],
+    )
 
 
 def _claim_order_success(db: Session, order: Order) -> bool:

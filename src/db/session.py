@@ -82,6 +82,7 @@ def init_db():
             "is_admin": "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE NOT NULL",
             "free_video_quota_granted": "ALTER TABLE users ADD COLUMN free_video_quota_granted INTEGER DEFAULT 3 NOT NULL",
             "free_videos_used": "ALTER TABLE users ADD COLUMN free_videos_used INTEGER DEFAULT 0 NOT NULL",
+            "locale": "ALTER TABLE users ADD COLUMN locale VARCHAR(5) DEFAULT 'fr' NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in migrations.items():
