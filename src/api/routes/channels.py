@@ -166,26 +166,30 @@ def list_voice_catalog(
 _clone_jobs: Dict[str, Dict[str, Any]] = {}
 
 
-def _transcode_to_clean_wav(contents: bytes, filename: str) -> bytes:
-    """Re-encodes the sample to a standard 16-bit PCM WAV before it ever
+def _transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
+    """Re-encodes the sample to FLAC (lossless, mono, 24kHz) before it ever
     reaches Izivoice. Some uploads (mobile-app exports, browser recordings)
     have a technically-playable but non-standard container/header that
     Izivoice's cloning engine can fail to read the duration of — even with
     their own removeNoise cleanup applied server-side (see Izivoice's own
     src/app/api/clone/route.ts, which hits the same issue and works around it
-    by transcoding first). Doing that ourselves guarantees a clean file no
-    matter what Izivoice does on their end. Returns the original bytes
-    unchanged if ffmpeg can't decode the input at all (already-invalid audio,
-    caught later by Izivoice's own validation instead)."""
+    by transcoding first — notably to FLAC too, in their denoise path). Doing
+    that ourselves guarantees a clean file no matter what Izivoice does on
+    their end. FLAC (not raw PCM WAV) specifically to stay under Izivoice's
+    4MB upload cap: an uncompressed 44.1kHz WAV blows past 4MB on anything
+    longer than ~45s, silently turning a fixed "bad header" into a new
+    "file too large" failure for any real voice sample. Returns the original
+    bytes unchanged if ffmpeg can't decode the input at all (already-invalid
+    audio, caught later by Izivoice's own validation instead)."""
     import tempfile
     from src.utils.ffmpeg_runner import run_ffmpeg, FFmpegError
     suffix = Path(filename or "audio").suffix or ".bin"
     with tempfile.TemporaryDirectory() as tmp:
         src_path = Path(tmp) / f"in{suffix}"
-        dst_path = Path(tmp) / "out.wav"
+        dst_path = Path(tmp) / "out.flac"
         src_path.write_bytes(contents)
         try:
-            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(dst_path)])
+            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ar", "24000", "-ac", "1", "-c:a", "flac", str(dst_path)])
             return dst_path.read_bytes()
         except (FFmpegError, OSError) as exc:
             logger.warning(f"Voice-clone pre-transcode failed, sending original file as-is: {exc}")
@@ -194,11 +198,17 @@ def _transcode_to_clean_wav(contents: bytes, filename: str) -> bytes:
 
 def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, contents: bytes, name: str):
     try:
-        clean_wav = _transcode_to_clean_wav(contents, filename)
+        clean_audio = _transcode_to_clean_audio(contents, filename)
+        if len(clean_audio) > 4 * 1024 * 1024:
+            _clone_jobs[job_id] = {
+                "status": "error",
+                "detail": "Cet échantillon est trop long une fois nettoyé (limite Izivoice : 4 Mo). Utilisez un extrait plus court (~30-45 s).",
+            }
+            return
         response = httpx.post(
             f"{IZIVOICE_BASE_URL}/clone",
             headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": ("voice-sample.wav", clean_wav, "audio/wav")},
+            files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
             data={"name": name, "removeNoise": "true", "optimizeAccent": "true"},
             timeout=280,
         )
