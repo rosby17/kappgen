@@ -402,7 +402,14 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
     """On-demand equivalent of the daily auto pipeline for a single channel:
     only valid for automation_mode == "auto", where a creator clicking
     "Nouvelle vidéo" should never see the manual script/voice form — the
-    Agent picks the topic and writes the script itself, immediately."""
+    Agent picks the topic and writes the script itself, immediately.
+
+    Runs the actual generation in a background thread and returns right
+    away: script generation makes several sequential Claude calls and can
+    run past a proxy/gateway's request timeout, which shows up in the
+    browser as a misleading CORS error instead of a timeout. The frontend
+    already just checks res.ok and polls for the new video, so there's
+    nothing in the immediate response for it to consume."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -411,11 +418,10 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
     if channel.automation_mode != "auto":
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
 
-    from src.worker.queue_runner import generate_and_queue_auto_video
-    video = generate_and_queue_auto_video(db, channel)
-    if not video:
-        raise HTTPException(status_code=502, detail="La génération du script a échoué. Réessayez dans un instant.")
-    return video.to_dict()
+    from threading import Thread
+    from src.worker.queue_runner import generate_and_queue_auto_video_background
+    Thread(target=generate_and_queue_auto_video_background, args=(channel.id,), daemon=True).start()
+    return {"status": "started"}
 
 @router.post("/{channel_id}/logo")
 async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

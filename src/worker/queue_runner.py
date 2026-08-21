@@ -622,6 +622,28 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     return video
 
 
+def generate_and_queue_auto_video_background(channel_id: str):
+    """Runs generate_and_queue_auto_video on its own DB session/thread, for the
+    "Nouvelle vidéo" on-demand trigger: the several sequential Claude calls
+    inside script generation can run long enough to exceed a proxy/gateway
+    request timeout, which the browser then misreports as a CORS failure
+    rather than a timeout. The route just fires this and returns immediately;
+    the frontend already treats generate-now as fire-and-forget and polls via
+    fetchChannelVideos/fetchAllVideos."""
+    db = SessionLocal()
+    try:
+        channel = db.query(Channel).filter(Channel.id == channel_id).first()
+        if not channel:
+            return
+        video = generate_and_queue_auto_video(db, channel)
+        if not video:
+            logger.warning(f"generate-now: script generation failed for channel {channel_id}.")
+    except Exception as e:
+        logger.warning(f"generate-now background run failed for channel {channel_id}: {e}")
+    finally:
+        db.close()
+
+
 def run_daily_automation():
     """
     Zero-human-input daily pipeline: for every channel with automation_mode
