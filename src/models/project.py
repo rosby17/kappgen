@@ -87,6 +87,8 @@ class ChannelCreate(BaseModel):
     automation_window_start_hour: int = 7
     automation_window_end_hour: int = 11
     active_days: Optional[List[int]] = None  # 0=Monday..6=Sunday; None/empty = every day
+    script_generation_hour: Optional[int] = None  # local hour (0-23) script writing may start; None = as soon as possible
+    script_generation_days: Optional[List[int]] = None  # 0=Monday..6=Sunday; None/empty = every day
     script_structure: Optional[dict] = None
     voice_id: Optional[str] = None
     voice_name: Optional[str] = None
@@ -112,6 +114,8 @@ class ChannelUpdate(BaseModel):
     automation_window_start_hour: Optional[int] = None
     automation_window_end_hour: Optional[int] = None
     active_days: Optional[List[int]] = None
+    script_generation_hour: Optional[int] = None
+    script_generation_days: Optional[List[int]] = None
     script_structure: Optional[dict] = None
     voice_id: Optional[str] = None
     voice_name: Optional[str] = None

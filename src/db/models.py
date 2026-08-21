@@ -139,6 +139,15 @@ class Channel(Base):
     # once a week, three times a week, weekdays only, etc. use full automation
     # too, instead of it only supporting "N videos every single day".
     active_days = Column(JSON, nullable=True)
+    # Local hour (0-23) the daily pipeline may start WRITING the script for
+    # this channel — lets a creator pin generation to a known time (e.g. to
+    # verify automation actually fires) instead of it happening as soon as
+    # the worker gets to it. Null = as soon as possible, no gating (default).
+    script_generation_hour = Column(Integer, nullable=True)
+    # Which weekdays script generation itself is allowed to run — separate
+    # from active_days above, which only gates the publish schedule. A list
+    # of ints 0=Monday..6=Sunday; null/empty means every day.
+    script_generation_days = Column(JSON, nullable=True)
     last_auto_run_date = Column(String(10), nullable=True)  # "YYYY-MM-DD" in the channel's automation timezone
     # How many auto videos have already been generated on last_auto_run_date —
     # reset to 0 whenever the local date rolls over. Lets videos_per_day > 1
@@ -232,6 +241,8 @@ class Channel(Base):
             "automation_window_start_hour": self.automation_window_start_hour if self.automation_window_start_hour is not None else 7,
             "automation_window_end_hour": self.automation_window_end_hour if self.automation_window_end_hour is not None else 11,
             "active_days": self.active_days,
+            "script_generation_hour": self.script_generation_hour,
+            "script_generation_days": self.script_generation_days,
             "last_auto_run_date": self.last_auto_run_date,
             "timezone": self.timezone or "Africa/Douala",
             "script_structure": self.script_structure,

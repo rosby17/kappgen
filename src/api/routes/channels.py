@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 import random
 import re
 import shutil
+import threading
 import time
 import uuid
 import httpx
@@ -154,6 +155,38 @@ def list_voice_catalog(
                 break
     return {"voices": all_voices, "has_more": has_more, "next_page": max_pages}
 
+# In-memory job store for voice cloning — Izivoice's /clone call can run past
+# Cloudflare's fixed ~100s proxy timeout (same class of issue already hit
+# with large image-folder uploads, see save_valid_library_images below), which
+# silently killed the request client-side with no error and the button stuck
+# forever on "Clonage…". The endpoint now returns immediately with a job_id,
+# does the actual (slow) Izivoice call in a background thread, and the
+# frontend polls /voice/clone/status/{job_id} until it's done.
+_clone_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, contents: bytes, name: str):
+    try:
+        response = httpx.post(
+            f"{IZIVOICE_BASE_URL}/clone",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (filename or "voice-sample.wav", contents, content_type or "audio/wav")},
+            data={"name": name, "removeNoise": "true", "optimizeAccent": "true"},
+            timeout=280,
+        )
+        response.raise_for_status()
+        data = response.json()
+        voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
+        if not voice_id:
+            _clone_jobs[job_id] = {"status": "error", "detail": "Izivoice n'a retourné aucun identifiant de voix."}
+            return
+        _clone_jobs[job_id] = {"status": "done", "voice_id": voice_id, "name": name}
+    except httpx.HTTPStatusError as exc:
+        _clone_jobs[job_id] = {"status": "error", "detail": f"Izivoice a refusé le clonage ({exc.response.status_code})."}
+    except Exception as exc:
+        _clone_jobs[job_id] = {"status": "error", "detail": f"Le clonage a échoué : {exc}"}
+
+
 @router.post("/{channel_id}/voice/clone")
 async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -169,19 +202,23 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_co
     api_key = izivoice_key_for_user(current_user)
     if not api_key:
         raise HTTPException(status_code=503, detail="Izivoice n'est pas configuré.")
-    response = httpx.post(
-        f"{IZIVOICE_BASE_URL}/clone",
-        headers={"Authorization": f"Bearer {api_key}"},
-        files={"file": (audio.filename or "voice-sample.wav", contents, audio.content_type or "audio/wav")},
-        data={"name": name.strip(), "removeNoise": "true", "optimizeAccent": "true"},
-        timeout=180,
-    )
-    response.raise_for_status()
-    data = response.json()
-    voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
-    if not voice_id:
-        raise HTTPException(status_code=502, detail="Izivoice n'a retourné aucun identifiant de voix.")
-    return {"voice_id": voice_id, "name": name.strip(), "cloned": True}
+
+    job_id = uuid.uuid4().hex
+    _clone_jobs[job_id] = {"status": "pending"}
+    threading.Thread(
+        target=_run_clone_job,
+        args=(job_id, api_key, audio.filename, audio.content_type, contents, name.strip()),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/voice/clone/status/{job_id}")
+def clone_voice_status(job_id: str, current_user: User = Depends(get_current_user)):
+    job = _clone_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Tâche de clonage introuvable ou expirée.")
+    return job
 
 async def save_valid_library_images(files: List[UploadFile], target_dir: Path, append: bool = False):
     """append=True writes straight into target_dir (creating it if needed)
@@ -312,6 +349,8 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         automation_window_start_hour=payload.automation_window_start_hour if payload.automation_window_start_hour is not None else 7,
         automation_window_end_hour=payload.automation_window_end_hour if payload.automation_window_end_hour is not None else 11,
         active_days=payload.active_days,
+        script_generation_hour=None if (payload.script_generation_hour is None or payload.script_generation_hour < 0) else payload.script_generation_hour,
+        script_generation_days=payload.script_generation_days,
         script_structure=payload.script_structure,
         voice_id=payload.voice_id,
         voice_name=payload.voice_name,
@@ -401,6 +440,12 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.automation_window_end_hour = payload.automation_window_end_hour
     if payload.active_days is not None:
         channel.active_days = payload.active_days
+    if payload.script_generation_hour is not None:
+        # -1 is the frontend's explicit "back to as-soon-as-possible" sentinel —
+        # plain None can't be told apart from "field omitted from this PATCH".
+        channel.script_generation_hour = None if payload.script_generation_hour < 0 else payload.script_generation_hour
+    if payload.script_generation_days is not None:
+        channel.script_generation_days = payload.script_generation_days
     if payload.script_structure is not None:
         channel.script_structure = payload.script_structure
     if payload.voice_id is not None:

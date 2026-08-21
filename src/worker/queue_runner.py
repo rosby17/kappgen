@@ -679,19 +679,21 @@ def run_daily_automation():
     many have fired so far today (reset to 0 the moment the local date rolls
     over) so this works without a timezone-aware "count today's videos" query.
 
-    Script generation itself is NOT time-windowed or day-gated — a creator
-    can write scripts whenever the pipeline gets to them; the schedule that
-    matters to the audience is when videos go LIVE, which is controlled
-    separately by automation_window_start/end_hour + active_days at publish
-    time (see compute_scheduled_publish_at). Generating scripts as soon as
-    the day's slot is free also means the daily quota is reliably met even
-    if the worker is briefly down during what used to be a narrow window.
+    Script generation is optionally time- and day-gated by
+    script_generation_hour/script_generation_days — separate from
+    automation_window_start/end_hour + active_days, which only control when
+    a FINISHED video goes LIVE on YouTube (see compute_scheduled_publish_at).
+    Left unset (the default), scripts are written as soon as the day's slot
+    is free, which also means the daily quota is reliably met even if the
+    worker is briefly down during what would otherwise be a narrow window.
+    Setting an hour lets a creator pin generation to a known, checkable time
+    (e.g. to verify automation is actually firing for a given channel).
     """
     db = SessionLocal()
     try:
         channels = db.query(Channel).filter(Channel.automation_mode == "auto").all()
         for channel in channels:
-            today_str, _ = _channel_local_date_and_seconds(channel)
+            today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
             if channel.last_auto_run_date != today_str:
                 channel.last_auto_run_date = today_str
                 channel.auto_videos_generated_today = 0
@@ -701,6 +703,16 @@ def run_daily_automation():
             already = channel.auto_videos_generated_today or 0
             if already >= quota:
                 continue
+
+            if channel.script_generation_days:
+                local_weekday = datetime.now(_channel_zone(channel)).weekday()
+                if local_weekday not in channel.script_generation_days:
+                    continue
+
+            if channel.script_generation_hour is not None:
+                local_hour = seconds_into_day // 3600
+                if local_hour < channel.script_generation_hour:
+                    continue
 
             video = generate_and_queue_auto_video(db, channel)
             if not video:
