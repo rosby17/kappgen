@@ -359,6 +359,28 @@ def get_voice_preview(voice_id: str, current_user: User = Depends(get_current_us
         raise HTTPException(status_code=404, detail="Aperçu introuvable.")
     return FileResponse(preview_path, media_type="audio/mpeg")
 
+
+@router.post("/voice/{voice_id}/preview/generate")
+def generate_voice_preview(voice_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """On-demand version of the preview generated automatically right after
+    cloning — covers voices cloned before that existed, or whose best-effort
+    generation failed at the time (see _run_clone_job)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
+        raise HTTPException(status_code=400, detail="Identifiant de voix invalide.")
+    api_key = izivoice_key_for_user(current_user)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Connecte d'abord ton compte Izivoice dans les paramètres.")
+    preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
+    if not preview_path.exists():
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        from src.pipeline.voiceover import generate_voiceover
+        try:
+            generate_voiceover(VOICE_PREVIEW_TEXT, preview_path, voice_id=voice_id, api_key=api_key)
+        except Exception as exc:
+            logger.warning(f"On-demand voice preview generation failed for {voice_id}: {exc}")
+            raise HTTPException(status_code=502, detail="Impossible de générer l'aperçu pour cette voix.")
+    return {"preview_url": f"/channels/voice/{voice_id}/preview"}
+
 async def save_valid_library_images(files: List[UploadFile], target_dir: Path, append: bool = False):
     """append=True writes straight into target_dir (creating it if needed)
     alongside whatever's already there — used when the frontend splits a
