@@ -1,5 +1,6 @@
 import uuid
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -247,9 +248,39 @@ def download_video_audio(video_id: str, db: Session = Depends(get_db)):
     return FileResponse(audio_path, media_type="audio/mp4", filename=f"kappgen-{video_id}-audio.m4a")
 
 
+def _publish_video_background(video_id: str) -> None:
+    """Runs the actual YouTube upload (thumbnail + upload, can take minutes
+    for a long video) on its own DB session/thread — same pattern as
+    generate_and_queue_auto_video_background below. The route just kicks
+    this off and returns immediately instead of holding the HTTP request
+    (and the creator's publish modal) open for the whole upload."""
+    from src.db.session import SessionLocal
+    from src.worker.queue_runner import try_publish_to_youtube
+
+    db = SessionLocal()
+    try:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if not video:
+            return
+        channel = video.channel
+        video_path = STORAGE_PATH / video.output_path
+        try_publish_to_youtube(db, channel, video, video_path)
+    except Exception as exc:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if video:
+            video.youtube_publish_error = str(exc)[:500]
+            db.commit()
+    finally:
+        db.close()
+
+
 @router.post("/{video_id}/youtube/publish")
 def publish_video_to_youtube(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Generate the packaging and immediately publish a ready video."""
+    """Kicks off publishing in the background and returns immediately — the
+    actual YouTube upload can take minutes, and the creator shouldn't have to
+    sit on a blocking modal for it. Progress is surfaced the same way as
+    auto/scheduled publishes already are: via video.progress_stage, which the
+    video card already watches (see the /youtube|miniature/ check in App.jsx)."""
     video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value or not video.output_path:
         raise HTTPException(status_code=409, detail="La vidéo doit être prête avant sa publication.")
@@ -279,49 +310,12 @@ def publish_video_to_youtube(video_id: str, current_user: User = Depends(get_cur
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
 
-    metadata = generate_metadata(video, channel)
-    # Honor whatever title/description the creator is currently looking at
-    # (proposed right after render, editable via PATCH /{id}/youtube-metadata)
-    # instead of silently regenerating and replacing it at publish time.
-    if video.title:
-        metadata["title"] = video.title[:100]
-    if video.youtube_description:
-        metadata["description"] = video.youtube_description[:5000]
-    publication_dir = video_path.parent / "publication"
-    thumbnail_path = generate_thumbnail(
-        video_path,
-        publication_dir / "youtube-thumbnail.jpg",
-        metadata["thumbnail_text"],
-        channel=channel,
-    )
-    try:
-        youtube_id = youtube_publisher.publish_video_for_channel(
-            channel,
-            video_path,
-            metadata["title"],
-            metadata["description"],
-            thumbnail_path=thumbnail_path,
-        )
-        video.title = metadata["title"]
-        video.youtube_video_id = youtube_id
-        video.youtube_published_at = datetime.utcnow()
-        video.youtube_publish_error = None
-        db.commit()
-        db.refresh(video)
-        return {
-            "status": "published",
-            "youtube_video_id": youtube_id,
-            "youtube_url": f"https://youtu.be/{youtube_id}",
-            "metadata": metadata,
-            "video": video.to_dict(),
-        }
-    except Exception as exc:
-        db.rollback()
-        video = db.query(Video).filter(Video.id == video_id).first()
-        if video:
-            video.youtube_publish_error = str(exc)[:500]
-            db.commit()
-        raise HTTPException(status_code=502, detail=f"Publication YouTube impossible : {str(exc)[:300]}")
+    video.youtube_publish_error = None
+    video.progress_stage = "Préparation de la publication YouTube"
+    db.commit()
+
+    threading.Thread(target=_publish_video_background, args=(video_id,), daemon=True).start()
+    return {"status": "publishing", "video": video.to_dict()}
 
 class YoutubeMetadataUpdate(BaseModel):
     title: Optional[str] = None

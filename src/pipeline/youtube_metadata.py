@@ -47,13 +47,21 @@ Chaîne: {channel.name}. Niche: {channel.niche}. Langue du script à conserver.
 Le contenu doit être original, fidèle au script, sans clickbait trompeur et conforme aux règles YouTube.
 Script: {script}
 
-Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000),
+Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
 tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fidèle au sujet)."""
         text = generate_text(prompt, max_tokens=1200)
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         title = str(data.get("title") or fallback["title"]).strip()[:100]
         description = str(data.get("description") or fallback["description"]).strip()[:5000]
+        # Belt-and-suspenders: even with the prompt instruction above, Claude
+        # sometimes still tacks on its own hashtag line — strip any trailing
+        # line(s) made up entirely of hashtags so the block we append next
+        # (built from the separate `tags` field) never ends up duplicated.
+        description_lines = description.splitlines()
+        while description_lines and re.fullmatch(r"(#\S+\s*)+", description_lines[-1].strip()):
+            description_lines.pop()
+        description = "\n".join(description_lines).rstrip()
         tags = [str(tag).strip() for tag in data.get("tags", []) if str(tag).strip()][:12]
         if tags:
             description += "\n\n" + " ".join("#" + re.sub(r"[^\w]", "", tag) for tag in tags[:5])
