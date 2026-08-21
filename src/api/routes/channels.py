@@ -192,7 +192,19 @@ def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, 
         except Exception:
             upstream_detail = exc.response.text
         logger.error(f"Izivoice /clone failed ({exc.response.status_code}): {upstream_detail}")
-        _clone_jobs[job_id] = {"status": "error", "detail": f"Izivoice a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'raison inconnue'}"}
+        # Known upstream quirk (acknowledged in Izivoice's own code): their
+        # cloning engine sometimes can't read the duration of an audio file
+        # whose container/header is non-standard, even though the file plays
+        # fine everywhere else — re-exporting it (e.g. to a clean WAV/MP3)
+        # reliably fixes it, so point the creator at that instead of a raw
+        # upstream error they can't act on.
+        if "failed to parse duration" in str(upstream_detail).lower():
+            _clone_jobs[job_id] = {
+                "status": "error",
+                "detail": "Izivoice n'a pas réussi à lire ce fichier audio (en-tête non standard, même s'il joue normalement ailleurs). Réexportez-le en MP3 ou WAV propre (ex. via Audacity ou QuickTime) puis réessayez.",
+            }
+        else:
+            _clone_jobs[job_id] = {"status": "error", "detail": f"Izivoice a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'raison inconnue'}"}
     except Exception as exc:
         logger.error(f"Izivoice /clone crashed: {exc}")
         _clone_jobs[job_id] = {"status": "error", "detail": f"Le clonage a échoué : {exc}"}
