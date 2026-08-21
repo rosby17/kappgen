@@ -178,20 +178,27 @@ def process_single_queued_video() -> bool:
         # soon as the video exists, for every channel — not just auto-mode
         # ones — so the creator always has something reviewable/ready rather
         # than a blank field until the moment they hit "Publier".
-        if not video.title or not video.youtube_description:
-            try:
-                meta = youtube_metadata.generate_metadata(video, channel)
-                if not video.title:
-                    video.title = meta["title"]
-                if not video.youtube_description:
-                    video.youtube_description = meta["description"]
-                db.commit()
-            except Exception as e:
-                logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
+        # Always run metadata generation (not just when title/description are
+        # missing) so thumbnail_text — the short caption actually baked into
+        # the thumbnail image — gets computed even for videos that already
+        # had a title set elsewhere (e.g. from the submission form). Using
+        # the full `title` there instead produced garbled, overlong thumbnail
+        # text (a whole opening sentence crammed onto the image).
+        try:
+            meta = youtube_metadata.generate_metadata(video, channel)
+            if not video.title:
+                video.title = meta["title"]
+            if not video.youtube_description:
+                video.youtube_description = meta["description"]
+            if not video.thumbnail_text:
+                video.thumbnail_text = meta["thumbnail_text"]
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
         try:
             youtube_metadata.generate_thumbnail(
-                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel
+                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel
             )
         except Exception as e:
             logger.warning(f"Could not pre-generate thumbnail for video {video.id}: {e}")
@@ -370,6 +377,11 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         meta["title"] = video.title
     if video.youtube_description:
         meta["description"] = video.youtube_description
+    if video.thumbnail_text:
+        meta["thumbnail_text"] = video.thumbnail_text
+    elif meta.get("thumbnail_text"):
+        video.thumbnail_text = meta["thumbnail_text"]
+        db.commit()
     # Usually already sitting on disk — generated right after the render
     # finished, alongside the title/description. Only regenerate here if
     # that earlier pass failed for some reason.

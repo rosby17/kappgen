@@ -1,4 +1,5 @@
 """Generate publication-ready YouTube metadata and a branded thumbnail."""
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -8,6 +9,17 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from src.config import ANTHROPIC_API_KEY, STORAGE_PATH
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
+
+# A few distinct font + accent-color combos, picked deterministically per
+# video (hashed from its thumbnail text) so the same video always renders
+# the same way on regeneration, but different videos on the same channel
+# don't all look identical — creators were asking for more visual variety
+# than the single fixed white/cyan DejaVu-Bold look.
+_THUMBNAIL_FONT_FILES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+]
+_THUMBNAIL_ACCENT_COLORS = ["#5edcff", "#ffd166", "#ff6b8a", "#7ee787"]
 
 
 def _fallback_metadata(video, channel) -> dict:
@@ -62,15 +74,25 @@ tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fi
         return fallback
 
 
-def _font(size: int):
+def _font(size: int, font_file: str = None):
     candidates = [
+        font_file,
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     ]
     for candidate in candidates:
-        if Path(candidate).exists():
+        if candidate and Path(candidate).exists():
             return ImageFont.truetype(candidate, size)
     return ImageFont.load_default()
+
+
+def _pick_thumbnail_variant(seed: str):
+    """Deterministic pick from the font/color palettes above, based on a hash
+    of `seed` — same video always looks the same, different videos vary."""
+    digest = hashlib.sha256((seed or "").encode("utf-8")).hexdigest()
+    font_file = _THUMBNAIL_FONT_FILES[int(digest[:8], 16) % len(_THUMBNAIL_FONT_FILES)]
+    accent_color = _THUMBNAIL_ACCENT_COLORS[int(digest[8:16], 16) % len(_THUMBNAIL_ACCENT_COLORS)]
+    return font_file, accent_color
 
 
 def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> Path:
@@ -157,7 +179,8 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     # bottom third that hides most of the generated image. Only a soft
     # top-down gradient sits behind the text for legibility — the visual
     # itself stays the star of the thumbnail.
-    font = _font(108 if len(lines) < 3 else 88)
+    font_file, accent_color = _pick_thumbnail_variant(text)
+    font = _font(108 if len(lines) < 3 else 88, font_file)
     line_height = 122 if len(lines) < 3 else 100
     text_block_height = line_height * len(lines)
     gradient_height = min(720, text_block_height + 170)
@@ -167,12 +190,13 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
 
     y = 56
     for index, line in enumerate(lines):
-        color = "#5edcff" if index == len(lines) - 1 else "white"
+        color = accent_color if index == len(lines) - 1 else "white"
         draw.text((60, y), line, font=font, fill=color, stroke_width=5, stroke_fill="#020812")
         y += line_height
 
     # Thin brand accent bar along the bottom edge instead of a solid block.
-    draw.rectangle((0, 706, 1280, 720), fill=(0, 194, 255, 235))
+    accent_rgb = tuple(int(accent_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    draw.rectangle((0, 706, 1280, 720), fill=accent_rgb + (235,))
 
     result = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     result.save(destination, "JPEG", quality=90, optimize=True)

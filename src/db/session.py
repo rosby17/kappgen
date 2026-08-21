@@ -63,6 +63,7 @@ def init_db():
             "youtube_description": "ALTER TABLE videos ADD COLUMN youtube_description TEXT",
             "scheduled_publish_at": "ALTER TABLE videos ADD COLUMN scheduled_publish_at TIMESTAMP",
             "approved_for_publish": "ALTER TABLE videos ADD COLUMN approved_for_publish BOOLEAN DEFAULT FALSE NOT NULL",
+            "thumbnail_text": "ALTER TABLE videos ADD COLUMN thumbnail_text VARCHAR(255)",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
@@ -125,4 +126,15 @@ def init_db():
             for col_name, ddl in channel_migrations.items():
                 if col_name not in existing_channel_columns:
                     logger.info(f"Migrating channels table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
+    if "folders" in inspector.get_table_names():
+        existing_folder_columns = {col["name"] for col in inspector.get_columns("folders")}
+        folder_migrations = {
+            "parent_id": "ALTER TABLE folders ADD COLUMN parent_id VARCHAR(36)",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in folder_migrations.items():
+                if col_name not in existing_folder_columns:
+                    logger.info(f"Migrating folders table: adding {col_name} column.")
                     conn.execute(text(ddl))

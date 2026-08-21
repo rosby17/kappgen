@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from src.db.session import Base
 from src.models.project import VideoStatus
 
@@ -251,15 +251,19 @@ class Folder(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     name = Column(String(255), nullable=False)
+    # Nested folders, file-explorer style — null means a top-level folder.
+    parent_id = Column(String(36), ForeignKey("folders.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     videos = relationship("Video", back_populates="folder")
+    children = relationship("Folder", backref=backref("parent", remote_side=[id]))
 
     def to_dict(self):
         return {
             "id": self.id,
             "user_id": self.user_id,
             "name": self.name,
+            "parent_id": self.parent_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "video_count": len(self.videos) if self.videos else 0
         }
@@ -311,6 +315,10 @@ class Video(Base):
     # (alongside `title`, reused for this) so the creator can review/edit both
     # before publishing instead of only seeing them at the moment of upload.
     youtube_description = Column(Text, nullable=True)
+    # Short (2-7 word) caption baked into the thumbnail image itself — kept
+    # separate from `title` (the full YouTube title) because the title is
+    # often too long/verbose to render legibly on a 1280x720 thumbnail.
+    thumbnail_text = Column(String(255), nullable=True)
     # Set when the channel's publish_mode is "scheduled" — the worker leaves
     # this video alone until this time, then publishes it automatically.
     scheduled_publish_at = Column(DateTime, nullable=True)
@@ -352,6 +360,7 @@ class Video(Base):
             "youtube_published_at": self.youtube_published_at.isoformat() if self.youtube_published_at else None,
             "youtube_publish_error": self.youtube_publish_error,
             "youtube_description": self.youtube_description,
+            "thumbnail_text": self.thumbnail_text,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
         }
