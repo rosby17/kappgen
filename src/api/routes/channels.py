@@ -428,6 +428,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         active_days=payload.active_days,
         script_generation_hour=None if (payload.script_generation_hour is None or payload.script_generation_hour < 0) else payload.script_generation_hour,
         script_generation_minute=max(0, min(59, payload.script_generation_minute or 0)),
+        script_generation_second=max(0, min(59, payload.script_generation_second or 0)),
         script_generation_days=payload.script_generation_days,
         script_structure=payload.script_structure,
         voice_id=payload.voice_id,
@@ -524,6 +525,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.script_generation_hour = None if payload.script_generation_hour < 0 else payload.script_generation_hour
     if payload.script_generation_minute is not None:
         channel.script_generation_minute = max(0, min(59, payload.script_generation_minute))
+    if payload.script_generation_second is not None:
+        channel.script_generation_second = max(0, min(59, payload.script_generation_second))
     if payload.script_generation_days is not None:
         channel.script_generation_days = payload.script_generation_days
     if payload.script_structure is not None:

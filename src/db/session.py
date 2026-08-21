@@ -130,6 +130,7 @@ def init_db():
             "active_days": "ALTER TABLE channels ADD COLUMN active_days JSON",
             "script_generation_hour": "ALTER TABLE channels ADD COLUMN script_generation_hour INTEGER",
             "script_generation_minute": "ALTER TABLE channels ADD COLUMN script_generation_minute INTEGER DEFAULT 0 NOT NULL",
+            "script_generation_second": "ALTER TABLE channels ADD COLUMN script_generation_second INTEGER DEFAULT 0 NOT NULL",
             "script_generation_days": "ALTER TABLE channels ADD COLUMN script_generation_days JSON",
             "auto_videos_generated_today": "ALTER TABLE channels ADD COLUMN auto_videos_generated_today INTEGER DEFAULT 0 NOT NULL",
             "thumbnail_style": "ALTER TABLE channels ADD COLUMN thumbnail_style JSON",

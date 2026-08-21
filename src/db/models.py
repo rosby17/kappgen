@@ -148,6 +148,11 @@ class Channel(Base):
     # trigger to an exact minute, not just the hour, when testing whether
     # automation fires. Ignored while script_generation_hour is null.
     script_generation_minute = Column(Integer, nullable=False, default=0)
+    # Second (0-59) within script_generation_minute — stored for display
+    # fidelity (the wizard's HH:MM:SS field), but NOT enforced by the worker:
+    # the daily automation check only runs every ~10 min, so a specific
+    # second isn't something it can actually honor.
+    script_generation_second = Column(Integer, nullable=False, default=0)
     # Which weekdays script generation itself is allowed to run — separate
     # from active_days above, which only gates the publish schedule. A list
     # of ints 0=Monday..6=Sunday; null/empty means every day.
@@ -247,6 +252,7 @@ class Channel(Base):
             "active_days": self.active_days,
             "script_generation_hour": self.script_generation_hour,
             "script_generation_minute": self.script_generation_minute or 0,
+            "script_generation_second": self.script_generation_second or 0,
             "script_generation_days": self.script_generation_days,
             "last_auto_run_date": self.last_auto_run_date,
             "timezone": self.timezone or "Africa/Douala",
