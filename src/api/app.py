@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -12,6 +12,7 @@ if str(BASE_DIR) not in sys.path:
 from src.config import STORAGE_PATH
 from src.db.session import init_db
 from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin
+from src.utils.auth import get_current_admin
 
 app = FastAPI(
     title="KappGen SaaS API",
@@ -19,14 +20,29 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware for frontend development & production
+# CORS: only KappGen's own origins (+ localhost for dev) may send credentialed
+# requests. The previous `allow_origin_regex=r"https?://.*"` accepted every
+# origin on the internet, which combined with allow_credentials=True defeated
+# CORS entirely — confirmed live (an arbitrary Origin header got echoed back
+# with access-control-allow-credentials: true).
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https?://.*",
+    allow_origin_regex=r"https://([a-z0-9-]+\.)?kappgen\.com|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 # Mount static storage directory for output video streaming and downloads
 app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
@@ -49,7 +65,9 @@ def health_check():
     return {"status": "ok", "app": "KappGen Video Pipeline MVP"}
 
 @app.get("/api/db-status")
-def get_db_status():
+def get_db_status(admin=Depends(get_current_admin)):
+    # Was publicly reachable — leaked the DB engine, host and table names to
+    # anyone, unauthenticated. Confirmed live before this fix.
     from src.config import DATABASE_URL
     from urllib.parse import urlparse
 

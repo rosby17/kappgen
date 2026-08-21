@@ -26,6 +26,33 @@ router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
+
+# <script> tags and inline event-handler attributes (onload=, onclick=, ...) —
+# an SVG opened directly (not just used as <img src>) executes any script it
+# contains in the serving origin. Extension checks alone don't catch this; a
+# raster-format upload also can't be trusted just because it has a .png name,
+# so non-SVG uploads are verified by actually decoding them below.
+_SVG_SCRIPT_PATTERN = re.compile(rb"<\s*script\b", re.IGNORECASE)
+_SVG_EVENT_ATTR_PATTERN = re.compile(rb"\son\w+\s*=", re.IGNORECASE)
+
+
+def validate_uploaded_image(contents: bytes, ext: str, filename: str = "") -> None:
+    """Raises HTTPException if `contents` isn't actually a valid image of the
+    claimed type, is over the size cap, or (for SVG) contains a script."""
+    if len(contents) > MAX_IMAGE_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail=f"Image trop volumineuse (max {MAX_IMAGE_UPLOAD_BYTES // (1024*1024)} Mo).")
+    if ext == ".svg":
+        if _SVG_SCRIPT_PATTERN.search(contents) or _SVG_EVENT_ATTR_PATTERN.search(contents):
+            raise HTTPException(status_code=400, detail="Ce fichier SVG contient du code non autorisé.")
+        return
+    from PIL import Image, UnidentifiedImageError
+    import io
+    try:
+        with Image.open(io.BytesIO(contents)) as img:
+            img.verify()
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(status_code=400, detail=f"Le fichier {filename or ''} n'est pas une image valide.".strip())
 
 @router.get("/izivoice/status")
 def izivoice_status(current_user: User = Depends(get_current_user)):
@@ -444,6 +471,7 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), cur
 
     dest_file = channel_dir / f"logo{ext}"
     contents = await file.read()
+    validate_uploaded_image(contents, ext, file.filename or "")
     dest_file.write_bytes(contents)
 
     branding = dict(channel.branding or {})
@@ -477,6 +505,7 @@ async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), c
 
     dest_file = channel_dir / f"avatar{ext}"
     contents = await file.read()
+    validate_uploaded_image(contents, ext, file.filename or "")
     dest_file.write_bytes(contents)
 
     branding = dict(channel.branding or {})
@@ -597,6 +626,7 @@ async def analyze_style_image(file: UploadFile = File(...), current_user: User =
         raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp).")
 
     contents = await file.read()
+    validate_uploaded_image(contents, ext, file.filename or "")
     from src.pipeline.vision import analyze_reference_image
     try:
         style_prompt = analyze_reference_image(contents, media_type)
@@ -640,6 +670,7 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
         if not media_type:
             raise HTTPException(status_code=400, detail=f"Format d'image non supporté pour {file.filename} (png, jpg, webp).")
         contents = await file.read()
+        validate_uploaded_image(contents, ext, file.filename or "")
         dest_file = channel_dir / f"{uuid.uuid4().hex}{ext}"
         dest_file.write_bytes(contents)
         new_paths.append(f"channels/{channel.id}/thumbnail_references/{dest_file.name}")

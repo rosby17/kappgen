@@ -18,8 +18,10 @@ from src.pipeline import youtube_publisher
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render
+from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+_limit_submit = rate_limit("video_submit", max_attempts=30, window_seconds=3600)
 
 LIBRARY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
@@ -71,7 +73,8 @@ async def submit_video_subject(
     transcribe_audio: bool = Form(True),
     voice_id: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _rl=Depends(_limit_submit),
 ):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
@@ -95,6 +98,13 @@ async def submit_video_subject(
         for audio_file in audio_files:
             if not audio_file.filename:
                 continue
+
+            can_render, reason = user_can_render(db, current_user)
+            if not can_render:
+                if not created_videos:
+                    raise HTTPException(status_code=402, detail=reason)
+                break
+
             ext = Path(audio_file.filename).suffix or ".mp3"
             dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
             
@@ -134,12 +144,9 @@ async def submit_video_subject(
             )
             db.add(video)
             created_videos.append(video)
+            if current_user.free_videos_used < current_user.free_video_quota_granted:
+                current_user.free_videos_used += 1
 
-        if current_user.free_videos_used < current_user.free_video_quota_granted:
-            current_user.free_videos_used = min(
-                current_user.free_video_quota_granted,
-                current_user.free_videos_used + len(created_videos),
-            )
         db.commit()
         for v in created_videos:
             db.refresh(v)

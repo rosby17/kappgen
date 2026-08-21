@@ -4,7 +4,7 @@ import secrets
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.config import GOOGLE_CLIENT_ID, FRONTEND_BASE_URL
@@ -12,10 +12,27 @@ from src.db.session import get_db
 from src.db.models import PasswordReset, User
 from src.models.project import UserCreate, UserLogin, ForgotPasswordPayload, ChangePasswordPayload, ResetPasswordPayload
 from src.utils.logger import logger
-from src.utils.auth import create_session_token, get_current_user
+from src.utils.auth import create_session_token, get_current_user, set_session_cookie, clear_session_cookie
 from src.utils.email import SUPPORTED_LOCALES, detect_locale, send_brevo_email, email_shell, EMAIL_ACCENT
+from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+@router.get("/session")
+def get_session(current_user: User = Depends(get_current_user)):
+    # Purpose-built for the marketing landing page (kappgen.com): the session
+    # cookie is scoped to .kappgen.com, so this lets it check "is this visitor
+    # already logged in?" (to show "Accéder à KappGen" instead of the
+    # login/signup buttons) without needing the user's id up front — 401 via
+    # get_current_user when there's no valid cookie.
+    return {"id": current_user.id, "name": current_user.name}
+
+_limit_login = rate_limit("login", max_attempts=10, window_seconds=300)
+_limit_register = rate_limit("register", max_attempts=5, window_seconds=3600)
+_limit_forgot = rate_limit("forgot", max_attempts=5, window_seconds=3600)
+_limit_verify_resend = rate_limit("verify_resend", max_attempts=5, window_seconds=3600)
+EMAIL_VERIFY_TOKEN_BYTES = 32
 RESET_CODE_LIFETIME_MINUTES = 10
 RESET_MAX_REQUESTS_PER_HOUR = 5
 RESET_MAX_ATTEMPTS = 5
@@ -33,8 +50,10 @@ def _free_quota_for_new_user(db: Session) -> int:
     return EARLY_USER_FREE_QUOTA if existing_count < EARLY_USER_COUNT else STANDARD_FREE_QUOTA
 
 
-def _auth_response(user: User) -> dict:
-    return {"user": user.to_dict(), "token": create_session_token(user.id)}
+def _auth_response(user: User, response: Response) -> dict:
+    token = create_session_token(user.id)
+    set_session_cookie(response, token)
+    return {"user": user.to_dict(), "token": token}
 
 
 class GoogleAuthPayload(BaseModel):
@@ -57,13 +76,26 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except Exception:
         return False
 
+def _weak_password_reason(password: str) -> Optional[str]:
+    """8+ chars was the only rule — "aaaaaaaa" passed, confirmed live. Length
+    still matters most (NIST 800-63B), so no forced complexity theater —
+    just reject the trivially-guessable shapes a length check alone lets through."""
+    if len(password) < 8:
+        return "Le mot de passe doit contenir au moins 8 caractères."
+    if len(set(password.lower())) <= 2:
+        return "Ce mot de passe est trop simple (trop peu de caractères différents)."
+    if password.isdigit() or password.isalpha():
+        return "Le mot de passe doit contenir à la fois des lettres et des chiffres."
+    return None
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register_user(payload: UserCreate, request: Request, db: Session = Depends(get_db)):
+def register_user(payload: UserCreate, request: Request, response: Response, db: Session = Depends(get_db), _rl=Depends(_limit_register)):
     email_clean = payload.email.strip().lower()
     if not email_clean:
         raise HTTPException(status_code=400, detail="L'adresse email est requise.")
-    if len(payload.password) < 8:
-        raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 8 caractères.")
+    weak_reason = _weak_password_reason(payload.password)
+    if weak_reason:
+        raise HTTPException(status_code=400, detail=weak_reason)
 
     existing = db.query(User).filter(User.email == email_clean).first()
     if existing:
@@ -76,6 +108,8 @@ def register_user(payload: UserCreate, request: Request, db: Session = Depends(g
         hashed_password=hash_password(payload.password),
         free_video_quota_granted=_free_quota_for_new_user(db),
         locale=detect_locale(request.headers.get("accept-language")),
+        email_verify_token=secrets.token_urlsafe(EMAIL_VERIFY_TOKEN_BYTES),
+        email_verify_sent_at=datetime.utcnow(),
     )
     db.add(user)
     db.commit()
@@ -86,15 +120,25 @@ def register_user(payload: UserCreate, request: Request, db: Session = Depends(g
     except Exception as exc:
         logger.error(f"Welcome email failed for user {user.id}: {exc}")
 
-    return _auth_response(user)
+    try:
+        send_verification_email(user.email, user.email_verify_token, user.locale)
+    except Exception as exc:
+        logger.error(f"Verification email failed for user {user.id}: {exc}")
+
+    return _auth_response(user, response)
 
 @router.post("/login")
-def login_user(payload: UserLogin, db: Session = Depends(get_db)):
+def login_user(payload: UserLogin, response: Response, db: Session = Depends(get_db), _rl=Depends(_limit_login)):
     email_clean = payload.email.strip().lower()
     user = db.query(User).filter(User.email == email_clean).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect.")
-    return _auth_response(user)
+    return _auth_response(user, response)
+
+@router.post("/logout")
+def logout_user(response: Response):
+    clear_session_cookie(response)
+    return {"message": "Déconnecté."}
 
 @router.post("/change-password")
 def change_password(payload: ChangePasswordPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -107,8 +151,9 @@ def change_password(payload: ChangePasswordPayload, current_user: User = Depends
     if not verify_password(payload.old_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="L'ancien mot de passe est incorrect.")
         
-    if len(payload.new_password) < 8:
-        raise HTTPException(status_code=400, detail="Le nouveau mot de passe est trop court.")
+    weak_reason = _weak_password_reason(payload.new_password)
+    if weak_reason:
+        raise HTTPException(status_code=400, detail=weak_reason)
         
     user.hashed_password = hash_password(payload.new_password)
     db.commit()
@@ -148,6 +193,55 @@ def send_password_reset_email(email: str, code: str, locale: str = "fr") -> None
         </tr>
       </table>
       <p style="color:#5b6779;font-size:13px;line-height:1.6;margin:24px 0 0">{copy['footer']}</p>
+    """
+    send_brevo_email(
+        email,
+        copy["subject"],
+        email_shell(copy["preheader"], body),
+        copy["text"],
+    )
+
+
+def send_verification_email(email: str, token: str, locale: str = "fr") -> None:
+    verify_url = f"{FRONTEND_BASE_URL}/verify-email?token={token}"
+    copy = {
+        "fr": {
+            "eyebrow": "Vérification d'email",
+            "title": "Confirme ton adresse email",
+            "intro": "Clique sur le bouton ci-dessous pour confirmer ton adresse email et activer toutes les fonctionnalités de ton compte KappGen.",
+            "cta": "Confirmer mon email",
+            "subject": "Confirme ton adresse email — KappGen",
+            "preheader": "Confirme ton adresse email pour activer ton compte KappGen",
+            "text": f"Confirme ton adresse email en ouvrant ce lien : {verify_url}",
+        },
+        "en": {
+            "eyebrow": "Email verification",
+            "title": "Confirm your email address",
+            "intro": "Click the button below to confirm your email address and unlock all features on your KappGen account.",
+            "cta": "Confirm my email",
+            "subject": "Confirm your email address — KappGen",
+            "preheader": "Confirm your email address to activate your KappGen account",
+            "text": f"Confirm your email address by opening this link: {verify_url}",
+        },
+    }[locale if locale in SUPPORTED_LOCALES else "fr"]
+
+    body = f"""
+      <p style="color:{EMAIL_ACCENT};font-size:12px;font-weight:700;letter-spacing:1.4px;margin:0 0 16px;text-transform:uppercase">{copy['eyebrow']}</p>
+      <h1 style="color:#eaf6ff;font-size:24px;font-weight:700;margin:0 0 12px;line-height:1.3">{copy['title']}</h1>
+      <p style="color:#9badc0;font-size:15px;line-height:1.7;margin:0 0 28px">{copy['intro']}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center">
+            <table role="presentation" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:{EMAIL_ACCENT};border-radius:10px">
+                  <a href="{verify_url}" style="display:inline-block;padding:12px 24px;color:#07101a;font-size:15px;font-weight:700;text-decoration:none">{copy['cta']}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
     """
     send_brevo_email(
         email,
@@ -206,7 +300,7 @@ def send_welcome_email(email: str, name: str, locale: str = "fr") -> None:
 
 
 @router.post("/forgot-password")
-def forgot_password(payload: ForgotPasswordPayload, db: Session = Depends(get_db)):
+def forgot_password(payload: ForgotPasswordPayload, db: Session = Depends(get_db), _rl=Depends(_limit_forgot)):
     if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
         raise HTTPException(status_code=503, detail="La récupération par email est temporairement indisponible.")
 
@@ -246,8 +340,9 @@ def forgot_password(payload: ForgotPasswordPayload, db: Session = Depends(get_db
 @router.post("/reset-password")
 def reset_password(payload: ResetPasswordPayload, db: Session = Depends(get_db)):
     email_clean = payload.email.strip().lower()
-    if len(payload.new_password) < 8:
-        raise HTTPException(status_code=400, detail="Le nouveau mot de passe doit contenir au moins 8 caractères.")
+    weak_reason = _weak_password_reason(payload.new_password)
+    if weak_reason:
+        raise HTTPException(status_code=400, detail=weak_reason)
     if len(payload.code.strip()) != 6 or not payload.code.strip().isdigit():
         raise HTTPException(status_code=400, detail="Le code est invalide ou expiré.")
 
@@ -274,7 +369,7 @@ def reset_password(payload: ResetPasswordPayload, db: Session = Depends(get_db))
     return {"message": "Mot de passe réinitialisé avec succès."}
 
 @router.post("/google")
-def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
+def google_auth(payload: GoogleAuthPayload, response: Response, db: Session = Depends(get_db)):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=503, detail="La connexion Google n'est pas configurée sur le serveur.")
 
@@ -304,6 +399,8 @@ def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
             picture_url=picture_url,
             auth_provider="google",
             free_video_quota_granted=_free_quota_for_new_user(db),
+            # Google already verified this address before issuing the id_token.
+            email_verified=True,
         )
         db.add(user)
         db.commit()
@@ -312,7 +409,37 @@ def google_auth(payload: GoogleAuthPayload, db: Session = Depends(get_db)):
         user.picture_url = picture_url
         db.commit()
         db.refresh(user)
-    return _auth_response(user)
+    return _auth_response(user, response)
+
+
+@router.post("/verify-email")
+def verify_email(token: str, db: Session = Depends(get_db)):
+    token_clean = (token or "").strip()
+    if not token_clean:
+        raise HTTPException(status_code=400, detail="Jeton de vérification invalide.")
+    user = db.query(User).filter(User.email_verify_token == token_clean).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Jeton de vérification invalide ou déjà utilisé.")
+    user.email_verified = True
+    user.email_verify_token = None
+    db.commit()
+    return {"message": "Adresse email confirmée."}
+
+
+@router.post("/resend-verification")
+def resend_verification(current_user: User = Depends(get_current_user), db: Session = Depends(get_db), _rl=Depends(_limit_verify_resend)):
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if user.email_verified:
+        return {"message": "Cette adresse email est déjà confirmée."}
+    user.email_verify_token = secrets.token_urlsafe(EMAIL_VERIFY_TOKEN_BYTES)
+    user.email_verify_sent_at = datetime.utcnow()
+    db.commit()
+    try:
+        send_verification_email(user.email, user.email_verify_token, user.locale)
+    except Exception as exc:
+        logger.error(f"Verification email resend failed for user {user.id}: {exc}")
+        raise HTTPException(status_code=503, detail="Impossible d'envoyer l'email pour le moment. Réessaie dans quelques minutes.")
+    return {"message": "Email de vérification renvoyé."}
 
 
 @router.get("/me/{user_id}")

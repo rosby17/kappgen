@@ -12,8 +12,10 @@ from src.config import TARA_WEBHOOK_SECRET, FRONTEND_BASE_URL
 from src.pipeline.payments import (
     create_maketou_checkout, poll_maketou_order, create_tarapay_checkout,
 )
+from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
+_limit_checkout = rate_limit("checkout", max_attempts=20, window_seconds=3600)
 
 
 @router.get("/plans")
@@ -39,7 +41,9 @@ class CheckoutPayload(BaseModel):
 
 
 @router.post("/checkout")
-def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db), _rl=Depends(_limit_checkout)):
+    if not current_user.email_verified:
+        raise HTTPException(status_code=403, detail="Confirme ton adresse email avant de souscrire à une offre.")
     plan = db.query(Plan).filter(Plan.id == payload.plan_id, Plan.is_active == True).first()  # noqa: E712
     if not plan:
         raise HTTPException(status_code=404, detail="Offre introuvable.")

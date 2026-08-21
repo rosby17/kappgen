@@ -576,6 +576,22 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     "auto" who explicitly asks for a video right now should get exactly this,
     not the manual script/voice form."""
     from src.pipeline.script_writer import generate_daily_script
+    from src.utils.billing import user_can_render
+    from src.api.routes.videos import validate_channel_visual_source, MAX_VIDEO_DURATION_SECONDS
+
+    owner = channel.user
+    if not owner:
+        logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no owner; skipping.")
+        return None
+    can_render, reason = user_can_render(db, owner)
+    if not can_render:
+        logger.info(f"Daily automation: channel {channel.id} ('{channel.name}') skipped — {reason}")
+        return None
+    try:
+        validate_channel_visual_source(channel)
+    except Exception as exc:
+        logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({exc})")
+        return None
 
     recent_titles = [
         (v.script_text or "").split("\n")[0][:120]
@@ -606,6 +622,14 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     if not result:
         return None
 
+    estimated_duration = max(3.0, len(result["script_text"].split()) / 2.5)
+    if estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+        logger.warning(
+            f"Daily automation: generated script for channel {channel.id} ('{channel.name}') "
+            f"would produce a {estimated_duration/60:.0f} min video (max {MAX_VIDEO_DURATION_SECONDS//60}); skipping."
+        )
+        return None
+
     video = Video(
         channel_id=channel.id,
         title=result["title"],
@@ -613,10 +637,12 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         input_type="text",
         audio_input_path=None,
         status=VideoStatus.QUEUED.value,
-        estimated_duration_seconds=max(3.0, len(result["script_text"].split()) / 2.5),
+        estimated_duration_seconds=estimated_duration,
         voice_id=getattr(channel, "voice_id", None),
     )
     db.add(video)
+    if owner.free_videos_used < owner.free_video_quota_granted:
+        owner.free_videos_used += 1
     db.commit()
     db.refresh(video)
     return video

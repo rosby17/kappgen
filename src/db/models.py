@@ -22,6 +22,9 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     is_admin = Column(Boolean, nullable=False, default=False)
+    email_verified = Column(Boolean, nullable=False, default=False)
+    email_verify_token = Column(String(64), nullable=True)
+    email_verify_sent_at = Column(DateTime, nullable=True)
     # Free-tier quota: set once at registration (see register_user), never
     # recomputed later — the first 20 accounts ever created get a bigger
     # trial (10), every account after that gets 3. free_videos_used only
@@ -50,6 +53,7 @@ class User(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "channel_count": len(self.channels) if self.channels else 0,
             "is_admin": self.is_admin,
+            "email_verified": self.email_verified,
             "free_video_quota_granted": self.free_video_quota_granted,
             "free_videos_used": self.free_videos_used,
         }

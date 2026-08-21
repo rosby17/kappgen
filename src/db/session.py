@@ -84,12 +84,22 @@ def init_db():
             "free_video_quota_granted": "ALTER TABLE users ADD COLUMN free_video_quota_granted INTEGER DEFAULT 3 NOT NULL",
             "free_videos_used": "ALTER TABLE users ADD COLUMN free_videos_used INTEGER DEFAULT 0 NOT NULL",
             "locale": "ALTER TABLE users ADD COLUMN locale VARCHAR(5) DEFAULT 'fr' NOT NULL",
+            "email_verified": "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT FALSE NOT NULL",
+            "email_verify_token": "ALTER TABLE users ADD COLUMN email_verify_token VARCHAR(64)",
+            "email_verify_sent_at": "ALTER TABLE users ADD COLUMN email_verify_sent_at TIMESTAMP",
         }
+        is_new_verified_column = "email_verified" not in existing_user_columns
         with engine.begin() as conn:
             for col_name, ddl in migrations.items():
                 if col_name not in existing_user_columns:
                     logger.info(f"Migrating users table: adding {col_name} column.")
                     conn.execute(text(ddl))
+            if is_new_verified_column:
+                # Email verification is a new requirement, not retroactive:
+                # grandfather every account that already existed so we don't
+                # lock existing users out of checkout the moment this ships.
+                logger.info("Grandfathering existing users as email_verified.")
+                conn.execute(text("UPDATE users SET email_verified = TRUE"))
 
     if "channels" in inspector.get_table_names():
         existing_channel_columns = {col["name"] for col in inspector.get_columns("channels")}
