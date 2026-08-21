@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog
+from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset
 from src.utils.auth import get_current_admin
 from src.utils.billing import user_has_active_subscription
 
@@ -43,6 +43,28 @@ def get_user_detail(user_id: str, admin: User = Depends(get_current_admin), db: 
         o.to_dict() for o in db.query(Order).filter(Order.user_id == user_id).order_by(Order.created_at.desc()).all()
     ]
     return data
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Permanently deletes an account — for removing throwaway/test/audit
+    accounts. Channels, their videos, API keys and subscriptions cascade via
+    the User model's own relationships; PasswordReset/Order/ApiUsageLog rows
+    reference the user without a cascading relationship (Order keeps
+    financial history intentionally elsewhere), so they're deleted explicitly
+    here to avoid a foreign-key violation."""
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="Impossible de supprimer ton propre compte admin.")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.query(PasswordReset).filter(PasswordReset.user_id == user_id).delete()
+    db.query(Order).filter(Order.user_id == user_id).delete()
+    db.query(ApiUsageLog).filter(ApiUsageLog.user_id == user_id).delete()
+    db.query(Folder).filter(Folder.user_id == user_id).delete()
+    db.delete(user)
+    db.commit()
+    return {"deleted": True}
 
 
 class GrantSubscriptionPayload(BaseModel):
