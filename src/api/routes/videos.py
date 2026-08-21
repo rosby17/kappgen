@@ -12,7 +12,7 @@ from src.db.session import get_db
 from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, DISABLE_AI_IMAGE_GENERATION
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
@@ -35,7 +35,7 @@ def validate_channel_visual_source(channel: Channel) -> None:
     """Fail before TTS/queueing when the selected visual source cannot work."""
     image_style = channel.image_style or {}
     source = image_style.get("source", "library")
-    if source in {"ai_generated", "hybrid"} and not IZIVOICE_API_KEY:
+    if source in {"ai_generated", "hybrid"} and (not IZIVOICE_API_KEY or DISABLE_AI_IMAGE_GENERATION):
         raise HTTPException(
             status_code=503,
             detail="La génération d’images IA n’est pas configurée sur le serveur.",
