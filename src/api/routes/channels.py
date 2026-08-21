@@ -166,12 +166,39 @@ def list_voice_catalog(
 _clone_jobs: Dict[str, Dict[str, Any]] = {}
 
 
+def _transcode_to_clean_wav(contents: bytes, filename: str) -> bytes:
+    """Re-encodes the sample to a standard 16-bit PCM WAV before it ever
+    reaches Izivoice. Some uploads (mobile-app exports, browser recordings)
+    have a technically-playable but non-standard container/header that
+    Izivoice's cloning engine can fail to read the duration of — even with
+    their own removeNoise cleanup applied server-side (see Izivoice's own
+    src/app/api/clone/route.ts, which hits the same issue and works around it
+    by transcoding first). Doing that ourselves guarantees a clean file no
+    matter what Izivoice does on their end. Returns the original bytes
+    unchanged if ffmpeg can't decode the input at all (already-invalid audio,
+    caught later by Izivoice's own validation instead)."""
+    import tempfile
+    from src.utils.ffmpeg_runner import run_ffmpeg, FFmpegError
+    suffix = Path(filename or "audio").suffix or ".bin"
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = Path(tmp) / f"in{suffix}"
+        dst_path = Path(tmp) / "out.wav"
+        src_path.write_bytes(contents)
+        try:
+            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(dst_path)])
+            return dst_path.read_bytes()
+        except (FFmpegError, OSError) as exc:
+            logger.warning(f"Voice-clone pre-transcode failed, sending original file as-is: {exc}")
+            return contents
+
+
 def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, contents: bytes, name: str):
     try:
+        clean_wav = _transcode_to_clean_wav(contents, filename)
         response = httpx.post(
             f"{IZIVOICE_BASE_URL}/clone",
             headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": (filename or "voice-sample.wav", contents, content_type or "audio/wav")},
+            files={"file": ("voice-sample.wav", clean_wav, "audio/wav")},
             data={"name": name, "removeNoise": "true", "optimizeAccent": "true"},
             timeout=280,
         )
