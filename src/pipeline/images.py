@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 import random
@@ -5,7 +6,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY
 from src.utils.logger import logger
 from src.pipeline.image_pool import get_image_pool
 
@@ -114,6 +115,57 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(img_resp.content)
     return output_path
+
+
+def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:
+    """Generates a thumbnail via fal.ai's hosted OpenAI gpt-image-2 — reference
+    images are passed as real conditioning inputs (image_urls, data URIs),
+    not just a text description, for actual visual resemblance to the
+    creator's uploaded style references."""
+    if not FAL_API_KEY:
+        raise RuntimeError("FAL_API_KEY is not configured on the server.")
+
+    if reference_image_paths:
+        endpoint = "openai/gpt-image-2/edit"
+        image_urls = []
+        for path in reference_image_paths[:16]:
+            if not path.exists():
+                continue
+            media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+            image_urls.append(f"data:{media_type};base64,{base64.standard_b64encode(path.read_bytes()).decode('utf-8')}")
+        payload = {"prompt": prompt[:4000], "image_urls": image_urls, "image_size": "landscape_16_9"}
+    else:
+        endpoint = "openai/gpt-image-2"
+        payload = {"prompt": prompt[:4000], "image_size": "landscape_16_9"}
+
+    resp = client.post(
+        f"https://fal.run/{endpoint}",
+        headers={"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    images = (resp.json() or {}).get("images") or []
+    if not images or not images[0].get("url"):
+        raise ValueError(f"fal.ai gpt-image-2 returned no image: {resp.json()}")
+
+    img_resp = client.get(images[0]["url"], timeout=60.0)
+    img_resp.raise_for_status()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(img_resp.content)
+    return output_path
+
+
+def generate_thumbnail_image(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:
+    """Thumbnail-specific image generation: tries fal.ai's gpt-image-2 first
+    (best visual fidelity to reference images), falling back to Izivoice
+    (generate_ai_image) if fal.ai fails or its credits are exhausted — e.g. a
+    402/429 from fal, a missing FAL_API_KEY, or any other error."""
+    try:
+        return _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths)
+    except Exception as exc:
+        logger.warning(f"fal.ai gpt-image-2 thumbnail generation failed, falling back to Izivoice: {exc}")
+        return generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths)
 
 
 def fetch_or_generate_images(

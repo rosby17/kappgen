@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from src.config import ANTHROPIC_API_KEY, STORAGE_PATH, STORAGE_PATH
+from src.config import ANTHROPIC_API_KEY, STORAGE_PATH
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
 
@@ -74,11 +74,12 @@ def _font(size: int):
 
 
 def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> Path:
-    """Generates the thumbnail's background image via Izivoice's AI image API
-    (same provider/model as the render pipeline's visuals) instead of just
-    cropping a frame out of the finished video — a purpose-made, eye-catching
-    background that actually represents the video's subject."""
-    from src.pipeline.images import generate_ai_image
+    """Generates the thumbnail's background image — via fal.ai's gpt-image-2
+    (falling back to Izivoice if fal.ai fails or its credits run out) —
+    instead of just cropping a frame out of the finished video, for a
+    purpose-made, eye-catching background that actually represents the
+    video's subject."""
+    from src.pipeline.images import generate_thumbnail_image
     import httpx
 
     # A dedicated thumbnail reference image (channel.thumbnail_style) takes priority
@@ -107,8 +108,8 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     # avoid stalling the whole render), this is the single standalone call for the
     # thumbnail — the one image viewers judge the video by — so it's worth waiting
     # longer for it rather than falling back to a plain video-frame grab.
-    with httpx.Client(timeout=60.0) as client:
-        generate_ai_image(prompt, ai_path, client, poll_timeout_seconds=240, reference_image_paths=reference_paths)
+    with httpx.Client(timeout=120.0) as client:
+        generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths)
     return ai_path
 
 
