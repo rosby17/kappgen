@@ -198,6 +198,35 @@ def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, 
         _clone_jobs[job_id] = {"status": "error", "detail": f"Le clonage a échoué : {exc}"}
 
 
+@router.get("/voice/lookup/{voice_id}")
+def lookup_voice_by_id(voice_id: str, current_user: User = Depends(get_current_user)):
+    """Lets a creator who already has their own voice cloned directly on
+    Izivoice (outside KappGen) attach it here by pasting its voice_id,
+    instead of re-cloning it — useful as a fallback while the in-app clone
+    flow above is unreliable, and generally faster for anyone who already
+    knows their id."""
+    api_key = izivoice_key_for_user(current_user)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Connecte d'abord ton compte Izivoice dans les paramètres.")
+    voice_id_clean = voice_id.strip()
+    if not voice_id_clean:
+        raise HTTPException(status_code=400, detail="Identifiant de voix requis.")
+    try:
+        response = httpx.get(f"{IZIVOICE_BASE_URL}/voices/{voice_id_clean}", headers={"Authorization": f"Bearer {api_key}"}, timeout=30)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Izivoice est temporairement inaccessible.") from exc
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Aucune voix Izivoice ne correspond à cet identifiant.")
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=403, detail="Cette voix n'est pas accessible avec ta clé Izivoice.")
+    if not response.is_success:
+        raise HTTPException(status_code=502, detail="Impossible de vérifier cet identifiant auprès d'Izivoice.")
+    data = response.json()
+    data = data.get("data") or data
+    name = data.get("name") or f"Voix {voice_id_clean[:8]}"
+    return {"voice_id": voice_id_clean, "name": name, "language": data.get("language"), "gender": data.get("gender")}
+
+
 @router.post("/{channel_id}/voice/clone")
 async def clone_channel_voice(channel_id: str, name: str = Form(...), consent_confirmed: bool = Form(...), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
