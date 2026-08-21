@@ -353,6 +353,12 @@ def run_youtube_identity_sync():
                 channel.name = channel_info["title"]
                 if not channel.description:
                     channel.description = channel_info.get("description") or None
+                # Backfills the video-overlay logo from the YouTube avatar for
+                # any already-connected channel that never got one — no-op
+                # once a logo (manual or auto) is set. See channels.py's
+                # _fill_logo_from_youtube_avatar for the full rationale.
+                from src.api.routes.channels import _fill_logo_from_youtube_avatar
+                _fill_logo_from_youtube_avatar(channel, channel_info.get("thumbnail_url"))
                 db.commit()
             except Exception as e:
                 logger.warning(f"YouTube identity sync failed for channel {channel.id}: {e}")

@@ -56,6 +56,39 @@ def validate_uploaded_image(contents: bytes, ext: str, filename: str = "") -> No
     except (UnidentifiedImageError, OSError):
         raise HTTPException(status_code=400, detail=f"Le fichier {filename or ''} n'est pas une image valide.".strip())
 
+
+def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str]) -> None:
+    """Downloads the connected YouTube channel's own avatar and uses it as
+    the video-overlay logo (branding.logo_path) — so a creator who connects
+    their real YouTube channel gets a logo on their videos immediately,
+    instead of the corner staying blank until they separately upload one
+    manually. Never overwrites a logo that's already set (whether uploaded
+    by hand or filled in by an earlier sync), mutates channel.branding
+    in place; caller is responsible for the db.commit()."""
+    if not thumbnail_url:
+        return
+    branding = dict(channel.branding or {})
+    if branding.get("logo_path"):
+        return
+    try:
+        resp = httpx.get(thumbnail_url, timeout=15)
+        resp.raise_for_status()
+        contents = resp.content
+        content_type = resp.headers.get("content-type", "")
+        ext = ".png" if "png" in content_type else ".webp" if "webp" in content_type else ".jpg"
+        validate_uploaded_image(contents, ext)
+    except Exception as exc:
+        logger.warning(f"Could not download YouTube avatar as logo for channel {channel.id}: {exc}")
+        return
+    channel_dir = STORAGE_PATH / "channels" / channel.id
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    for old_logo in channel_dir.glob("logo.*"):
+        old_logo.unlink(missing_ok=True)
+    (channel_dir / f"logo{ext}").write_bytes(contents)
+    branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
+    channel.branding = branding
+
+
 @router.get("/izivoice/status")
 def izivoice_status(current_user: User = Depends(get_current_user)):
     return {"connected": bool(current_user.izivoice_api_key_encrypted), "key_prefix": current_user.izivoice_key_prefix, "mode": "personal" if current_user.izivoice_api_key_encrypted else "nichecut"}
@@ -1123,15 +1156,12 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
             # point, not something that should silently overwrite their input.
             if not channel.description:
                 channel.description = channel_info.get("description") or None
-            # A manually-uploaded logo otherwise always wins over the YouTube
-            # avatar in the UI (an explicit creator choice) — but connecting
-            # is itself an explicit "sync my real identity" action, so any
-            # earlier placeholder logo gets cleared to let the real photo
-            # show through. Uploading a new one afterward still overrides it.
-            branding = dict(channel.branding or {})
-            if branding.get("logo_path"):
-                branding["logo_path"] = None
-                channel.branding = branding
+            # If this channel has no logo yet, use the real YouTube avatar as
+            # the video-overlay logo right away — a creator connecting their
+            # real channel shouldn't have to separately hunt down and upload
+            # a logo file just to see it on their videos. A manual upload
+            # (now or later) always takes priority and is never overwritten.
+            _fill_logo_from_youtube_avatar(channel, channel_info.get("thumbnail_url"))
             suggested_niche = _suggest_niche_for_channel(db, channel_info["title"], channel_info.get("description", ""))
             if suggested_niche:
                 channel.niche = suggested_niche
@@ -1170,6 +1200,7 @@ def refresh_youtube_identity(channel_id: str, current_user: User = Depends(get_c
     channel.name = channel_info["title"]
     if not channel.description:
         channel.description = channel_info.get("description") or None
+    _fill_logo_from_youtube_avatar(channel, channel_info.get("thumbnail_url"))
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
