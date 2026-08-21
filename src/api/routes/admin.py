@@ -152,3 +152,77 @@ def admin_stats(admin: User = Depends(get_current_admin), db: Session = Depends(
         "total_videos": total_videos,
         "videos_today": videos_today,
     }
+
+
+@router.get("/activity")
+def admin_activity(days: int = 28, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Daily new-users / new-videos series for the dashboard chart, plus a
+    couple of "right now" numbers — mirrors the shape of iziVoice's admin
+    overview (daily line + a live sidebar) without needing a time-series DB."""
+    days = max(1, min(days, 90))
+    today = datetime.utcnow().date()
+    start = today - timedelta(days=days - 1)
+
+    users = db.query(User).filter(User.created_at >= datetime(start.year, start.month, start.day)).all()
+    videos = db.query(Video).filter(Video.created_at >= datetime(start.year, start.month, start.day)).all()
+
+    by_day = {}
+    for i in range(days):
+        d = start + timedelta(days=i)
+        by_day[d.isoformat()] = {"date": d.isoformat(), "new_users": 0, "new_videos": 0}
+    for u in users:
+        key = u.created_at.date().isoformat()
+        if key in by_day:
+            by_day[key]["new_users"] += 1
+    for v in videos:
+        key = v.created_at.date().isoformat()
+        if key in by_day:
+            by_day[key]["new_videos"] += 1
+
+    now = datetime.utcnow()
+    videos_48h = db.query(Video).filter(Video.created_at >= now - timedelta(hours=48)).count()
+
+    return {
+        "series": list(by_day.values()),
+        "users_total": db.query(User).count(),
+        "videos_last_48h": videos_48h,
+    }
+
+
+@router.get("/videos")
+def admin_list_videos(q: Optional[str] = None, status_filter: Optional[str] = None, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    query = db.query(Video).join(Channel, Video.channel_id == Channel.id).join(User, Channel.user_id == User.id)
+    if q:
+        query = query.filter((Video.title.ilike(f"%{q}%")) | (User.email.ilike(f"%{q}%")) | (Channel.name.ilike(f"%{q}%")))
+    if status_filter:
+        query = query.filter(Video.status == status_filter)
+    videos = query.order_by(Video.created_at.desc()).limit(300).all()
+    result = []
+    for v in videos:
+        data = v.to_dict()
+        data["channel_name"] = v.channel.name if v.channel else None
+        data["owner_email"] = v.channel.user.email if v.channel and v.channel.user else None
+        result.append(data)
+    return result
+
+
+@router.delete("/videos/{video_id}")
+def admin_delete_video(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    db.delete(video)
+    db.commit()
+    return {"message": "Video deleted"}
+
+
+@router.get("/orders")
+def admin_list_orders(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    orders = db.query(Order).order_by(Order.created_at.desc()).limit(300).all()
+    result = []
+    for o in orders:
+        data = o.to_dict()
+        data["user_email"] = o.user.email if o.user else None
+        data["plan_name"] = o.plan.name if o.plan else None
+        result.append(data)
+    return result

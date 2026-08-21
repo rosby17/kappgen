@@ -9,7 +9,8 @@ with each other.
 import json
 import re
 from typing import List, Optional
-from src.config import ANTHROPIC_API_KEY
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
+from src.pipeline.ai_text import generate_text
 from src.utils.logger import logger
 
 SCENE_DIRECTOR_MODEL = "claude-sonnet-5"
@@ -37,13 +38,10 @@ def build_scene_prompts(
     (character/setting/style) derived from the whole script. Returns None on
     any failure so callers can fall back to their previous behavior.
     """
-    if not ANTHROPIC_API_KEY or not segment_texts:
+    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY) or not segment_texts:
         return None
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
         numbered_segments = "\n".join(f"{i+1}. {t.strip() or '(silence/transition)'}" for i, t in enumerate(segment_texts))
 
         instruction = f"""You are the visual director for a faceless YouTube narration video (niche: {niche or "general"}).
@@ -63,12 +61,7 @@ Respond with ONLY this JSON object, no other text:
 {{"visual_bible": "...", "scene_prompts": ["prompt for scene 1", "prompt for scene 2", ...]}}
 The scene_prompts array MUST have exactly {len(segment_texts)} entries, in order."""
 
-        response = client.messages.create(
-            model=SCENE_DIRECTOR_MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": instruction}],
-        )
-        raw_text = "".join(b.text for b in response.content if b.type == "text")
+        raw_text = generate_text(instruction, max_tokens=4000, model=SCENE_DIRECTOR_MODEL)
         data = _extract_json(raw_text)
         prompts = data.get("scene_prompts")
         if not isinstance(prompts, list) or len(prompts) != len(segment_texts):
@@ -76,5 +69,5 @@ The scene_prompts array MUST have exactly {len(segment_texts)} entries, in order
             return None
         return [str(p).strip() for p in prompts]
     except Exception as e:
-        logger.warning(f"Scene director (Claude) failed, falling back to raw narration text as image prompts: {e}")
+        logger.warning(f"Scene director failed, falling back to raw narration text as image prompts: {e}")
         return None

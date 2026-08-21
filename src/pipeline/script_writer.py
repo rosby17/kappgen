@@ -20,7 +20,8 @@ within a safe output-token budget regardless of how long the full script is.
 import json
 import re
 from typing import Dict, List, Optional
-from src.config import ANTHROPIC_API_KEY
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
+from src.pipeline.ai_text import generate_text
 from src.utils.logger import logger
 
 SCRIPT_WRITER_MODEL = "claude-sonnet-5"
@@ -99,7 +100,7 @@ def _split_oversized_parts(parts: List[dict]) -> List[dict]:
     return result
 
 
-def _pick_topic(client, niche: str, recent_titles: List[str], style_prompt: Optional[str], language: str) -> Optional[str]:
+def _pick_topic(niche: str, recent_titles: List[str], style_prompt: Optional[str], language: str) -> Optional[str]:
     avoid_list = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet — this is the first video)"
     instruction = f"""You are the head writer for a faceless YouTube channel (niche: {niche or "general"}).
 {f"Creative/tone direction from the channel owner: {style_prompt}" if style_prompt else ""}
@@ -110,22 +111,16 @@ Titles of videos already published on this channel (never repeat these topics or
 Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet. Respond in {language} with ONLY this JSON object, no other text:
 {{"title": "short punchy video title"}}"""
     try:
-        response = client.messages.create(
-            model=SCRIPT_WRITER_MODEL,
-            max_tokens=300,
-            messages=[{"role": "user", "content": instruction}],
-        )
-        raw_text = "".join(b.text for b in response.content if b.type == "text")
+        raw_text = generate_text(instruction, max_tokens=300, model=SCRIPT_WRITER_MODEL)
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
         return title or None
     except Exception as e:
-        logger.warning(f"Daily script topic selection (Claude) failed: {e}")
+        logger.warning(f"Daily script topic selection failed: {e}")
         return None
 
 
 def _write_part(
-    client,
     title: str,
     niche: str,
     language: str,
@@ -162,15 +157,10 @@ Respond with ONLY the narration text for this section, nothing else — no title
 
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
-        response = client.messages.create(
-            model=SCRIPT_WRITER_MODEL,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": instruction}],
-        )
-        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL).strip()
         return text or None
     except Exception as e:
-        logger.warning(f"Daily script part generation (Claude) failed for part '{part.get('name')}': {e}")
+        logger.warning(f"Daily script part generation failed for part '{part.get('name')}': {e}")
         return None
 
 
@@ -187,8 +177,8 @@ def generate_daily_script(
     the call fails — callers should treat None as "skip today, try again on the
     next scheduled run" rather than publishing a broken video.
     """
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set — cannot auto-generate a daily script.")
+    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
+        logger.warning("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
         return None
 
     structure = script_structure or DEFAULT_SCRIPT_STRUCTURE
@@ -203,10 +193,7 @@ def generate_daily_script(
         return None
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-        title = _pick_topic(client, niche, recent_titles, style_prompt, language)
+        title = _pick_topic(niche, recent_titles, style_prompt, language)
         if not title:
             return None
 
@@ -214,7 +201,7 @@ def generate_daily_script(
         tail = ""
         for i, part in enumerate(parts):
             part_text = _write_part(
-                client, title, niche, language, style_prompt, formatting_rules, cta_style,
+                title, niche, language, style_prompt, formatting_rules, cta_style,
                 part, tail, is_last_part=(i == len(parts) - 1),
             )
             if not part_text:
@@ -228,5 +215,5 @@ def generate_daily_script(
             return None
         return {"title": title, "script_text": script_text}
     except Exception as e:
-        logger.warning(f"Daily script generation (Claude) failed: {e}")
+        logger.warning(f"Daily script generation failed: {e}")
         return None

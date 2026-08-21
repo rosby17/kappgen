@@ -6,7 +6,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from src.config import ANTHROPIC_API_KEY, STORAGE_PATH
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, STORAGE_PATH
+from src.pipeline.ai_text import generate_text
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
 
@@ -37,11 +38,9 @@ def _fallback_metadata(video, channel) -> dict:
 
 def generate_metadata(video, channel) -> dict:
     fallback = _fallback_metadata(video, channel)
-    if not ANTHROPIC_API_KEY:
+    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
         return fallback
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         script = (video.script_text or "")[:12000]
         prompt = f"""Tu es l'Agent éditorial KappGen. Prépare la publication YouTube de cette vidéo.
 Chaîne: {channel.name}. Niche: {channel.niche}. Langue du script à conserver.
@@ -50,12 +49,7 @@ Script: {script}
 
 Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000),
 tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fidèle au sujet)."""
-        response = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=1200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")
+        text = generate_text(prompt, max_tokens=1200)
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         title = str(data.get("title") or fallback["title"]).strip()[:100]
