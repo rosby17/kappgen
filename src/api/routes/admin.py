@@ -154,6 +154,17 @@ def admin_stats(admin: User = Depends(get_current_admin), db: Session = Depends(
     }
 
 
+@router.get("/providers/status")
+def admin_provider_status(admin: User = Depends(get_current_admin)):
+    """Live 'is this provider working right now' check for each external API
+    the pipeline depends on — see src/utils/provider_status.py for exactly
+    what each check does and, importantly, doesn't do (most providers expose
+    no real balance API; this is not a substitute for checking their own
+    dashboards for exact billing)."""
+    from src.utils.provider_status import check_all_providers
+    return {"providers": check_all_providers()}
+
+
 @router.get("/costs")
 def admin_costs(days: int = 30, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     """Estimated spend across every external API the pipeline calls (see
