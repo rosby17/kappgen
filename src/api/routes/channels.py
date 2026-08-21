@@ -171,6 +171,10 @@ _clone_jobs: Dict[str, Dict[str, Any]] = {}
 # instead of relying on the creator to manually trim their file.
 CLONE_MAX_SECONDS = 30
 
+# Short, neutral sentence read back in the newly cloned voice right after
+# cloning, since Izivoice's /clone itself never returns a sample to preview.
+VOICE_PREVIEW_TEXT = "Bonjour, voici un aperçu de cette voix clonée sur KappGen."
+
 
 def _transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
     """Re-encodes the sample to FLAC (lossless, mono, 24kHz) before it ever
@@ -234,7 +238,27 @@ def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, 
         if not voice_id:
             _clone_jobs[job_id] = {"status": "error", "detail": "Izivoice n'a retourné aucun identifiant de voix."}
             return
-        _clone_jobs[job_id] = {"status": "done", "voice_id": voice_id, "name": name}
+
+        # Izivoice's /clone deliberately returns preview_url: null ("no longer
+        # generate a preview here to speed up the process") — without this,
+        # a freshly cloned voice has no way to be previewed anywhere in the
+        # app (catalog voices all have a pre-made sample; this one wouldn't).
+        # Best-effort: a cloned voice with no preview is still usable, just
+        # not previewable, so this never fails the clone itself.
+        preview_url = None
+        try:
+            preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
+            preview_path.parent.mkdir(parents=True, exist_ok=True)
+            from src.pipeline.voiceover import generate_voiceover
+            generate_voiceover(VOICE_PREVIEW_TEXT, preview_path, voice_id=voice_id, api_key=api_key)
+            # API_BASE on the frontend already ends in /api — a leading /api
+            # here would double up into /api/api/... (see the same note on
+            # the scene-image route in videos.py, which hit this exact bug).
+            preview_url = f"/channels/voice/{voice_id}/preview"
+        except Exception as exc:
+            logger.warning(f"Voice-clone preview generation failed for {voice_id}: {exc}")
+
+        _clone_jobs[job_id] = {"status": "done", "voice_id": voice_id, "name": name, "preview_url": preview_url}
     except httpx.HTTPStatusError as exc:
         # Surface whatever Izivoice actually said instead of just the status
         # code — a bare "(500)" gives no way to tell a bad audio file apart
@@ -322,6 +346,18 @@ def clone_voice_status(job_id: str, current_user: User = Depends(get_current_use
     if not job:
         raise HTTPException(status_code=404, detail="Tâche de clonage introuvable ou expirée.")
     return job
+
+
+@router.get("/voice/{voice_id}/preview")
+def get_voice_preview(voice_id: str, current_user: User = Depends(get_current_user)):
+    """Serves the short sample generated right after cloning (see
+    _run_clone_job) — Izivoice's /clone itself never returns one."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
+        raise HTTPException(status_code=404, detail="Aperçu introuvable.")
+    preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
+    if not preview_path.exists():
+        raise HTTPException(status_code=404, detail="Aperçu introuvable.")
+    return FileResponse(preview_path, media_type="audio/mpeg")
 
 async def save_valid_library_images(files: List[UploadFile], target_dir: Path, append: bool = False):
     """append=True writes straight into target_dir (creating it if needed)
