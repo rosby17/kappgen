@@ -165,6 +165,12 @@ def list_voice_catalog(
 # frontend polls /voice/clone/status/{job_id} until it's done.
 _clone_jobs: Dict[str, Dict[str, Any]] = {}
 
+# Izivoice's own guidance for their "server couldn't process this audio"
+# error: a short, clean sample clones just as well as a long one and avoids
+# their engine choking on longer/complex clips — enforced automatically
+# instead of relying on the creator to manually trim their file.
+CLONE_MAX_SECONDS = 30
+
 
 def _transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
     """Re-encodes the sample to FLAC (lossless, mono, 24kHz) before it ever
@@ -180,7 +186,13 @@ def _transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
     longer than ~45s, silently turning a fixed "bad header" into a new
     "file too large" failure for any real voice sample. Returns the original
     bytes unchanged if ffmpeg can't decode the input at all (already-invalid
-    audio, caught later by Izivoice's own validation instead)."""
+    audio, caught later by Izivoice's own validation instead).
+
+    Also hard-caps the sample to CLONE_MAX_SECONDS: Izivoice's own error for
+    long/complex clips says as much ("Privilégiez un extrait pur de 30
+    secondes maximum") — voice cloning doesn't benefit from a longer sample
+    past that anyway, so trimming automatically is strictly better than
+    surfacing their 500 and asking the creator to re-cut the file by hand."""
     import tempfile
     from src.utils.ffmpeg_runner import run_ffmpeg, FFmpegError
     suffix = Path(filename or "audio").suffix or ".bin"
@@ -189,7 +201,7 @@ def _transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
         dst_path = Path(tmp) / "out.flac"
         src_path.write_bytes(contents)
         try:
-            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ar", "24000", "-ac", "1", "-c:a", "flac", str(dst_path)])
+            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-t", str(CLONE_MAX_SECONDS), "-ar", "24000", "-ac", "1", "-c:a", "flac", str(dst_path)])
             return dst_path.read_bytes()
         except (FFmpegError, OSError) as exc:
             logger.warning(f"Voice-clone pre-transcode failed, sending original file as-is: {exc}")
