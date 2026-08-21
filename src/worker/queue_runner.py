@@ -710,8 +710,9 @@ def run_daily_automation():
                     continue
 
             if channel.script_generation_hour is not None:
-                local_hour = seconds_into_day // 3600
-                if local_hour < channel.script_generation_hour:
+                local_minutes = seconds_into_day // 60
+                target_minutes = channel.script_generation_hour * 60 + (channel.script_generation_minute or 0)
+                if local_minutes < target_minutes:
                     continue
 
             video = generate_and_queue_auto_video(db, channel)

@@ -22,6 +22,7 @@ from src.pipeline.niche_detector import suggest_niche
 from src.utils.credentials import encrypt_credential, izivoice_key_for_user
 from src.utils.auth import get_current_user
 from src.utils.billing import user_has_active_subscription
+from src.utils.logger import logger
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -182,8 +183,18 @@ def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, 
             return
         _clone_jobs[job_id] = {"status": "done", "voice_id": voice_id, "name": name}
     except httpx.HTTPStatusError as exc:
-        _clone_jobs[job_id] = {"status": "error", "detail": f"Izivoice a refusé le clonage ({exc.response.status_code})."}
+        # Surface whatever Izivoice actually said instead of just the status
+        # code — a bare "(500)" gives no way to tell a bad audio file apart
+        # from a misconfigured request on our side.
+        try:
+            upstream_detail = exc.response.json()
+            upstream_detail = upstream_detail.get("message") or upstream_detail.get("detail") or upstream_detail.get("error") or exc.response.text
+        except Exception:
+            upstream_detail = exc.response.text
+        logger.error(f"Izivoice /clone failed ({exc.response.status_code}): {upstream_detail}")
+        _clone_jobs[job_id] = {"status": "error", "detail": f"Izivoice a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'raison inconnue'}"}
     except Exception as exc:
+        logger.error(f"Izivoice /clone crashed: {exc}")
         _clone_jobs[job_id] = {"status": "error", "detail": f"Le clonage a échoué : {exc}"}
 
 
@@ -350,6 +361,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         automation_window_end_hour=payload.automation_window_end_hour if payload.automation_window_end_hour is not None else 11,
         active_days=payload.active_days,
         script_generation_hour=None if (payload.script_generation_hour is None or payload.script_generation_hour < 0) else payload.script_generation_hour,
+        script_generation_minute=max(0, min(59, payload.script_generation_minute or 0)),
         script_generation_days=payload.script_generation_days,
         script_structure=payload.script_structure,
         voice_id=payload.voice_id,
@@ -444,6 +456,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         # -1 is the frontend's explicit "back to as-soon-as-possible" sentinel —
         # plain None can't be told apart from "field omitted from this PATCH".
         channel.script_generation_hour = None if payload.script_generation_hour < 0 else payload.script_generation_hour
+    if payload.script_generation_minute is not None:
+        channel.script_generation_minute = max(0, min(59, payload.script_generation_minute))
     if payload.script_generation_days is not None:
         channel.script_generation_days = payload.script_generation_days
     if payload.script_structure is not None:
