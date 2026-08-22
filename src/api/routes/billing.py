@@ -35,6 +35,12 @@ def my_subscription(current_user: User = Depends(get_current_user), db: Session 
     return {"active": sub is not None, "subscription": sub.to_dict() if sub else None}
 
 
+@router.get("/credits")
+def my_credit_balance(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from src.utils.billing import get_credit_balance
+    return {"balance": get_credit_balance(db, current_user)}
+
+
 class CheckoutPayload(BaseModel):
     plan_id: str
     provider: str  # "maketou" | "tarapay"
@@ -83,28 +89,38 @@ def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_c
     return {"order_id": order.id, "redirect_url": redirect_url}
 
 
-def _activate_subscription(db: Session, order: Order) -> Subscription:
-    """Creates the subscription tied to a just-paid order. Extends from
-    'now' rather than stacking onto an existing expiry — simple, matches a
-    single-active-subscription-per-user model."""
+def _activate_subscription(db: Session, order: Order):
+    """Settles a just-paid order: credit-pack plans (the current model —
+    every active plan has `credits` set, mirroring Izivoice's own packs)
+    grant a CreditPot; a null-credits plan falls back to the legacy
+    unlimited-access Subscription for any pre-migration plan still around."""
     plan = order.plan
-    sub = Subscription(
-        user_id=order.user_id,
-        plan_id=plan.id,
-        status="active",
-        started_at=datetime.utcnow(),
-        expires_at=datetime.utcnow() + timedelta(days=plan.duration_days),
-        note=f"Payé via {order.provider} (commande {order.id})",
-    )
-    db.add(sub)
-    db.commit()
+    from src.utils.billing import credit_user
+    if plan.credits:
+        result = credit_user(
+            db, order.user,
+            amount=plan.credits,
+            valid_days=plan.duration_days,
+            description=f"Achat {plan.name} — {order.amount_fcfa:,} FCFA via {order.provider} (commande {order.id})".replace(",", " "),
+        )
+    else:
+        result = Subscription(
+            user_id=order.user_id,
+            plan_id=plan.id,
+            status="active",
+            started_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(days=plan.duration_days),
+            note=f"Payé via {order.provider} (commande {order.id})",
+        )
+        db.add(result)
+        db.commit()
 
     try:
         send_invoice_email(order.user, order, plan)
     except Exception as exc:
         logger.error(f"Invoice email failed for order {order.id}: {exc}")
 
-    return sub
+    return result
 
 
 def send_invoice_email(user: User, order: Order, plan: Plan) -> None:

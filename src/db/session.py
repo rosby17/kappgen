@@ -34,7 +34,7 @@ def get_db():
         db.close()
 
 def init_db():
-    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog  # ensure models are imported
+    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog, CreditPot, CreditTransaction  # ensure models are imported
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration: create_all only adds missing tables, not missing
@@ -151,4 +151,16 @@ def init_db():
             for col_name, ddl in folder_migrations.items():
                 if col_name not in existing_folder_columns:
                     logger.info(f"Migrating folders table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
+    if "plans" in inspector.get_table_names():
+        existing_plan_columns = {col["name"] for col in inspector.get_columns("plans")}
+        plan_migrations = {
+            "credits": "ALTER TABLE plans ADD COLUMN credits INTEGER",
+            "original_price_fcfa": "ALTER TABLE plans ADD COLUMN original_price_fcfa INTEGER",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in plan_migrations.items():
+                if col_name not in existing_plan_columns:
+                    logger.info(f"Migrating plans table: adding {col_name} column.")
                     conn.execute(text(ddl))

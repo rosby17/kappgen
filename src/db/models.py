@@ -403,13 +403,24 @@ class Plan(Base):
     duration_days = Column(Integer, nullable=False, default=30)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Credit-pack plans (the current model, mirroring Izivoice's own pricing):
+    # paying grants `credits` credits, valid for `duration_days`, instead of
+    # unlimited access for `duration_days` — a null value marks a legacy
+    # subscription-style plan, kept only for historical Order/Subscription rows.
+    credits = Column(Integer, nullable=True)
+    # Shown struck-through next to price_fcfa on the pricing cards (matches
+    # Izivoice's "was X, now Y" promo styling) — purely cosmetic, never used
+    # for any charge/credit math.
+    original_price_fcfa = Column(Integer, nullable=True)
 
     def to_dict(self):
         return {
             "id": self.id,
             "name": self.name,
             "price_fcfa": self.price_fcfa,
+            "original_price_fcfa": self.original_price_fcfa,
             "duration_days": self.duration_days,
+            "credits": self.credits,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
@@ -515,5 +526,54 @@ class ApiUsageLog(Base):
             "channel_id": self.channel_id,
             "video_id": self.video_id,
             "meta": self.meta,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CreditPot(Base):
+    """One purchased credit pack, ported from Izivoice's own credit_pots
+    model: a balance isn't one number on the user row, it's the sum of every
+    still-valid (non-expired, non-empty) pot — so a promo pack's validity
+    window is enforced for free instead of needing separate expiry logic."""
+    __tablename__ = "credit_pots"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    amount = Column(Integer, nullable=False)  # remaining balance in this pot
+    original_amount = Column(Integer, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "amount": self.amount,
+            "original_amount": self.original_amount,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CreditTransaction(Base):
+    """Audit trail of every credit movement — positive for a purchase,
+    negative for a debited API call — independent of CreditPot's own
+    mutable balances, so history survives even after a pot expires/empties."""
+    __tablename__ = "credit_transactions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    amount = Column(Integer, nullable=False)
+    transaction_type = Column(String(30), nullable=False)  # "purchase" | "debit" | "admin_grant" | "refund"
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "amount": self.amount,
+            "transaction_type": self.transaction_type,
+            "description": self.description,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

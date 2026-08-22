@@ -8,7 +8,7 @@ import httpx
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
-from src.utils.cost_tracking import log_usage, estimate_izivoice_tts_cost
+from src.utils.cost_tracking import log_usage, estimate_izivoice_tts_cost, estimate_izivoice_stt_cost
 
 TASK_POLL_INTERVAL_SECONDS = 2.5
 TASK_POLL_TIMEOUT_SECONDS = 600  # per task (TTS call or one STT chunk)
@@ -284,7 +284,7 @@ def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
     return sorted(chunk_dir.glob("chunk_*.mp3"))
 
 
-def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Transcribes an audio file via Izivoice's speech-to-text, chunking long files
     (10min+/3h videos) to stay under the API's per-request size limit, and stitching
@@ -364,6 +364,11 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     full_text = " ".join(p for p in all_text_parts if p).strip() or fallback_text
     if not all_words:
         all_words = synthetic_word_timings(full_text, total_duration)
+
+    log_usage("izivoice_stt", "transcription", total_duration, "seconds", estimate_izivoice_stt_cost(total_duration), user_id=user_id)
+    if user_id:
+        from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
+        debit_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt")
 
     return {"text": full_text, "duration": total_duration, "words": all_words}
 
@@ -457,8 +462,11 @@ def generate_voiceover(
             "izivoice_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
             user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id},
         )
+        if user_id:
+            from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
+            debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts")
 
-        transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key)
+        transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id)
         return output_audio_path, transcript_info
 
     except Exception as e:

@@ -175,6 +175,7 @@ def fetch_or_generate_images(
     output_dir: Path,
     image_style: Optional[dict] = None,
     unique_generation_count: Optional[int] = None,
+    user_id: Optional[str] = None,
 ) -> List[Path]:
     """
     Fetches images for each scene: either generated via the ai33.pro AI image API
@@ -218,6 +219,9 @@ def fetch_or_generate_images(
             full_prompt = f"{p}, {style_prompt}" if style_prompt else p
             try:
                 generate_ai_image(full_prompt, img_file, client)
+                if user_id:
+                    from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_IMAGE_CREDITS
+                    debit_izivoice_usage_by_user_id(user_id, IZIVOICE_IMAGE_CREDITS, "ai_image_generation")
                 return img_file
             except Exception as e:
                 # ai33.pro is a third-party service that has proven unreliable
