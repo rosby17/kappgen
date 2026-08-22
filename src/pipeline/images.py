@@ -217,11 +217,19 @@ def fetch_or_generate_images(
         def fetch_one(i: int, p: str, client: httpx.Client) -> Optional[Path]:
             img_file = output_dir / f"{prefix}_{i+1}.png"
             full_prompt = f"{p}, {style_prompt}" if style_prompt else p
+            # Debited BEFORE generating, not after: debit_izivoice_usage_by_user_id
+            # returns False on insufficient balance, and the whole point of
+            # checking is to never place the real (money-costing) Izivoice
+            # call when we already know it can't be paid for — falling back
+            # to a library image instead, same as any other generation failure.
+            if user_id:
+                from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_IMAGE_CREDITS
+                if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_IMAGE_CREDITS, "ai_image_generation"):
+                    logger.warning(f"Insufficient KappGen credit balance for AI image generation (user {user_id}); using fallback image instead.")
+                    fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
+                    return fallback[0] if fallback else None
             try:
                 generate_ai_image(full_prompt, img_file, client)
-                if user_id:
-                    from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_IMAGE_CREDITS
-                    debit_izivoice_usage_by_user_id(user_id, IZIVOICE_IMAGE_CREDITS, "ai_image_generation")
                 return img_file
             except Exception as e:
                 # ai33.pro is a third-party service that has proven unreliable

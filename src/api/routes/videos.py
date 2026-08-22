@@ -42,17 +42,18 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
                 detail="La génération d’images IA n’est pas configurée sur le serveur.",
             )
         # AI image generation (ai33.pro, billed through Izivoice) burns real
-        # credits regardless of the creator's own free-video quota — gated
-        # behind an active subscription specifically, not just "can render at
-        # all", so free-tier usage can't run up the image-generation bill.
-        # Voiceover/TTS is unaffected — it's covered by the regular
-        # free-quota/subscription check in user_can_render at submission.
-        from src.utils.billing import user_has_active_subscription
+        # credits regardless of the creator's own free-video quota — gated on
+        # having a positive credit balance (or their own Izivoice key), not
+        # just "can render at all", so free-tier usage can't run up the
+        # image-generation bill. Voiceover/TTS is unaffected — it's covered
+        # by the regular free-quota/credit check in user_can_render.
+        from src.utils.billing import get_credit_balance
         owner = channel.user
-        if not owner or not user_has_active_subscription(db, owner):
+        has_own_key = bool(owner and owner.izivoice_api_key_encrypted)
+        if not owner or (not has_own_key and get_credit_balance(db, owner) <= 0):
             raise HTTPException(
                 status_code=402,
-                detail="La génération d’images IA est réservée aux abonnés KappGen Pro. Passe à l’abonnement pour l’utiliser, ou choisis une bibliothèque d’images à la place.",
+                detail="La génération d’images IA nécessite des crédits. Recharge ton solde pour l’utiliser, ou choisis une bibliothèque d’images à la place.",
             )
     if source in {"library", "hybrid"}:
         library_path = str(image_style.get("library_path") or "")
