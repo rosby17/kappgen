@@ -44,6 +44,7 @@ def my_credit_balance(current_user: User = Depends(get_current_user), db: Sessio
 class CheckoutPayload(BaseModel):
     plan_id: str
     provider: str  # "maketou" | "tarapay"
+    billing_cycle: str = "monthly"  # "monthly" | "quarterly" | "semiannual" | "yearly" | "lifetime"
 
 
 @router.post("/checkout")
@@ -56,11 +57,21 @@ def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_c
     if payload.provider not in ("maketou", "tarapay"):
         raise HTTPException(status_code=400, detail="Fournisseur de paiement inconnu.")
 
+    from src.utils.billing import CREDIT_CYCLE_MARKUPS, price_for_cycle
+    billing_cycle = payload.billing_cycle if payload.billing_cycle in CREDIT_CYCLE_MARKUPS else "monthly"
+    # Credit-pack plans (plan.credits set) support the cycle markup; legacy
+    # subscription-style plans (plan.credits is None) always stay monthly —
+    # there's no per-pot expiry to extend for those.
+    amount_fcfa = price_for_cycle(plan.price_fcfa, billing_cycle) if plan.credits else plan.price_fcfa
+    if not plan.credits:
+        billing_cycle = "monthly"
+
     order = Order(
         user_id=current_user.id,
         plan_id=plan.id,
         provider=payload.provider,
-        amount_fcfa=plan.price_fcfa,
+        amount_fcfa=amount_fcfa,
+        billing_cycle=billing_cycle,
         status="pending",
     )
     db.add(order)
@@ -69,11 +80,11 @@ def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_c
 
     try:
         if payload.provider == "maketou":
-            result = create_maketou_checkout(order.id, plan.price_fcfa, current_user.email, current_user.name)
+            result = create_maketou_checkout(order.id, order.amount_fcfa, current_user.email, current_user.name)
             order.provider_ref = result.get("provider_ref")
             redirect_url = result.get("redirect_url")
         else:
-            result = create_tarapay_checkout(order.id, plan.price_fcfa, plan.name)
+            result = create_tarapay_checkout(order.id, order.amount_fcfa, plan.name)
             redirect_url = result.get("redirect_url")
     except Exception as exc:
         order.status = "failed"
@@ -95,13 +106,15 @@ def _activate_subscription(db: Session, order: Order):
     grant a CreditPot; a null-credits plan falls back to the legacy
     unlimited-access Subscription for any pre-migration plan still around."""
     plan = order.plan
-    from src.utils.billing import credit_user
+    from src.utils.billing import credit_user, CREDIT_CYCLE_DAYS, CREDIT_CYCLE_LABELS_FR
     if plan.credits:
+        valid_days = CREDIT_CYCLE_DAYS.get(order.billing_cycle, plan.duration_days)
+        cycle_label = CREDIT_CYCLE_LABELS_FR.get(order.billing_cycle, "Mensuel")
         result = credit_user(
             db, order.user,
             amount=plan.credits,
-            valid_days=plan.duration_days,
-            description=f"Achat {plan.name} — {order.amount_fcfa:,} FCFA via {order.provider} (commande {order.id})".replace(",", " "),
+            valid_days=valid_days,
+            description=f"Achat {plan.name} ({cycle_label}) — {order.amount_fcfa:,} FCFA via {order.provider} (commande {order.id})".replace(",", " "),
         )
     else:
         result = Subscription(

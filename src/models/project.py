@@ -100,6 +100,7 @@ class ChannelCreate(BaseModel):
     publish_schedule_hour: int = 8
     publish_schedule_day_offset: int = 1
     timezone: str = "Africa/Douala"  # IANA name, auto-detected client-side
+    transcribe_audio_default: bool = True  # auto-mode videos only; manual submissions choose per-video
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -129,6 +130,7 @@ class ChannelUpdate(BaseModel):
     publish_schedule_hour: Optional[int] = None
     publish_schedule_day_offset: Optional[int] = None
     timezone: Optional[str] = None
+    transcribe_audio_default: Optional[bool] = None
 
 class VideoCreate(BaseModel):
     channel_id: str

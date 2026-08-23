@@ -556,6 +556,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         publish_schedule_hour=payload.publish_schedule_hour,
         publish_schedule_day_offset=payload.publish_schedule_day_offset,
         timezone=payload.timezone or "Africa/Douala",
+        transcribe_audio_default=payload.transcribe_audio_default if payload.transcribe_audio_default is not None else True,
     )
     db.add(channel)
     db.commit()
@@ -664,6 +665,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.publish_schedule_day_offset = payload.publish_schedule_day_offset
     if payload.timezone is not None:
         channel.timezone = payload.timezone
+    if payload.transcribe_audio_default is not None:
+        channel.transcribe_audio_default = payload.transcribe_audio_default
 
     db.commit()
     db.refresh(channel)

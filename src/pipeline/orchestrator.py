@@ -75,7 +75,7 @@ def run_video_pipeline(
     else:
         progress("Génération de la voix et transcription", 8)
         logger.info("Step 1/7: Generating voiceover audio via TTS...")
-        _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path, voice_id=voice_id, api_key=izivoice_api_key, voice_settings=voice_settings, user_id=channel_config.get("user_id"))
+        _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path, voice_id=voice_id, api_key=izivoice_api_key, voice_settings=voice_settings, user_id=channel_config.get("user_id"), transcribe=transcribe_audio)
 
     (source_dir / "transcript.json").write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
     

@@ -27,6 +27,47 @@ IZIVOICE_STT_CREDITS_PER_SEC = 3
 IZIVOICE_TTS_CREDITS_PER_CHAR = 1
 IZIVOICE_MUSIC_CREDITS = 300
 
+# Credit-pack validity tiers — ported as-is from Izivoice's own promo.ts
+# (MARKUP_BY_CYCLE / getValidityDays): each pack's listed price is the
+# "monthly" (30-day) rate; a longer commitment multiplies both price and
+# validity instead of selling a separate plan row per duration.
+CREDIT_CYCLE_MARKUPS = {
+    "monthly": 1.0,
+    "quarterly": 1.1,      # 3 mois
+    "semiannual": 1.2,     # 6 mois
+    "yearly": 1.25,        # 1 an
+    "lifetime": 1.3,       # à vie
+}
+CREDIT_CYCLE_DAYS = {
+    "monthly": 30,
+    "quarterly": 90,
+    "semiannual": 180,
+    "yearly": 365,
+    "lifetime": 36500,  # ~100 years — expires_at is NOT NULL, so "never" needs a real date
+}
+CREDIT_CYCLE_LABELS_FR = {
+    "monthly": "Mensuel",
+    "quarterly": "3 mois",
+    "semiannual": "6 mois",
+    "yearly": "1 an",
+    "lifetime": "À vie",
+}
+
+
+def marketing_round_fcfa(price: float) -> int:
+    """Rounds up to the nearest 500 FCFA — same cosmetic/margin-protecting
+    rule as Izivoice's marketingRound() for FCFA amounts."""
+    import math
+    return int(math.ceil(price / 500.0) * 500)
+
+
+def price_for_cycle(base_monthly_price_fcfa: int, cycle: str) -> int:
+    """The price a credit pack's cycle actually charges — server-computed
+    from the plan's base (monthly) price so a client can never just submit
+    a cheaper price for a longer cycle."""
+    markup = CREDIT_CYCLE_MARKUPS.get(cycle, 1.0)
+    return marketing_round_fcfa(base_monthly_price_fcfa * markup)
+
 
 def user_has_active_subscription(db: Session, user: User) -> bool:
     return db.query(Subscription).filter(

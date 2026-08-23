@@ -404,11 +404,17 @@ def generate_voiceover(
     script_text: str, output_audio_path: Path, voice_id: Optional[str] = None, api_key: Optional[str] = None,
     voice_settings: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None, channel_id: Optional[str] = None, video_id: Optional[str] = None,
+    transcribe: bool = True,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
     Generates voiceover TTS audio via the Izivoice API (or local fallback when no key is set),
     then derives word-level subtitle timing via Izivoice speech-to-text on the resulting audio
-    (Izivoice's /text-to-speech does not return alignment data itself).
+    (Izivoice's /text-to-speech does not return alignment data itself) — unless `transcribe` is
+    False, in which case subtitle timing is approximated by evenly spreading the known script
+    text over the audio's real duration. That's a deliberate quality/cost tradeoff exposed as a
+    per-video choice (Video.transcribe_audio): real STT costs Izivoice credits per audio second
+    but keeps captions in sync through pauses/silences; the synthetic fallback is free but drifts
+    on anything that isn't a constant speech rate.
     """
     script_text = clean_script_text(script_text)
 
@@ -466,7 +472,15 @@ def generate_voiceover(
             from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
             debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts")
 
-        transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id)
+        if transcribe:
+            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id)
+        else:
+            duration = get_audio_duration(output_audio_path)
+            transcript_info = {
+                "text": script_text,
+                "duration": duration,
+                "words": synthetic_word_timings(script_text, duration),
+            }
         return output_audio_path, transcript_info
 
     except Exception as e:

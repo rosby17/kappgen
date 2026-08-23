@@ -191,6 +191,7 @@ async def submit_video_subject(
             audio_input_path=None,
             status=VideoStatus.QUEUED.value,
             estimated_duration_seconds=estimated_duration,
+            transcribe_audio=transcribe_audio,
             voice_id=voice_id.strip() if voice_id else channel.voice_id,
         )
         db.add(video)

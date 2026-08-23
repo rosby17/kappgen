@@ -108,6 +108,14 @@ class Channel(Base):
     niche = Column(String(255), nullable=False, default="General")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Whether auto-generated videos (automation_mode "auto", which has no
+    # per-video submission form to ask) get real Izivoice speech-to-text for
+    # subtitle timing (accurate, billable) or the free synthetic fallback
+    # (approximate, evenly spread over the audio's duration). Manual
+    # submissions get their own per-video choice instead (Video.transcribe_audio);
+    # this is only the default new auto-mode videos are queued with.
+    transcribe_audio_default = Column(Boolean, nullable=False, default=True)
+
     # JSON configurations
     subtitle_style = Column(JSON, nullable=False, default=dict)
     branding = Column(JSON, nullable=False, default=dict)
@@ -237,6 +245,7 @@ class Channel(Base):
             "niche": self.niche,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "subtitle_style": self.subtitle_style,
+            "transcribe_audio_default": self.transcribe_audio_default if self.transcribe_audio_default is not None else True,
             "branding": self.branding,
             "music_preference": self.music_preference,
             "image_style": self.image_style,
@@ -474,6 +483,11 @@ class Order(Base):
     provider_ref = Column(String(255), nullable=True)  # Maketou cart id / Tara paymentId
     amount_fcfa = Column(Integer, nullable=False)
     status = Column(String(20), nullable=False, default="pending")  # "pending" | "success" | "failed" | "flagged_underpaid"
+    # Same validity-tier system as Izivoice's own credit packs (see
+    # src/utils/billing.py CREDIT_CYCLE_MARKUPS/CREDIT_CYCLE_DAYS): the base
+    # plan price is per-month, and this multiplies the price/duration for a
+    # longer commitment instead of selling separate plan rows per duration.
+    billing_cycle = Column(String(20), nullable=False, default="monthly")  # monthly|quarterly|semiannual|yearly|lifetime
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User")
@@ -487,6 +501,7 @@ class Order(Base):
             "provider": self.provider,
             "provider_ref": self.provider_ref,
             "amount_fcfa": self.amount_fcfa,
+            "billing_cycle": self.billing_cycle,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

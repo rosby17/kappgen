@@ -135,6 +135,7 @@ def init_db():
             "auto_videos_generated_today": "ALTER TABLE channels ADD COLUMN auto_videos_generated_today INTEGER DEFAULT 0 NOT NULL",
             "thumbnail_style": "ALTER TABLE channels ADD COLUMN thumbnail_style JSON",
             "description": "ALTER TABLE channels ADD COLUMN description TEXT",
+            "transcribe_audio_default": "ALTER TABLE channels ADD COLUMN transcribe_audio_default BOOLEAN DEFAULT TRUE NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():
@@ -163,4 +164,15 @@ def init_db():
             for col_name, ddl in plan_migrations.items():
                 if col_name not in existing_plan_columns:
                     logger.info(f"Migrating plans table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
+    if "orders" in inspector.get_table_names():
+        existing_order_columns = {col["name"] for col in inspector.get_columns("orders")}
+        order_migrations = {
+            "billing_cycle": "ALTER TABLE orders ADD COLUMN billing_cycle VARCHAR(20) DEFAULT 'monthly' NOT NULL",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in order_migrations.items():
+                if col_name not in existing_order_columns:
+                    logger.info(f"Migrating orders table: adding {col_name} column.")
                     conn.execute(text(ddl))

@@ -710,6 +710,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         audio_input_path=None,
         status=VideoStatus.QUEUED.value,
         estimated_duration_seconds=estimated_duration,
+        transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
         voice_id=getattr(channel, "voice_id", None),
     )
     db.add(video)
