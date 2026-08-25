@@ -730,6 +730,77 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), cur
     db.refresh(channel)
     return channel.to_dict()
 
+@router.post("/{channel_id}/overlays")
+async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Adds one extra sticker overlay (e.g. a "Subscribe" button, a bell icon —
+    the kind of thing creators used to paste on by hand) burned into every
+    render of this channel, on top of the single channel logo. Unlike the logo
+    endpoint above, this appends a new slot instead of replacing one — a
+    channel can stack several of these in different corners."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_LOGO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp, gif, svg).")
+
+    branding = dict(channel.branding or {})
+    overlays = list(branding.get("overlays") or [])
+    if len(overlays) >= 6:
+        raise HTTPException(status_code=400, detail="Maximum de 6 incrustations par chaîne.")
+
+    overlay_id = str(uuid.uuid4())
+    overlays_dir = STORAGE_PATH / "channels" / channel.id / "overlays"
+    overlays_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = overlays_dir / f"{overlay_id}{ext}"
+    contents = await file.read()
+    validate_uploaded_image(contents, ext, file.filename or "")
+    dest_file.write_bytes(contents)
+
+    overlays.append({
+        "id": overlay_id,
+        "image_path": f"channels/{channel.id}/overlays/{overlay_id}{ext}",
+        "enabled": True,
+        "corner": "top-right",
+        "size_percent": 12,
+        "opacity": 1.0,
+    })
+    branding["overlays"] = overlays
+    channel.branding = branding
+
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+@router.delete("/{channel_id}/overlays/{overlay_id}")
+def delete_channel_overlay(channel_id: str, overlay_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    branding = dict(channel.branding or {})
+    overlays = list(branding.get("overlays") or [])
+    remaining = [o for o in overlays if o.get("id") != overlay_id]
+    removed = [o for o in overlays if o.get("id") == overlay_id]
+    if not removed:
+        raise HTTPException(status_code=404, detail="Incrustation introuvable.")
+
+    for o in removed:
+        image_path = o.get("image_path")
+        if image_path:
+            (STORAGE_PATH / image_path).unlink(missing_ok=True)
+
+    branding["overlays"] = remaining
+    channel.branding = branding
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
 @router.post("/{channel_id}/avatar")
 async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Uploads the channel's app-facing profile picture — shown in channel cards,

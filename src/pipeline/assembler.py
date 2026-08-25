@@ -15,6 +15,19 @@ WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 XFADE_TRANSITIONS = ["fade", "fadeblack", "dissolve"]
 XFADE_DURATION = 1.2  # seconds of overlap between consecutive clips — soft, unhurried blend
 
+CORNER_OVERLAY_XY = {
+    "top-left": ("{margin}", "{margin}"),
+    "top-right": ("W-w-{margin}", "{margin}"),
+    "bottom-left": ("{margin}", "H-h-{margin}"),
+    "bottom-right": ("W-w-{margin}", "H-h-{margin}"),
+}
+
+def _overlay_xy_expr(corner: str, margin: int = 40) -> tuple:
+    """ffmpeg overlay x/y expressions for one of the 4 corners — falls back to
+    top-right (the old hardcoded logo position) for any unrecognized value."""
+    x_tpl, y_tpl = CORNER_OVERLAY_XY.get(corner, CORNER_OVERLAY_XY["top-right"])
+    return x_tpl.format(margin=margin), y_tpl.format(margin=margin)
+
 def check_ffmpeg_filter(filter_name: str) -> bool:
     """Checks if a specific filter is supported by system ffmpeg."""
     res = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True)
@@ -33,8 +46,8 @@ def assemble_final_video(
     """
     Joins motion clips (crossfading between them when durations are known so
     scene changes feel dynamic rather than hard-cut), applies color grading/
-    grain, burns subtitles, places a square logo (top-right), and multiplexes
-    audio.
+    grain, burns subtitles, places the channel logo and any extra sticker
+    overlays (creator-configurable corner + size each), and multiplexes audio.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_dir = output_path.parent / "temp"
@@ -144,13 +157,43 @@ def assemble_final_video(
 
     vf_string = ",".join(video_filters) if video_filters else "null"
 
-    # Square logo, top-right corner (if configured and not disabled). logo_path
-    # is stored storage-relative ("channels/<id>/logo.png") — it must be resolved
-    # against STORAGE_PATH, not treated as relative to the process's cwd (which
-    # silently made has_logo False for every channel, however the logo was set).
+    # Every image overlay burned into the render — the channel logo plus any
+    # extra creator-added stickers (e.g. a "Subscribe" button or bell icon,
+    # the kind of thing creators used to paste on by hand) — collected into
+    # one list so they all share the same corner/size/opacity compositing
+    # logic instead of the old logo-only hardcoded 100x100 top-right block.
+    # logo_path/overlay image_path are stored storage-relative
+    # ("channels/<id>/logo.png") — must be resolved against STORAGE_PATH, not
+    # treated as relative to the process's cwd (which silently made has_logo
+    # False for every channel, however the logo was set).
+    image_overlays = []  # each: {"path": Path, "corner": str, "size_percent": float, "opacity": float}
+
     logo_path_str = branding.get("logo_path")
     logo_full_path = (STORAGE_PATH / logo_path_str) if logo_path_str else None
     has_logo = bool(branding.get("logo_enabled", True) and logo_full_path and logo_full_path.exists())
+    if has_logo:
+        image_overlays.append({
+            "path": logo_full_path,
+            "corner": branding.get("logo_corner") or "top-right",
+            "size_percent": branding.get("logo_size_percent") or 5,
+            "opacity": 1.0,
+        })
+
+    for item in (branding.get("overlays") or []):
+        if not item.get("enabled", True):
+            continue
+        item_path_str = item.get("image_path")
+        if not item_path_str:
+            continue
+        item_full_path = STORAGE_PATH / item_path_str
+        if not item_full_path.exists():
+            continue
+        image_overlays.append({
+            "path": item_full_path,
+            "corner": item.get("corner") or "top-right",
+            "size_percent": item.get("size_percent") or 12,
+            "opacity": item.get("opacity") if item.get("opacity") is not None else 1.0,
+        })
 
     # Free-tier NicheCut watermark. The official horizontal logo is deliberately
     # large and centered: a corner mark can be removed with a trivial crop or
@@ -204,13 +247,13 @@ def assemble_final_video(
                 f.write(f"file '{clean_path}'\n")
         cmd.extend(["-f", "concat", "-safe", "0", "-i", str(concat_list_file)])
 
-    if has_logo:
-        cmd.extend(["-i", str(logo_full_path.resolve())])
+    for ov in image_overlays:
+        cmd.extend(["-i", str(ov["path"].resolve())])
     if has_watermark:
         cmd.extend(["-i", str(WATERMARK_PATH.resolve())])
 
     cmd.extend(["-i", str(audio_path.resolve())])
-    audio_input_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0) + (1 if has_watermark else 0)
+    audio_input_index = (len(clip_paths) if use_xfade else 1) + len(image_overlays) + (1 if has_watermark else 0)
 
     filter_parts = [video_chain] if use_xfade else []
     base_label = "v_joined" if use_xfade else "0:v"
@@ -218,15 +261,26 @@ def assemble_final_video(
         filter_parts.append(f"[{base_label}]{vf_string}[v_base]")
         base_label = "v_base"
 
-    if has_logo:
-        logo_index = len(clip_paths) if use_xfade else 1
-        # Force a clean square crop regardless of the source image's aspect ratio.
-        filter_parts.append(f"[{logo_index}:v]scale=100:100:force_original_aspect_ratio=increase,crop=100:100[logo]")
-        filter_parts.append(f"[{base_label}][logo]overlay=W-w-40:40[v_logo]")
-        base_label = "v_logo"
+    overlay_base_index = len(clip_paths) if use_xfade else 1
+    for i, ov in enumerate(image_overlays):
+        idx = overlay_base_index + i
+        # Aspect-preserving scale by the configured % of the 1920px-wide
+        # frame, not the old forced 100x100 square crop — arbitrary stickers
+        # (a "Subscribe" button, a bell icon) aren't square like a logo often is.
+        size_px = max(24, round(1920 * (ov["size_percent"] / 100)))
+        label = f"ov{i}"
+        scale_filter = f"[{idx}:v]scale={size_px}:-1"
+        if ov["opacity"] < 1.0:
+            scale_filter += f",format=rgba,colorchannelmixer=aa={ov['opacity']:.2f}"
+        scale_filter += f"[{label}]"
+        filter_parts.append(scale_filter)
+        x_expr, y_expr = _overlay_xy_expr(ov["corner"])
+        out_label = f"v_ov{i}"
+        filter_parts.append(f"[{base_label}][{label}]overlay={x_expr}:{y_expr}[{out_label}]")
+        base_label = out_label
 
     if has_watermark:
-        watermark_index = (len(clip_paths) if use_xfade else 1) + (1 if has_logo else 0)
+        watermark_index = overlay_base_index + len(image_overlays)
         # Roughly 47% of a 1920px frame. Opacity raised from 0.14 to 0.22 so it
         # actually reads as sitting on top of the subtitles instead of getting
         # visually lost behind their bold, high-contrast text.

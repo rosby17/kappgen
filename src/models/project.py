@@ -41,10 +41,26 @@ class SubtitleStyle(BaseModel):
     shadow_color: str = "#000000"
     shadow_distance: int = 3
 
+class OverlayItem(BaseModel):
+    """One extra PNG sticker burned into every render of this channel — e.g. a
+    "Subscribe" button or a bell icon, the kind of thing creators paste onto
+    their videos by hand. Distinct from the single channel logo (still its
+    own logo_path/logo_enabled/logo_corner/logo_size_percent below) since a
+    channel can want several of these stacked in different corners at once."""
+    id: str
+    image_path: str             # storage-relative, e.g. "channels/<id>/overlays/<overlay_id>.png"
+    enabled: bool = True
+    corner: str = "top-right"   # "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    size_percent: float = 12    # width as % of the 1920px-wide render frame
+    opacity: float = 1.0        # 0-1
+
 class BrandingConfig(BaseModel):
     logo_path: Optional[str] = None
     logo_enabled: bool = True           # burn the channel logo into the render at all
+    logo_corner: str = "top-right"      # user-adjustable — used to be hardcoded top-right in the renderer
+    logo_size_percent: float = 5        # width as % of the 1920px-wide render frame (≈100px, matches the old fixed size)
     channel_name_text: Optional[str] = None
+    overlays: List[OverlayItem] = Field(default_factory=list)
 
 class MusicPreference(BaseModel):
     enabled: bool = True
