@@ -8,6 +8,27 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # API Keys
+# Cloudflare R2 (S3-compatible) — hybrid rendered-video storage: as long as
+# R2 usage tracked in our own DB stays under R2_FREE_TIER_CAP_BYTES, finished
+# renders upload there instead of staying on the VPS's own (small, shared)
+# disk. Once usage would cross the cap, new renders fall back to local disk
+# automatically — no code change needed to stay on R2's free tier today and
+# raise the cap (or remove it) later after upgrading to a paid R2 plan.
+# All four must be set for R2 to be used at all; leaving any unset keeps
+# every video on local disk exactly like before this feature existed.
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "")
+# Public bucket URL (r2.dev subdomain, or a custom domain mapped to the
+# bucket) — videos are served directly from here, not proxied through our
+# own API. Required alongside the 4 vars above for R2 to actually be used.
+R2_PUBLIC_URL_BASE = os.getenv("R2_PUBLIC_URL_BASE", "").rstrip("/")
+# Cloudflare R2's free tier is 10GB storage — kept at 9.5GB to leave margin
+# for in-flight uploads counted before the DB commit lands. Override via env
+# once on a paid plan (or set very high to effectively remove the cap).
+R2_FREE_TIER_CAP_BYTES = int(os.getenv("R2_FREE_TIER_CAP_BYTES", str(9_500_000_000)))
+
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty

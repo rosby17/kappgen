@@ -179,7 +179,7 @@ def process_single_queued_video() -> bool:
             video.status = VideoStatus.DONE.value
             video.is_reassembly = False
             video.finished_at = datetime.utcnow()
-            video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
+            _finalize_output_storage(db, video, output_mp4)
             video.error_message = None
             video.progress_stage = "Vidéo prête"
             video.progress_percent = 100
@@ -221,7 +221,7 @@ def process_single_queued_video() -> bool:
 
         video.status = VideoStatus.DONE.value
         video.finished_at = datetime.utcnow()
-        video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
+        _finalize_output_storage(db, video, output_mp4)
         video.source_assets_path = str((video_dir / "source").relative_to(STORAGE_PATH) if STORAGE_PATH in (video_dir / "source").parents else (video_dir / "source"))
         video.error_message = None
         video.progress_stage = "Vidéo prête"
@@ -566,9 +566,50 @@ def requeue_orphaned_voice_clone_jobs():
         db.close()
 
 
+def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
+    """Sets video.output_path (+ storage_backend/output_size_bytes) for a
+    just-finished render. Uploads to R2 when there's tracked room under the
+    free-tier cap (see r2_storage.should_upload_to_r2); otherwise — R2 not
+    configured, over the cap, or the upload itself failed — falls back to
+    the local STORAGE_PATH-relative path exactly like before R2 existed.
+    Local file is only deleted after a confirmed-successful R2 upload."""
+    from src.utils import r2_storage
+
+    try:
+        size_bytes = output_mp4.stat().st_size
+    except OSError:
+        size_bytes = None
+
+    if size_bytes and r2_storage.should_upload_to_r2(db, size_bytes):
+        object_key = f"channels/{video.channel_id}/videos/{video.id}/output.mp4"
+        url = r2_storage.upload_video(output_mp4, object_key)
+        if url:
+            video.output_path = url
+            video.storage_backend = "r2"
+            video.output_size_bytes = size_bytes
+            try:
+                output_mp4.unlink()
+            except OSError:
+                pass
+            return
+
+    video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
+    video.storage_backend = "local"
+    video.output_size_bytes = size_bytes
+
+
 def purge_old_render_output(video: Video) -> None:
-    """Deletes a finished video's rendered output + source assets from disk,
-    keeping the DB record (with purged_at set) so history/stats stay intact."""
+    """Deletes a finished video's rendered output + source assets, keeping
+    the DB record (with purged_at set) so history/stats stay intact. Source
+    assets are always local (only the final output.mp4 ever goes to R2 —
+    see _finalize_output_storage), so those still get rmtree'd unconditionally;
+    the output itself is deleted from whichever backend actually holds it."""
+    if video.storage_backend == "r2" and video.output_path:
+        from src.utils import r2_storage
+        object_key = r2_storage.object_key_from_url(video.output_path)
+        if object_key:
+            r2_storage.delete_video(object_key)
+
     channel_id = video.channel_id
     video_dir = STORAGE_PATH / "channels" / str(channel_id) / "videos" / str(video.id)
     if video_dir.exists():

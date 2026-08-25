@@ -54,6 +54,8 @@ def init_db():
             "is_reassembly": "ALTER TABLE videos ADD COLUMN is_reassembly BOOLEAN DEFAULT FALSE NOT NULL",
             "edit_assets_purged_at": "ALTER TABLE videos ADD COLUMN edit_assets_purged_at TIMESTAMP",
             "transcribe_audio": "ALTER TABLE videos ADD COLUMN transcribe_audio BOOLEAN DEFAULT TRUE NOT NULL",
+            "storage_backend": "ALTER TABLE videos ADD COLUMN storage_backend VARCHAR(10) DEFAULT 'local' NOT NULL",
+            "output_size_bytes": "ALTER TABLE videos ADD COLUMN output_size_bytes INTEGER",
             "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
             "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",

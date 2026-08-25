@@ -321,6 +321,13 @@ class Video(Base):
     finished_at = Column(DateTime, nullable=True)
 
     output_path = Column(String(512), nullable=True)
+    # "local" (default — output_path is STORAGE_PATH-relative) or "r2"
+    # (output_path is a full public URL on Cloudflare R2). See
+    # src/utils/r2_storage.py for the hybrid-storage decision; frontend's
+    # getVideoUrl() already passes full URLs through unchanged, so nothing
+    # else needs to know which backend a given video landed on.
+    storage_backend = Column(String(10), nullable=False, default="local")
+    output_size_bytes = Column(Integer, nullable=True)  # output.mp4 size — feeds current_r2_usage_bytes()
     source_assets_path = Column(String(512), nullable=True)
     error_message = Column(Text, nullable=True)
     duration_seconds = Column(Float, nullable=True)
@@ -382,6 +389,7 @@ class Video(Base):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "output_path": self.output_path,
+            "storage_backend": self.storage_backend or "local",
             "source_assets_path": self.source_assets_path,
             "error_message": self.error_message,
             "duration_seconds": self.duration_seconds,
