@@ -545,6 +545,41 @@ class ApiUsageLog(Base):
         }
 
 
+class VoiceCloneJob(Base):
+    """A voice-cloning request, processed by the worker (not the API process)
+    and tracked here instead of in an in-memory dict — the API container gets
+    redeployed far more often than the worker (routine API/frontend changes
+    never touch it, see entrypoint.sh's ROLE split), and an in-memory job
+    tied to the API process was getting silently wiped mid-clone by any
+    redeploy, leaving the creator's "Clonage…" button stuck forever with no
+    way to ever resolve. The uploaded sample is written to shared storage
+    (audio_path, on the volume both API and worker containers mount) since
+    the two run in different containers and can't just pass bytes in memory."""
+    __tablename__ = "voice_clone_jobs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    audio_path = Column(String(1024), nullable=False)  # relative to STORAGE_PATH; deleted once processed
+    status = Column(String(20), nullable=False, default="pending")  # "pending" | "done" | "error"
+    voice_id = Column(String(255), nullable=True)
+    preview_url = Column(String(1024), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "job_id": self.id,
+            "status": self.status,
+            "voice_id": self.voice_id,
+            "name": self.name,
+            "preview_url": self.preview_url,
+            "detail": self.error_message,
+        }
+
+
 class CreditPot(Base):
     """One purchased credit pack, ported from Izivoice's own credit_pots
     model: a balance isn't one number on the user row, it's the sum of every

@@ -7,12 +7,11 @@ from typing import List, Dict, Any, Optional
 import random
 import re
 import shutil
-import threading
 import time
 import uuid
 import httpx
 from src.db.session import get_db
-from src.db.models import Channel, Video, User
+from src.db.models import Channel, Video, User, VoiceCloneJob
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL
 from fastapi.responses import RedirectResponse
@@ -189,135 +188,14 @@ def list_voice_catalog(
                 break
     return {"voices": all_voices, "has_more": has_more, "next_page": max_pages}
 
-# In-memory job store for voice cloning — Izivoice's /clone call can run past
-# Cloudflare's fixed ~100s proxy timeout (same class of issue already hit
-# with large image-folder uploads, see save_valid_library_images below), which
-# silently killed the request client-side with no error and the button stuck
-# forever on "Clonage…". The endpoint now returns immediately with a job_id,
-# does the actual (slow) Izivoice call in a background thread, and the
-# frontend polls /voice/clone/status/{job_id} until it's done.
-_clone_jobs: Dict[str, Dict[str, Any]] = {}
-
-# Izivoice's own guidance for their "server couldn't process this audio"
-# error: a short, clean sample clones just as well as a long one and avoids
-# their engine choking on longer/complex clips — enforced automatically
-# instead of relying on the creator to manually trim their file.
-CLONE_MAX_SECONDS = 30
-
-# Short, neutral sentence read back in the newly cloned voice right after
-# cloning, since Izivoice's /clone itself never returns a sample to preview.
-VOICE_PREVIEW_TEXT = "Bonjour, voici un aperçu de cette voix clonée sur KappGen."
-
-
-def _transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
-    """Re-encodes the sample to FLAC (lossless, mono, 24kHz) before it ever
-    reaches Izivoice. Some uploads (mobile-app exports, browser recordings)
-    have a technically-playable but non-standard container/header that
-    Izivoice's cloning engine can fail to read the duration of — even with
-    their own removeNoise cleanup applied server-side (see Izivoice's own
-    src/app/api/clone/route.ts, which hits the same issue and works around it
-    by transcoding first — notably to FLAC too, in their denoise path). Doing
-    that ourselves guarantees a clean file no matter what Izivoice does on
-    their end. FLAC (not raw PCM WAV) specifically to stay under Izivoice's
-    4MB upload cap: an uncompressed 44.1kHz WAV blows past 4MB on anything
-    longer than ~45s, silently turning a fixed "bad header" into a new
-    "file too large" failure for any real voice sample. Returns the original
-    bytes unchanged if ffmpeg can't decode the input at all (already-invalid
-    audio, caught later by Izivoice's own validation instead).
-
-    Also hard-caps the sample to CLONE_MAX_SECONDS: Izivoice's own error for
-    long/complex clips says as much ("Privilégiez un extrait pur de 30
-    secondes maximum") — voice cloning doesn't benefit from a longer sample
-    past that anyway, so trimming automatically is strictly better than
-    surfacing their 500 and asking the creator to re-cut the file by hand."""
-    import tempfile
-    from src.utils.ffmpeg_runner import run_ffmpeg, FFmpegError
-    suffix = Path(filename or "audio").suffix or ".bin"
-    with tempfile.TemporaryDirectory() as tmp:
-        src_path = Path(tmp) / f"in{suffix}"
-        dst_path = Path(tmp) / "out.flac"
-        src_path.write_bytes(contents)
-        try:
-            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-t", str(CLONE_MAX_SECONDS), "-ar", "24000", "-ac", "1", "-c:a", "flac", str(dst_path)])
-            return dst_path.read_bytes()
-        except (FFmpegError, OSError) as exc:
-            logger.warning(f"Voice-clone pre-transcode failed, sending original file as-is: {exc}")
-            return contents
-
-
-def _run_clone_job(job_id: str, api_key: str, filename: str, content_type: str, contents: bytes, name: str):
-    try:
-        clean_audio = _transcode_to_clean_audio(contents, filename)
-        if len(clean_audio) > 4 * 1024 * 1024:
-            _clone_jobs[job_id] = {
-                "status": "error",
-                "detail": "Cet échantillon est trop long une fois nettoyé (limite Izivoice : 4 Mo). Utilisez un extrait plus court (~30-45 s).",
-            }
-            return
-        response = httpx.post(
-            f"{IZIVOICE_BASE_URL}/clone",
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
-            # Back to removeNoise=true (server-side noise cleanup) now that
-            # Izivoice has fixed the "Failed to parse duration" bug on that
-            # path too — it was temporarily forced to "false" to route
-            # around it (see git history for the full story).
-            data={"name": name, "removeNoise": "true", "optimizeAccent": "true"},
-            timeout=280,
-        )
-        response.raise_for_status()
-        data = response.json()
-        voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
-        if not voice_id:
-            _clone_jobs[job_id] = {"status": "error", "detail": "Izivoice n'a retourné aucun identifiant de voix."}
-            return
-
-        # Izivoice's /clone deliberately returns preview_url: null ("no longer
-        # generate a preview here to speed up the process") — without this,
-        # a freshly cloned voice has no way to be previewed anywhere in the
-        # app (catalog voices all have a pre-made sample; this one wouldn't).
-        # Best-effort: a cloned voice with no preview is still usable, just
-        # not previewable, so this never fails the clone itself.
-        preview_url = None
-        try:
-            preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
-            preview_path.parent.mkdir(parents=True, exist_ok=True)
-            from src.pipeline.voiceover import generate_voiceover
-            generate_voiceover(VOICE_PREVIEW_TEXT, preview_path, voice_id=voice_id, api_key=api_key)
-            # API_BASE on the frontend already ends in /api — a leading /api
-            # here would double up into /api/api/... (see the same note on
-            # the scene-image route in videos.py, which hit this exact bug).
-            preview_url = f"/channels/voice/{voice_id}/preview"
-        except Exception as exc:
-            logger.warning(f"Voice-clone preview generation failed for {voice_id}: {exc}")
-
-        _clone_jobs[job_id] = {"status": "done", "voice_id": voice_id, "name": name, "preview_url": preview_url}
-    except httpx.HTTPStatusError as exc:
-        # Surface whatever Izivoice actually said instead of just the status
-        # code — a bare "(500)" gives no way to tell a bad audio file apart
-        # from a misconfigured request on our side.
-        try:
-            upstream_detail = exc.response.json()
-            upstream_detail = upstream_detail.get("message") or upstream_detail.get("detail") or upstream_detail.get("error") or exc.response.text
-        except Exception:
-            upstream_detail = exc.response.text
-        logger.error(f"Izivoice /clone failed ({exc.response.status_code}): {upstream_detail}")
-        # Known upstream quirk (acknowledged in Izivoice's own code): their
-        # cloning engine sometimes can't read the duration of an audio file
-        # whose container/header is non-standard, even though the file plays
-        # fine everywhere else — re-exporting it (e.g. to a clean WAV/MP3)
-        # reliably fixes it, so point the creator at that instead of a raw
-        # upstream error they can't act on.
-        if "failed to parse duration" in str(upstream_detail).lower():
-            _clone_jobs[job_id] = {
-                "status": "error",
-                "detail": "Izivoice n'a pas réussi à lire ce fichier audio (en-tête non standard, même s'il joue normalement ailleurs). Réexportez-le en MP3 ou WAV propre (ex. via Audacity ou QuickTime) puis réessayez.",
-            }
-        else:
-            _clone_jobs[job_id] = {"status": "error", "detail": f"Izivoice a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'raison inconnue'}"}
-    except Exception as exc:
-        logger.error(f"Izivoice /clone crashed: {exc}")
-        _clone_jobs[job_id] = {"status": "error", "detail": f"Le clonage a échoué : {exc}"}
+# Voice-cloning itself now runs on the worker (src/pipeline/voice_clone.py),
+# tracked via VoiceCloneJob rows instead of an in-memory dict here — the
+# API container gets redeployed far more often than the worker (routine
+# API/frontend changes never touch it), and an in-memory job tied to the API
+# process was getting silently wiped mid-clone by any redeploy, leaving the
+# creator's "Clonage…" button stuck forever. See voice_clone.py's module
+# docstring for the full story.
+from src.pipeline.voice_clone import VOICE_PREVIEW_TEXT, CLONE_UPLOADS_DIR
 
 
 @router.get("/voice/lookup/{voice_id}")
@@ -364,21 +242,27 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), audio: Upl
         raise HTTPException(status_code=503, detail="Izivoice n'est pas configuré.")
 
     job_id = uuid.uuid4().hex
-    _clone_jobs[job_id] = {"status": "pending"}
-    threading.Thread(
-        target=_run_clone_job,
-        args=(job_id, api_key, audio.filename, audio.content_type, contents, name.strip()),
-        daemon=True,
-    ).start()
+    CLONE_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    audio_rel_path = f"voice_clone_uploads/{job_id}{Path(audio.filename or '').suffix or '.bin'}"
+    (STORAGE_PATH / audio_rel_path).write_bytes(contents)
+    db.add(VoiceCloneJob(
+        id=job_id,
+        channel_id=channel_id,
+        user_id=current_user.id,
+        name=name.strip(),
+        audio_path=audio_rel_path,
+        status="pending",
+    ))
+    db.commit()
     return {"job_id": job_id, "status": "pending"}
 
 
 @router.get("/voice/clone/status/{job_id}")
-def clone_voice_status(job_id: str, current_user: User = Depends(get_current_user)):
-    job = _clone_jobs.get(job_id)
+def clone_voice_status(job_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    job = db.query(VoiceCloneJob).filter(VoiceCloneJob.id == job_id, VoiceCloneJob.user_id == current_user.id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Tâche de clonage introuvable ou expirée.")
-    return job
+    return job.to_dict()
 
 
 @router.get("/voice/{voice_id}/preview")

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.db.session import SessionLocal, init_db
-from src.db.models import Video, Channel
+from src.db.models import Video, Channel, VoiceCloneJob
 from src.models.project import VideoStatus
 from src.pipeline.orchestrator import (
     run_video_pipeline,
@@ -820,6 +820,60 @@ def run_daily_automation():
         db.close()
 
 
+def process_single_voice_clone_job() -> bool:
+    """Picks the oldest pending VoiceCloneJob and runs it to completion.
+    Returns True if a job was processed, False if the queue was empty. Mirrors
+    process_single_queued_video()'s locking pattern so this can safely share
+    the worker process with the render lanes without two lanes double-picking
+    the same job."""
+    from src.pipeline.voice_clone import process_voice_clone_job
+    from src.utils.credentials import izivoice_key_for_user
+    from src.db.models import User
+
+    db = SessionLocal()
+    try:
+        job = (
+            db.query(VoiceCloneJob)
+            .filter(VoiceCloneJob.status == "pending")
+            .order_by(VoiceCloneJob.created_at.asc())
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+        if not job:
+            return False
+
+        user = db.query(User).filter(User.id == job.user_id).first()
+        api_key = izivoice_key_for_user(user) if user else None
+        if not api_key:
+            job.status = "error"
+            job.error_message = "Izivoice n'est pas configuré."
+            db.commit()
+            return True
+
+        logger.info(f"Worker picked voice-clone job {job.id} (channel {job.channel_id}).")
+        process_voice_clone_job(db, job, api_key)
+        return True
+    except Exception as e:
+        logger.error(f"Voice-clone worker pass failed: {e}")
+        return True
+    finally:
+        db.close()
+
+
+def _voice_clone_worker_loop(poll_interval_seconds: float):
+    """Separate lane from video rendering — cloning is a quick, interactive
+    action a creator is actively waiting on in the UI, so it shouldn't have
+    to wait behind a long video render to get picked up."""
+    while not _shutdown_requested:
+        try:
+            processed = process_single_voice_clone_job()
+        except Exception as e:
+            logger.error(f"Voice-clone lane hit an unexpected error: {e}")
+            processed = False
+        if not processed:
+            time.sleep(poll_interval_seconds)
+
+
 _shutdown_requested = False
 
 def _handle_shutdown_signal(signum, frame):
@@ -879,6 +933,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         threading.Thread(target=_render_worker_loop, args=(f"lane-{i+1}", poll_interval_seconds), daemon=True)
         for i in range(max(1, concurrency))
     ]
+    lanes.append(threading.Thread(target=_voice_clone_worker_loop, args=(poll_interval_seconds,), daemon=True))
     for lane in lanes:
         lane.start()
 
