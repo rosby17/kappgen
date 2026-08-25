@@ -40,6 +40,15 @@ PURGE_INTERVAL_SECONDS = 3600
 # something a creator can act on.
 SERVICE_UNAVAILABLE_MESSAGE = "Les serveurs de KappGen sont temporairement indisponibles. Veuillez réessayer plus tard."
 
+# Unlike SERVICE_UNAVAILABLE_MESSAGE (our own provider credits/outages — the
+# creator can't act on those), an empty KappGen credit balance is entirely
+# the creator's own thing to fix, so it gets its own clear, actionable
+# message instead of being hidden behind the generic one.
+CREDIT_INSUFFICIENT_MESSAGE = (
+    "La génération automatique est en pause : ton solde de crédits KappGen est épuisé. "
+    "Recharge des crédits pour que cette chaîne continue à écrire et publier ses vidéos automatiquement."
+)
+
 # Case-insensitive substrings that reliably show up in a paid provider's own
 # error text when the problem is billing/quota/rate-limit related, across
 # Anthropic, OpenAI, fal.ai and Izivoice's actual wording seen in production.
@@ -603,21 +612,22 @@ def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     return local_now.strftime("%Y-%m-%d"), seconds_into_day
 
 
-def _record_automation_failure(db, channel: Channel) -> None:
+def _record_automation_failure(db, channel: Channel, message: str = SERVICE_UNAVAILABLE_MESSAGE) -> None:
     """Surfaces a script-generation failure as a visible Échec card instead
     of a server-log-only skip — a creator watching "Nouvelle Vidéo" do
     nothing has no way to tell a real outage apart from the automation
     simply not being set up right. Capped at one card per channel per local
-    day: the worker retries silently every ~10 min on a hard outage (like an
-    exhausted API credit balance), and a fresh Échec card every cycle would
-    flood the video list for something the creator can only wait out anyway."""
+    day, regardless of which message it carries: the worker retries silently
+    every ~10 min on a hard outage (like an exhausted API credit balance),
+    and a fresh Échec card every cycle would flood the video list for
+    something the creator can only wait out (or top up) anyway."""
     today_str, _ = _channel_local_date_and_seconds(channel)
     last_failure = (
         db.query(Video)
         .filter(
             Video.channel_id == channel.id,
             Video.status == VideoStatus.FAILED.value,
-            Video.error_message == SERVICE_UNAVAILABLE_MESSAGE,
+            Video.progress_stage == "Échec",
         )
         .order_by(Video.created_at.desc())
         .first()
@@ -631,7 +641,7 @@ def _record_automation_failure(db, channel: Channel) -> None:
         input_type="text",
         script_text="",
         status=VideoStatus.FAILED.value,
-        error_message=SERVICE_UNAVAILABLE_MESSAGE,
+        error_message=message,
         progress_stage="Échec",
         progress_percent=0,
     ))
@@ -657,6 +667,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     can_render, reason = user_can_render(db, owner)
     if not can_render:
         logger.info(f"Daily automation: channel {channel.id} ('{channel.name}') skipped — {reason}")
+        _record_automation_failure(db, channel, message=CREDIT_INSUFFICIENT_MESSAGE)
         return None
     try:
         validate_channel_visual_source(channel, db)
@@ -719,6 +730,9 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         owner.free_videos_used += 1
     db.commit()
     db.refresh(video)
+
+    from src.utils.billing import debit_script_generation_cost
+    debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0)
     return video
 
 

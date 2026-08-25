@@ -27,6 +27,32 @@ IZIVOICE_STT_CREDITS_PER_SEC = 3
 IZIVOICE_TTS_CREDITS_PER_CHAR = 1
 IZIVOICE_MUSIC_CREDITS = 300
 
+# Converts a real Anthropic/OpenAI/fal.ai script-generation cost (in USD) into
+# KappGen credits, the same way IZIVOICE_* above converts Izivoice's own
+# credit currency. There's no direct USD credit-pack price to read (packs are
+# priced in FCFA), so the conversion goes through an approximate FCFA/USD
+# rate and the Starter pack's rate (the least favorable to the buyer, i.e.
+# highest FCFA per credit) — same reasoning as CREDIT_MARKUP_MULTIPLIER:
+# protect the operator's margin rather than pick a buyer-favorable rate.
+FCFA_PER_USD = 600.0
+STARTER_PACK_PRICE_FCFA = 3500
+STARTER_PACK_CREDITS = 100_000
+CREDIT_VALUE_FCFA = STARTER_PACK_PRICE_FCFA / STARTER_PACK_CREDITS  # 0.035 FCFA/credit
+
+# Automatic ("KappGen AI choisit le sujet et écrit le script") mode bills the
+# creator this many times the script generation's real provider cost — same
+# margin-protection idea as CREDIT_MARKUP_MULTIPLIER above, applied to
+# Anthropic/OpenAI/fal.ai spend instead of Izivoice spend.
+SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER = 4.0
+
+
+def usd_to_credits(cost_usd: float) -> int:
+    """Converts a real USD provider cost into the equivalent number of
+    KappGen credits, at the Starter pack's FCFA/credit rate."""
+    if cost_usd <= 0:
+        return 0
+    return ceil((cost_usd * FCFA_PER_USD) / CREDIT_VALUE_FCFA)
+
 # Credit-pack validity tiers — ported as-is from Izivoice's own promo.ts
 # (MARKUP_BY_CYCLE / getValidityDays): each pack's listed price is the
 # "monthly" (30-day) rate; a longer commitment multiplies both price and
@@ -164,6 +190,29 @@ def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, opera
             db.close()
     except Exception:
         return True
+
+
+def debit_script_generation_cost(db: Session, user: User, cost_usd: float) -> bool:
+    """Meters an "Automatique" script generation's real provider cost against
+    the creator's KappGen balance, at SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER
+    times the real cost. Called after generation succeeds (the real cost is
+    only known once the call is done) — mirrors debit_izivoice_usage_by_user_id's
+    fail-open behavior: a metering shortfall is logged, never used to undo or
+    block content that was already generated."""
+    if cost_usd <= 0:
+        return True
+    charge = ceil(cost_usd * SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER * FCFA_PER_USD / CREDIT_VALUE_FCFA)
+    ok = debit_credits(
+        db, user, charge,
+        f"Génération auto de script ({cost_usd:.4f} $ réel x{SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER:.0f})",
+    )
+    if not ok:
+        from src.utils.logger import logger
+        logger.warning(
+            f"Script-generation cost debit failed for user {user.id}: needed {charge} credits "
+            f"(real cost {cost_usd:.4f} USD), balance insufficient."
+        )
+    return ok
 
 
 def debit_izivoice_usage(db: Session, user: User, izivoice_credits: float, operation: str, user_has_own_key: bool = False) -> bool:

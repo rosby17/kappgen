@@ -100,7 +100,7 @@ def _split_oversized_parts(parts: List[dict]) -> List[dict]:
     return result
 
 
-def _pick_topic(niche: str, recent_titles: List[str], style_prompt: Optional[str], language: str) -> Optional[str]:
+def _pick_topic(niche: str, recent_titles: List[str], style_prompt: Optional[str], language: str, cost_sink: Optional[List[float]] = None) -> Optional[str]:
     avoid_list = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet — this is the first video)"
     instruction = f"""You are the head writer for a faceless YouTube channel (niche: {niche or "general"}).
 {f"Creative/tone direction from the channel owner: {style_prompt}" if style_prompt else ""}
@@ -111,7 +111,7 @@ Titles of videos already published on this channel (never repeat these topics or
 Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet. Respond in {language} with ONLY this JSON object, no other text:
 {{"title": "short punchy video title"}}"""
     try:
-        raw_text = generate_text(instruction, max_tokens=300, model=SCRIPT_WRITER_MODEL, operation='script_topic')
+        raw_text = generate_text(instruction, max_tokens=300, model=SCRIPT_WRITER_MODEL, operation='script_topic', cost_sink=cost_sink)
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
         return title or None
@@ -130,6 +130,7 @@ def _write_part(
     part: dict,
     previous_tail: str,
     is_last_part: bool,
+    cost_sink: Optional[List[float]] = None,
 ) -> Optional[str]:
     word_count = int(part.get("word_count", 300) or 300)
     rules_block = "\n".join(f"- {r}" for r in formatting_rules) if formatting_rules else ""
@@ -157,7 +158,7 @@ Respond with ONLY the narration text for this section, nothing else — no title
 
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
-        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script').strip()
+        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script', cost_sink=cost_sink).strip()
         return text or None
     except Exception as e:
         logger.warning(f"Daily script part generation failed for part '{part.get('name')}': {e}")
@@ -199,8 +200,9 @@ def generate_daily_script(
         logger.warning("Daily script generation: script_structure has no parts configured.")
         return None
 
+    cost_sink: List[float] = []
     try:
-        title = _pick_topic(niche, recent_titles, style_prompt, language)
+        title = _pick_topic(niche, recent_titles, style_prompt, language, cost_sink=cost_sink)
         if not title:
             return None
 
@@ -209,7 +211,7 @@ def generate_daily_script(
         for i, part in enumerate(parts):
             part_text = _write_part(
                 title, niche, language, style_prompt, formatting_rules, cta_style,
-                part, tail, is_last_part=(i == len(parts) - 1),
+                part, tail, is_last_part=(i == len(parts) - 1), cost_sink=cost_sink,
             )
             if not part_text:
                 logger.warning(f"Daily script generation: part '{part.get('name')}' failed, aborting this run.")
@@ -220,7 +222,7 @@ def generate_daily_script(
         script_text = " ".join(written_parts).strip()
         if not script_text:
             return None
-        return {"title": title, "script_text": script_text}
+        return {"title": title, "script_text": script_text, "generation_cost_usd": sum(cost_sink)}
     except Exception as e:
         logger.warning(f"Daily script generation failed: {e}")
         return None

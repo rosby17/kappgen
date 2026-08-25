@@ -27,7 +27,7 @@ _OPENROUTER_LEAKED_REASONING_PREFIXES = ("okay,", "let me", "i need to", "the us
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
 
-def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dict) -> str:
+def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dict) -> tuple:
     import anthropic
 
     if not ANTHROPIC_API_KEY:
@@ -35,19 +35,20 @@ def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dic
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}])
     in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
+    cost_usd = estimate_anthropic_cost(in_tok, out_tok)
     log_usage(
         "anthropic", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
-        estimate_anthropic_cost(in_tok, out_tok),
+        cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
         meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok},
     )
     for block in response.content:
         if block.type == "text":
-            return block.text.strip()
+            return block.text.strip(), cost_usd
     raise RuntimeError("Anthropic text generation returned no text content.")
 
 
-def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
+def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     if not FAL_API_KEY:
         raise RuntimeError("FAL_API_KEY is not configured on the server.")
     resp = httpx.post(
@@ -60,15 +61,16 @@ def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
     output = (resp.json() or {}).get("output")
     if not output:
         raise RuntimeError("fal.ai text generation returned no output.")
+    cost_usd = PRICING["fal_text"]["flat_per_request"]
     log_usage(
-        "fal_text", usage_ctx.get("operation", "text"), 1, "request", PRICING["fal_text"]["flat_per_request"],
+        "fal_text", usage_ctx.get("operation", "text"), 1, "request", cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
         meta={"model": "anthropic/claude-sonnet-4.5 (via fal.ai fallback)"},
     )
-    return output.strip()
+    return output.strip(), cost_usd
 
 
-def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
+def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
     resp = httpx.post(
@@ -84,13 +86,14 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
         raise RuntimeError("OpenAI text generation returned no text content.")
     usage = data.get("usage") or {}
     in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+    cost_usd = estimate_openai_cost(in_tok, out_tok)
     log_usage(
         "openai", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
-        estimate_openai_cost(in_tok, out_tok),
+        cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
         meta={"model": "gpt-4o (fallback)", "input_tokens": in_tok, "output_tokens": out_tok},
     )
-    return text.strip()
+    return text.strip(), cost_usd
 
 
 def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
@@ -131,6 +134,7 @@ def generate_text(
     user_id: Optional[str] = None,
     channel_id: Optional[str] = None,
     video_id: Optional[str] = None,
+    cost_sink: Optional[list] = None,
 ) -> str:
     """Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
     Raises if every configured provider fails (or none are configured).
@@ -143,7 +147,11 @@ def generate_text(
     `operation`/`user_id`/`channel_id`/`video_id` are purely for cost
     attribution (see src/utils/cost_tracking.py) — all optional, and a
     missing one just means that dimension shows up blank on the admin
-    "Coûts" page rather than breaking anything."""
+    "Coûts" page rather than breaking anything.
+
+    `cost_sink`, if given a list, gets this call's real provider cost (USD)
+    appended to it — used by callers (e.g. auto script generation) that need
+    to know the actual cost incurred to bill the creator for it."""
     usage_ctx = {"operation": operation, "user_id": user_id, "channel_id": channel_id, "video_id": video_id}
     last_exc = None
     for name, fn in [
@@ -152,7 +160,10 @@ def generate_text(
         ("openai", lambda: _openai_complete(prompt, max_tokens, usage_ctx)),
     ]:
         try:
-            return fn()
+            text, cost_usd = fn()
+            if cost_sink is not None:
+                cost_sink.append(cost_usd)
+            return text
         except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a fallback chain
             logger.warning(f"[ai_text] provider '{name}' failed, trying next: {exc}")
             last_exc = exc
