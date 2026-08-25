@@ -58,13 +58,21 @@ XFADE_DURATION = 1.2  # seconds of overlap between consecutive clips — soft, u
 
 PRESET_MARGIN_PERCENT = 6
 
+FRAME_ASPECT = 16 / 9  # the render frame is always 1920x1080
+
 def _preset_xy(corner: str, size_percent: float) -> tuple:
     """The 4 legacy corner presets, margin-safe (never flush to an edge)
     regardless of the image's size — same values the frontend's presetXY in
     App.jsx computes for its quick-position buttons, so an old channel that
-    only ever had `corner` renders identically to how it always looked."""
+    only ever had `corner` renders identically to how it always looked.
+
+    size_percent is a % of the frame's WIDTH; assuming a roughly square
+    logo/sticker, its height in pixels equals that many % of width, which is
+    a *larger* percentage of the frame's shorter (16:9) HEIGHT — the bottom
+    margin has to account for that or a "bottom" preset clips the image
+    against the frame's bottom edge instead of sitting cleanly inside it."""
     right_x = 100 - PRESET_MARGIN_PERCENT - size_percent
-    bottom_y = 100 - PRESET_MARGIN_PERCENT - size_percent
+    bottom_y = 100 - PRESET_MARGIN_PERCENT - size_percent * FRAME_ASPECT
     return {
         "top-left": (PRESET_MARGIN_PERCENT, PRESET_MARGIN_PERCENT),
         "top-right": (right_x, PRESET_MARGIN_PERCENT),
