@@ -341,6 +341,33 @@ def admin_list_videos(q: Optional[str] = None, status_filter: Optional[str] = No
     return result
 
 
+@router.get("/videos/{video_id}")
+def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Full technical recap for one video — preview, voice/script/subtitles/
+    music actually used, and an itemized credit cost breakdown — for the
+    admin dashboard's video detail popup."""
+    from src.api.routes.videos import _video_cost_transactions
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    channel = video.channel
+    owner = channel.user if channel else None
+
+    transactions = _video_cost_transactions(db, video, owner.id) if owner else []
+    cost_items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
+
+    data = video.to_dict()
+    data["channel_name"] = channel.name if channel else None
+    data["owner_email"] = owner.email if owner else None
+    data["voice_name"] = channel.voice_name if channel and channel.voice_id == video.voice_id else None
+    data["subtitle_style"] = channel.subtitle_style if channel else None
+    data["music_preference"] = channel.music_preference if channel else None
+    data["image_style"] = channel.image_style if channel else None
+    data["total_credits"] = sum(item["credits"] for item in cost_items)
+    data["cost_items"] = cost_items
+    return data
+
+
 @router.delete("/videos/{video_id}")
 def admin_delete_video(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == video_id).first()
