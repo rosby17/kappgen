@@ -45,8 +45,20 @@ def run_video_pipeline(
     
     # 2. Voiceover & Audio Alignment Setup
     raw_vo_path = source_dir / "voiceover.mp3"
-    
-    if pre_recorded_audio_path and pre_recorded_audio_path.exists():
+    transcript_json_path = source_dir / "transcript.json"
+
+    if raw_vo_path.exists() and transcript_json_path.exists():
+        # output_dir is deterministic per video (see queue_runner.py), so a
+        # video re-queued after being interrupted mid-render (server restart,
+        # deploy killing the worker, etc.) lands right back in the same
+        # directory a previous attempt already wrote to. The voiceover TTS +
+        # transcription STT calls are the most expensive, most re-billed step
+        # of a restart — reuse what's already on disk instead of paying for
+        # and redoing them every single retry.
+        logger.info("Step 1/7: Reusing voiceover + transcript from a previous (interrupted) attempt instead of regenerating.")
+        progress("Reprise : voix off déjà générée", 8)
+        transcript_info = json.loads(transcript_json_path.read_text(encoding="utf-8"))
+    elif pre_recorded_audio_path and pre_recorded_audio_path.exists():
         progress("Préparation et transcription de l’audio", 8)
         logger.info(f"Step 1/7: Using pre-recorded audio file: {pre_recorded_audio_path}")
         # Copy pre-recorded audio or convert to MP3
