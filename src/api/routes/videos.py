@@ -47,10 +47,17 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
         # just "can render at all", so free-tier usage can't run up the
         # image-generation bill. Voiceover/TTS is unaffected — it's covered
         # by the regular free-quota/credit check in user_can_render.
-        from src.utils.billing import get_credit_balance
+        from src.utils.billing import get_credit_balance, user_ai_features_enabled
         owner = channel.user
-        has_own_key = bool(owner and owner.izivoice_api_key_encrypted)
-        if not owner or (not has_own_key and get_credit_balance(db, owner) <= 0):
+        if not owner:
+            raise HTTPException(status_code=402, detail="La génération d’images IA nécessite des crédits.")
+        if not user_ai_features_enabled(db, owner):
+            raise HTTPException(
+                status_code=403,
+                detail="Les fonctionnalités IA ne sont pas incluses dans ton abonnement actuel. Passe à un palier supérieur pour les débloquer, ou choisis une bibliothèque d’images à la place.",
+            )
+        has_own_key = bool(owner.izivoice_api_key_encrypted)
+        if not has_own_key and get_credit_balance(db, owner) <= 0:
             raise HTTPException(
                 status_code=402,
                 detail="La génération d’images IA nécessite des crédits. Recharge ton solde pour l’utiliser, ou choisis une bibliothèque d’images à la place.",
@@ -98,6 +105,14 @@ async def submit_video_subject(
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     validate_channel_visual_source(channel, db)
+
+    if input_type == "audio" and transcribe_audio:
+        from src.utils.billing import user_ai_features_enabled
+        if not user_ai_features_enabled(db, current_user):
+            raise HTTPException(
+                status_code=403,
+                detail="La transcription automatique (IA) n'est pas incluse dans ton abonnement actuel. Désactive-la pour utiliser le titre du fichier comme sous-titre, ou passe à un palier supérieur.",
+            )
 
     can_render, reason = user_can_render(db, current_user)
     if not can_render:

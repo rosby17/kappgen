@@ -422,6 +422,18 @@ class Plan(Base):
     # for any charge/credit math.
     original_price_fcfa = Column(Integer, nullable=True)
 
+    # Hybrid subscription tiers (credits=None, i.e. the Subscription branch of
+    # _activate_subscription): how many videos this plan includes per cycle
+    # (null = unlimited), whether AI features (auto-script, transcription, AI
+    # images/voice) are usable on this plan at all, and how many bonus
+    # credits are granted on each successful renewal to cover that AI usage —
+    # see grant_subscription_cycle_credits in src/utils/billing.py. Unused by
+    # credit-pack plans (credits is set): those already sell exactly what
+    # they say on the tin, no separate quota/gate needed.
+    video_quota_per_cycle = Column(Integer, nullable=True)
+    ai_features_enabled = Column(Boolean, nullable=False, default=True)
+    monthly_credit_grant = Column(Integer, nullable=True)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -430,6 +442,9 @@ class Plan(Base):
             "original_price_fcfa": self.original_price_fcfa,
             "duration_days": self.duration_days,
             "credits": self.credits,
+            "video_quota_per_cycle": self.video_quota_per_cycle,
+            "ai_features_enabled": self.ai_features_enabled,
+            "monthly_credit_grant": self.monthly_credit_grant,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

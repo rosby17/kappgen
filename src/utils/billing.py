@@ -159,12 +159,68 @@ def price_for_cycle(base_monthly_price_fcfa: int, cycle: str) -> int:
     return marketing_round_fcfa(base_monthly_price_fcfa * markup)
 
 
+def get_active_subscription(db: Session, user: User) -> Optional[Subscription]:
+    return (
+        db.query(Subscription)
+        .filter(Subscription.user_id == user.id, Subscription.status == "active", Subscription.expires_at > datetime.utcnow())
+        .order_by(Subscription.expires_at.desc())
+        .first()
+    )
+
+
 def user_has_active_subscription(db: Session, user: User) -> bool:
-    return db.query(Subscription).filter(
-        Subscription.user_id == user.id,
-        Subscription.status == "active",
-        Subscription.expires_at > datetime.utcnow(),
-    ).first() is not None
+    return get_active_subscription(db, user) is not None
+
+
+def user_ai_features_enabled(db: Session, user: User) -> bool:
+    """Hybrid-tier gate: a subscription whose plan has ai_features_enabled=False
+    (the base "manuel uniquement" tier) can't touch AI features at all, even
+    with spare credits sitting in their balance — those two are independent
+    controls on purpose (see the tier discussion this implements). A user
+    with no subscription at all (pure credit-pack model, or between plans)
+    is unaffected — AI usage there is already gated by the credit balance
+    checks at each call site, same as today. An admin-granted subscription
+    with no plan attached (plan_id is nullable) is treated as permissive."""
+    sub = get_active_subscription(db, user)
+    if not sub or not sub.plan:
+        return True
+    return sub.plan.ai_features_enabled
+
+
+def user_video_quota_status(db: Session, user: User) -> tuple[Optional[int], int]:
+    """(quota, used_this_cycle) for the user's active subscription tier —
+    quota is None when unlimited (or no subscription/plan, i.e. gated by
+    credits alone instead). used_this_cycle counts videos created since the
+    subscription's started_at, across all of the user's channels."""
+    sub = get_active_subscription(db, user)
+    if not sub or not sub.plan or sub.plan.video_quota_per_cycle is None:
+        return None, 0
+    from src.db.models import Video, Channel
+    used = (
+        db.query(Video)
+        .join(Channel, Video.channel_id == Channel.id)
+        .filter(Channel.user_id == user.id, Video.created_at >= sub.started_at)
+        .count()
+    )
+    return sub.plan.video_quota_per_cycle, used
+
+
+def grant_subscription_cycle_credits(db: Session, subscription: Subscription) -> None:
+    """Called once when a subscription (re)activates — grants the plan's
+    monthly_credit_grant, if any, valid only for that subscription's own
+    cycle (expires with it, so it can't be hoarded across renewals the way a
+    purchased credit pack can). No-op for plans with no bonus configured."""
+    plan = subscription.plan
+    if not plan or not plan.monthly_credit_grant:
+        return
+    valid_days = max(1, (subscription.expires_at - subscription.started_at).days)
+    credit_user(
+        db, subscription.user,
+        amount=plan.monthly_credit_grant,
+        valid_days=valid_days,
+        description=f"Crédits IA inclus — abonnement {plan.name}",
+        transaction_type="subscription_grant",
+    )
 
 
 # New accounts get a spendable credit pot instead of a flat "N free videos"
@@ -251,8 +307,14 @@ def user_can_render(db: Session, user: User, estimated_cost_credits: int = 0) ->
     nothing, so it's better rejected upfront with a clear reason."""
     if user.free_videos_used < user.free_video_quota_granted:
         return True, ""
-    if user_has_active_subscription(db, user):
-        return True, ""
+    sub = get_active_subscription(db, user)
+    if sub:
+        quota, used = user_video_quota_status(db, user)
+        if quota is None or used < quota:
+            return True, ""
+        # Over the plan's included quota — fall through to credits for the
+        # overage instead of a hard block, same as running out of the free
+        # quota above does.
     balance = get_credit_balance(db, user)
     if balance >= max(estimated_cost_credits, 1):
         return True, ""

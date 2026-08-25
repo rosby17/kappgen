@@ -159,6 +159,9 @@ def init_db():
         plan_migrations = {
             "credits": "ALTER TABLE plans ADD COLUMN credits INTEGER",
             "original_price_fcfa": "ALTER TABLE plans ADD COLUMN original_price_fcfa INTEGER",
+            "video_quota_per_cycle": "ALTER TABLE plans ADD COLUMN video_quota_per_cycle INTEGER",
+            "ai_features_enabled": "ALTER TABLE plans ADD COLUMN ai_features_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            "monthly_credit_grant": "ALTER TABLE plans ADD COLUMN monthly_credit_grant INTEGER",
         }
         with engine.begin() as conn:
             for col_name, ddl in plan_migrations.items():

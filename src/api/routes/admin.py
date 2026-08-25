@@ -163,8 +163,16 @@ def admin_list_plans(admin: User = Depends(get_current_admin), db: Session = Dep
 class PlanPayload(BaseModel):
     name: str
     price_fcfa: int
+    original_price_fcfa: Optional[int] = None
     duration_days: int = 30
     is_active: bool = True
+    # Credit-pack plans (Izivoice-style) set `credits`; hybrid subscription
+    # tiers leave it null and use the three fields below instead — see
+    # Plan.video_quota_per_cycle's docstring in src/db/models.py.
+    credits: Optional[int] = None
+    video_quota_per_cycle: Optional[int] = None
+    ai_features_enabled: bool = True
+    monthly_credit_grant: Optional[int] = None
 
 
 @router.post("/plans")

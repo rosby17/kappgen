@@ -586,6 +586,12 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if channel.automation_mode != "auto":
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
+    from src.utils.billing import user_ai_features_enabled
+    if not user_ai_features_enabled(db, current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="La génération automatique de script (IA) n'est pas incluse dans ton abonnement actuel. Passe à un palier supérieur pour l'utiliser.",
+        )
 
     from threading import Thread
     from src.worker.queue_runner import generate_and_queue_auto_video_background
