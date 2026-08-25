@@ -562,7 +562,7 @@ class VoiceCloneJob(Base):
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     name = Column(String(255), nullable=False)
     audio_path = Column(String(1024), nullable=False)  # relative to STORAGE_PATH; deleted once processed
-    status = Column(String(20), nullable=False, default="pending")  # "pending" | "done" | "error"
+    status = Column(String(20), nullable=False, default="pending")  # "pending" | "processing" | "done" | "error"
     voice_id = Column(String(255), nullable=True)
     preview_url = Column(String(1024), nullable=True)
     error_message = Column(Text, nullable=True)

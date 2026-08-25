@@ -487,11 +487,14 @@ def requeue_orphaned_videos():
     On worker startup, any video still marked 'rendering' was orphaned by a
     previous process being killed mid-render (e.g. a deployment restarting the
     container) — nothing else would ever pick it back up since the picker only
-    looks at 'queued' videos. Reset those to 'queued' so they retry automatically
-    (rendering isn't resumable — it restarts from the beginning, so the progress
-    bar is reset to 0 immediately rather than showing a stale percentage while
-    "queued"). After MAX_AUTO_RESTARTS repeated interruptions, stop looping and
-    surface a clear failure instead of retrying forever.
+    looks at 'queued' videos. Reset those to 'queued' so they retry automatically;
+    the progress bar resets to 0 since a fresh attempt starts over from step 1,
+    but run_video_pipeline() itself skips straight past voiceover generation/
+    transcription if it finds them already on disk from the interrupted attempt
+    (see orchestrator.py) — the expensive Izivoice calls aren't repeated even
+    though the displayed progress is. After MAX_AUTO_RESTARTS repeated
+    interruptions, stop looping and surface a clear failure instead of retrying
+    forever.
     """
     db = SessionLocal()
     try:
@@ -517,6 +520,38 @@ def requeue_orphaned_videos():
             db.commit()
     finally:
         db.close()
+
+VOICE_CLONE_STUCK_MINUTES = 10
+
+def requeue_orphaned_voice_clone_jobs():
+    """On worker startup, any job still marked 'processing' was orphaned by a
+    previous process getting killed mid-clone (the Izivoice /clone call can run
+    for minutes, well past a container's stop grace period in the worst case).
+
+    Unlike videos, this needed its own explicit recovery: a clone job used to
+    stay 'pending' in an open, uncommitted DB transaction for its *entire*
+    duration (see process_single_voice_clone_job's old FOR UPDATE SKIP LOCKED
+    pattern) — so a hard-killed worker left the row's lock held until Postgres
+    itself noticed the dropped connection, which can take a very long time
+    (default TCP keepalive settings), not the immediate, active recovery
+    requeue_orphaned_videos() does for renders. That's the "stuck on
+    Clonage… forever" bug: the job was neither being processed nor visibly
+    failed, just invisibly wedged. process_single_voice_clone_job now commits
+    a 'processing' status immediately upon picking a job (releasing the lock
+    right away), so a killed worker leaves a normal, queryable row instead of
+    a dangling lock — this function is what actually resets it back to
+    'pending' on the next startup."""
+    db = SessionLocal()
+    try:
+        orphaned = db.query(VoiceCloneJob).filter(VoiceCloneJob.status == "processing").all()
+        for job in orphaned:
+            logger.warning(f"Re-queuing orphaned voice-clone job {job.id} (interrupted mid-clone).")
+            job.status = "pending"
+        if orphaned:
+            db.commit()
+    finally:
+        db.close()
+
 
 def purge_old_render_output(video: Video) -> None:
     """Deletes a finished video's rendered output + source assets from disk,
@@ -868,6 +903,16 @@ def process_single_voice_clone_job() -> bool:
             db.commit()
             return True
 
+        # Committed right away (releasing the FOR UPDATE lock immediately)
+        # instead of staying "pending" in an open transaction for the whole
+        # multi-minute Izivoice call — a worker killed mid-clone now leaves a
+        # normal, queryable "processing" row that requeue_orphaned_voice_clone_jobs()
+        # can actively reset on next startup, instead of a dangling lock that
+        # only clears once Postgres notices the dead connection (which can
+        # take a very long time) — this was the "stuck on Clonage… forever" bug.
+        job.status = "processing"
+        db.commit()
+
         logger.info(f"Worker picked voice-clone job {job.id} (channel {job.channel_id}).")
         process_voice_clone_job(db, job, api_key)
         return True
@@ -938,6 +983,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     init_db()
     requeue_orphaned_videos()
+    requeue_orphaned_voice_clone_jobs()
     concurrency = max_concurrent_renders or MAX_CONCURRENT_RENDERS
 
     if single_run:

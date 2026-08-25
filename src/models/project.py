@@ -50,15 +50,21 @@ class OverlayItem(BaseModel):
     id: str
     image_path: str             # storage-relative, e.g. "channels/<id>/overlays/<overlay_id>.png"
     enabled: bool = True
-    corner: str = "top-right"   # "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    corner: str = "top-right"   # legacy 4-preset fallback, only used when x_percent/y_percent are absent (old saved channels)
+    x_percent: Optional[float] = None  # 0-100, free placement — where the image's own top-left sits inside the inset frame; None = derive from `corner`
+    y_percent: Optional[float] = None  # same, vertical axis
     size_percent: float = 12    # width as % of the 1920px-wide render frame
     opacity: float = 1.0        # 0-1
+    shape: str = "rectangle"    # "rectangle" | "rounded" | "circle" — actually masked at render time, see assembler.py:apply_overlay_shape_mask
 
 class BrandingConfig(BaseModel):
     logo_path: Optional[str] = None
     logo_enabled: bool = True           # burn the channel logo into the render at all
-    logo_corner: str = "top-right"      # user-adjustable — used to be hardcoded top-right in the renderer
+    logo_corner: str = "top-right"      # legacy 4-preset fallback, only used when logo_x_percent/logo_y_percent are absent
+    logo_x_percent: Optional[float] = None  # 0-100, free placement — see OverlayItem.x_percent
+    logo_y_percent: Optional[float] = None
     logo_size_percent: float = 5        # width as % of the 1920px-wide render frame (≈100px, matches the old fixed size)
+    logo_shape: str = "rectangle"       # "rectangle" | "rounded" | "circle" — same masking as overlays
     channel_name_text: Optional[str] = None
     overlays: List[OverlayItem] = Field(default_factory=list)
 

@@ -8,6 +8,47 @@ from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.config import STORAGE_PATH, ASSETS_PATH
 
+
+def apply_overlay_shape_mask(source_path: Path, shape: str, temp_dir: Path, cache_key: str) -> Path:
+    """Returns a path to use as the actual overlay input: for shape="rectangle"
+    (the default — a logo or a "Subscribe" banner is rarely meant to be
+    cropped), just the original source_path, unchanged. For "circle"/"rounded"
+    it pre-masks the image with Pillow into a temp PNG (transparent outside
+    the shape) *before* ffmpeg ever sees it — simpler and more portable than
+    building an equivalent ffmpeg geq/alphamerge filter graph, and this
+    codebase already leans on Pillow for image work elsewhere (image_pool.py).
+    The mask is applied at the source's native resolution, then ffmpeg's
+    normal scale/overlay filters run on the masked result exactly like any
+    other overlay image."""
+    if shape not in ("circle", "rounded"):
+        return source_path
+    from PIL import Image, ImageDraw
+
+    img = Image.open(source_path).convert("RGBA")
+    w, h = img.size
+    mask = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    if shape == "circle":
+        # A circle only reads sensibly on a square-ish image — fit it inside
+        # the shorter side so it never clips the source's own content, rather
+        # than stretching an ellipse across a wide/tall sticker.
+        side = min(w, h)
+        cx, cy = w / 2, h / 2
+        draw.ellipse([cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2], fill=255)
+    else:  # rounded
+        radius = round(min(w, h) * 0.18)
+        draw.rounded_rectangle([0, 0, w, h], radius=radius, fill=255)
+
+    # Combine with the source's own alpha (a transparent PNG sticker should
+    # stay transparent outside its artwork even inside the mask shape) rather
+    # than overwriting it outright.
+    alpha = Image.composite(img.split()[3], Image.new("L", (w, h), 0), mask)
+    img.putalpha(alpha)
+
+    out_path = temp_dir / f"overlay_mask_{cache_key}_{shape}.png"
+    img.save(out_path, "PNG")
+    return out_path
+
 WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 
 # Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
@@ -15,18 +56,45 @@ WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 XFADE_TRANSITIONS = ["fade", "fadeblack", "dissolve"]
 XFADE_DURATION = 1.2  # seconds of overlap between consecutive clips — soft, unhurried blend
 
-CORNER_OVERLAY_XY = {
-    "top-left": ("{margin}", "{margin}"),
-    "top-right": ("W-w-{margin}", "{margin}"),
-    "bottom-left": ("{margin}", "H-h-{margin}"),
-    "bottom-right": ("W-w-{margin}", "H-h-{margin}"),
-}
+PRESET_MARGIN_PERCENT = 6
 
-def _overlay_xy_expr(corner: str, margin: int = 40) -> tuple:
-    """ffmpeg overlay x/y expressions for one of the 4 corners — falls back to
-    top-right (the old hardcoded logo position) for any unrecognized value."""
-    x_tpl, y_tpl = CORNER_OVERLAY_XY.get(corner, CORNER_OVERLAY_XY["top-right"])
-    return x_tpl.format(margin=margin), y_tpl.format(margin=margin)
+def _preset_xy(corner: str, size_percent: float) -> tuple:
+    """The 4 legacy corner presets, margin-safe (never flush to an edge)
+    regardless of the image's size — same values the frontend's presetXY in
+    App.jsx computes for its quick-position buttons, so an old channel that
+    only ever had `corner` renders identically to how it always looked."""
+    right_x = 100 - PRESET_MARGIN_PERCENT - size_percent
+    bottom_y = 100 - PRESET_MARGIN_PERCENT - size_percent
+    return {
+        "top-left": (PRESET_MARGIN_PERCENT, PRESET_MARGIN_PERCENT),
+        "top-right": (right_x, PRESET_MARGIN_PERCENT),
+        "bottom-left": (PRESET_MARGIN_PERCENT, bottom_y),
+        "bottom-right": (right_x, bottom_y),
+    }.get(corner, (right_x, PRESET_MARGIN_PERCENT))
+
+def resolve_overlay_percent(item: dict, size_percent: float) -> tuple:
+    """x_percent/y_percent (free placement) if set, else derived from the
+    legacy 4-preset `corner` field — every overlay/logo ends up with a
+    concrete (x, y) in 0-100 regardless of which one it was actually saved
+    with, so the rest of the pipeline only has to deal with one shape."""
+    x = item.get("x_percent")
+    y = item.get("y_percent")
+    if x is not None and y is not None:
+        return x, y
+    return _preset_xy(item.get("corner"), size_percent)
+
+def _overlay_xy_expr(x_percent: float, y_percent: float) -> tuple:
+    """ffmpeg overlay x/y expressions placing the overlay's own top-left
+    directly at x_percent/y_percent of the frame — no implicit margin, so a
+    value of 0 or 100 (or, if someone deliberately drags a slider past that,
+    <0 / >100) can push the image flush to an edge or partly off-frame,
+    matching the frontend's direct-mapping preview math (overlayPositionStyle
+    in App.jsx) exactly. Any safety margin only comes from *how a value was
+    chosen* (the 4 quick-position presets bake one in, see _preset_xy above)
+    — never clamped back in here once a creator has set a value."""
+    x_expr = f"(W*{x_percent}/100)"
+    y_expr = f"(H*{y_percent}/100)"
+    return x_expr, y_expr
 
 def check_ffmpeg_filter(filter_name: str) -> bool:
     """Checks if a specific filter is supported by system ffmpeg."""
@@ -172,9 +240,13 @@ def assemble_final_video(
     logo_full_path = (STORAGE_PATH / logo_path_str) if logo_path_str else None
     has_logo = bool(branding.get("logo_enabled", True) and logo_full_path and logo_full_path.exists())
     if has_logo:
+        logo_shape = branding.get("logo_shape") or "rectangle"
+        logo_size = branding.get("logo_size_percent") or 5
+        logo_x, logo_y = resolve_overlay_percent({"x_percent": branding.get("logo_x_percent"), "y_percent": branding.get("logo_y_percent"), "corner": branding.get("logo_corner")}, logo_size)
         image_overlays.append({
-            "path": logo_full_path,
-            "corner": branding.get("logo_corner") or "top-right",
+            "path": apply_overlay_shape_mask(logo_full_path, logo_shape, temp_dir, "logo"),
+            "x_percent": logo_x,
+            "y_percent": logo_y,
             "size_percent": branding.get("logo_size_percent") or 5,
             "opacity": 1.0,
         })
@@ -188,9 +260,13 @@ def assemble_final_video(
         item_full_path = STORAGE_PATH / item_path_str
         if not item_full_path.exists():
             continue
+        item_shape = item.get("shape") or "rectangle"
+        item_size = item.get("size_percent") or 12
+        item_x, item_y = resolve_overlay_percent(item, item_size)
         image_overlays.append({
-            "path": item_full_path,
-            "corner": item.get("corner") or "top-right",
+            "path": apply_overlay_shape_mask(item_full_path, item_shape, temp_dir, item.get("id") or item_path_str),
+            "x_percent": item_x,
+            "y_percent": item_y,
             "size_percent": item.get("size_percent") or 12,
             "opacity": item.get("opacity") if item.get("opacity") is not None else 1.0,
         })
@@ -274,7 +350,7 @@ def assemble_final_video(
             scale_filter += f",format=rgba,colorchannelmixer=aa={ov['opacity']:.2f}"
         scale_filter += f"[{label}]"
         filter_parts.append(scale_filter)
-        x_expr, y_expr = _overlay_xy_expr(ov["corner"])
+        x_expr, y_expr = _overlay_xy_expr(ov["x_percent"], ov["y_percent"])
         out_label = f"v_ov{i}"
         filter_parts.append(f"[{base_label}][{label}]overlay={x_expr}:{y_expr}[{out_label}]")
         base_label = out_label

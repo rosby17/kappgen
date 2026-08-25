@@ -71,13 +71,14 @@ def transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
 
 
 def process_voice_clone_job(db, job: VoiceCloneJob, api_key: str) -> None:
-    """Runs one pending clone job to completion (or failure), updating the
-    row in place. Always leaves the job in a terminal status ("done" or
-    "error") — the API's status endpoint just reads whatever's here, so a
-    creator's browser tab polling it resolves correctly even if this process
-    (or the API's) gets redeployed mid-job; the job simply gets picked up
-    again on the worker's next pass since it stays "pending" until this
-    function actually starts running."""
+    """Runs one claimed clone job (already flipped to "processing" and
+    committed by the caller) to completion (or failure), updating the row in
+    place. Always leaves the job in a terminal status ("done" or "error") —
+    the API's status endpoint just reads whatever's here, so a creator's
+    browser tab polling it resolves correctly even if this process (or the
+    API's) gets redeployed mid-job. If the worker is killed mid-call instead,
+    the job is left in "processing" — requeue_orphaned_voice_clone_jobs()
+    (queue_runner.py) resets it back to "pending" on the next worker startup."""
     audio_path = STORAGE_PATH / job.audio_path
     try:
         contents = audio_path.read_bytes()
