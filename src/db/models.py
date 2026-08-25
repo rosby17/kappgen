@@ -235,6 +235,11 @@ class Channel(Base):
         visuals_ready = bool(
             (image_style.get("source") == "ai_generated" and image_style.get("style_prompt"))
             or (image_style.get("source") in ("library", "hybrid") and (image_style.get("library_image_count") or 0) > 0)
+            # "community" borrows another channel's already-approved library —
+            # nothing of its own to check here; validate_channel_visual_source
+            # (videos.py) is the real gate confirming the niche actually has
+            # an approved folder before a render is allowed to start.
+            or image_style.get("source") == "community"
         )
         completion_percent = 100 if visuals_ready else 50
         return {
@@ -328,6 +333,12 @@ class Video(Base):
     # else needs to know which backend a given video landed on.
     storage_backend = Column(String(10), nullable=False, default="local")
     output_size_bytes = Column(Integer, nullable=True)  # output.mp4 size — feeds current_r2_usage_bytes()
+    # Opt-in per-video: skip the default retention purge entirely and prefer
+    # uploading to R2 instead of local disk (see _finalize_output_storage /
+    # purge_old_videos_and_uploads, queue_runner.py). Meant to be a paid
+    # feature ("garde tes vidéos plus longtemps") — no credit/subscription
+    # gate wired up yet, billing comes later; this only sets up the mechanism.
+    extended_retention = Column(Boolean, nullable=False, default=False)
     source_assets_path = Column(String(512), nullable=True)
     error_message = Column(Text, nullable=True)
     duration_seconds = Column(Float, nullable=True)
@@ -390,6 +401,7 @@ class Video(Base):
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "output_path": self.output_path,
             "storage_backend": self.storage_backend or "local",
+            "extended_retention": self.extended_retention,
             "source_assets_path": self.source_assets_path,
             "error_message": self.error_message,
             "duration_seconds": self.duration_seconds,
@@ -616,6 +628,44 @@ class VoiceCloneJob(Base):
             "name": self.name,
             "preview_url": self.preview_url,
             "detail": self.error_message,
+        }
+
+
+class CommunityLibraryFolder(Base):
+    """A channel's image library, opted into the community-sharing program by
+    its owner at upload time (Channel.image_style.share_with_community) —
+    never shared by default. One row per channel; `status` doubles as the
+    admin-facing badge (pending/approved/flagged) AND the inclusion filter
+    for that niche's "master" library: a niche's collaborative library is
+    simply the union of every `approved` folder in that niche, read live off
+    disk (STORAGE_PATH/channels/{channel_id}/library) — no file copying, so
+    "merging" two folders is just approving both into the same niche."""
+    __tablename__ = "community_library_folders"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, unique=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    niche = Column(String(255), nullable=False, index=True)
+    image_count = Column(Integer, nullable=False, default=0)
+    status = Column(String(20), nullable=False, default="pending")  # "pending" | "approved" | "flagged"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    channel = relationship("Channel")
+    user = relationship("User")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "channel_id": self.channel_id,
+            "channel_name": self.channel.name if self.channel else None,
+            "user_id": self.user_id,
+            "user_email": self.user.email if self.user else None,
+            "niche": self.niche,
+            "image_count": self.image_count,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 

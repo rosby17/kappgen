@@ -80,6 +80,20 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
                     "Modifiez cette chaîne et réimportez son dossier d’images avant de lancer la vidéo."
                 ),
             )
+    if source == "community":
+        from src.db.models import CommunityLibraryFolder
+        has_approved_folder = db.query(CommunityLibraryFolder).filter(
+            CommunityLibraryFolder.status == "approved",
+            CommunityLibraryFolder.niche.ilike(channel.niche or ""),
+        ).first() is not None
+        if not has_approved_folder:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Aucune bibliothèque collaborative disponible pour la niche « {channel.niche} » pour l’instant — "
+                    "choisis une autre source visuelle, ou reviens plus tard."
+                ),
+            )
 
 def clean_filename_title(filename: str) -> str:
     """Extracts clean video title from filename."""
@@ -516,6 +530,7 @@ class VideoUpdate(BaseModel):
     folder_id: Optional[str] = None
     clear_folder: bool = False
     approved_for_publish: Optional[bool] = None
+    extended_retention: Optional[bool] = None
 
 @router.patch("/{video_id}")
 def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -529,6 +544,12 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
 
     if payload.approved_for_publish is not None:
         video.approved_for_publish = payload.approved_for_publish
+
+    if payload.extended_retention is not None:
+        # No credit/subscription gate yet — billed later (see Video.extended_retention).
+        video.extended_retention = payload.extended_retention
+        if payload.extended_retention:
+            video.purged_at = None
 
     if payload.clear_folder:
         video.folder_id = None

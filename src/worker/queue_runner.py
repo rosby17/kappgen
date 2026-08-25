@@ -23,14 +23,15 @@ from src.config import STORAGE_PATH, MAX_CONCURRENT_RENDERS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
 
-# Tightened from 7 days after the VPS disk filled up (200GB, rendered videos
-# alone were 84GB) and started failing deploys mid-build. Paying creators
-# (anyone who's ever bought a credit pack — user_has_purchased_credits) keep
-# the longer window; a free-tier account's renders are far more likely to be
-# throwaway test content, so they get purged aggressively instead of sitting
-# on disk indefinitely.
-VIDEO_RETENTION_DAYS = 3
-VIDEO_RETENTION_DAYS_FREE_TIER = 1
+# Tightened to 48h after the VPS disk filled up (200GB, rendered videos alone
+# were 84GB) and started failing deploys mid-build — every video, regardless
+# of plan, gets purged this fast by default now. The escape hatch is
+# Video.extended_retention (an explicit per-video opt-in, meant to become a
+# paid feature later — see videos.py's PATCH endpoint): those videos are
+# excluded from this purge entirely and get uploaded to R2 instead of local
+# disk (see _finalize_output_storage below), so "keep it longer" doesn't
+# just mean "sit on the same small VPS disk longer."
+VIDEO_RETENTION_HOURS = 48
 # Editable scene assets (images/clips kept for the post-render editor) get
 # their own, separate purge — either at this deadline, or immediately if the
 # user explicitly closes the editor.
@@ -568,11 +569,15 @@ def requeue_orphaned_voice_clone_jobs():
 
 def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     """Sets video.output_path (+ storage_backend/output_size_bytes) for a
-    just-finished render. Uploads to R2 when there's tracked room under the
-    free-tier cap (see r2_storage.should_upload_to_r2); otherwise — R2 not
-    configured, over the cap, or the upload itself failed — falls back to
-    the local STORAGE_PATH-relative path exactly like before R2 existed.
-    Local file is only deleted after a confirmed-successful R2 upload."""
+    just-finished render. Only videos with extended_retention set even
+    attempt R2 — everything else gets auto-purged from local disk within
+    VIDEO_RETENTION_HOURS anyway, so there's no point spending R2's free-tier
+    quota on something that won't outlive it. Uploads when there's tracked
+    room under the free-tier cap (see r2_storage.should_upload_to_r2);
+    otherwise — R2 not configured, over the cap, or the upload itself
+    failed — falls back to the local STORAGE_PATH-relative path exactly like
+    before R2 existed. Local file is only deleted after a confirmed-successful
+    R2 upload."""
     from src.utils import r2_storage
 
     try:
@@ -580,7 +585,7 @@ def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     except OSError:
         size_bytes = None
 
-    if size_bytes and r2_storage.should_upload_to_r2(db, size_bytes):
+    if video.extended_retention and size_bytes and r2_storage.should_upload_to_r2(db, size_bytes):
         object_key = f"channels/{video.channel_id}/videos/{video.id}/output.mp4"
         url = r2_storage.upload_video(output_mp4, object_key)
         if url:
@@ -662,45 +667,33 @@ def purge_old_videos_and_uploads():
     """
     Frees disk space on the shared VPS:
     - Deletes rendered video files (output.mp4 + source assets) for videos
-      finished more than VIDEO_RETENTION_DAYS ago (VIDEO_RETENTION_DAYS_FREE_TIER
-      for a creator who's never bought a credit pack). The DB record is kept
-      (purged_at is set, output_path cleared) so history/counters remain.
+      finished more than VIDEO_RETENTION_HOURS ago — unless the video has
+      extended_retention set, in which case it's skipped entirely (those
+      live on R2, not this disk, and aren't meant to be auto-deleted).
+      The DB record is kept (purged_at is set, output_path cleared) so
+      history/counters remain.
     - Deletes uploaded source audio files older than UPLOAD_RETENTION_HOURS —
       they're only needed once, at render time, and are never reused after.
     """
-    from src.utils.billing import user_has_purchased_credits
-
     db = SessionLocal()
     try:
-        # The widest cutoff first (paid retention) — a per-video check below
-        # applies the shorter free-tier cutoff, since which one applies
-        # depends on the owning user, not something the query can filter on
-        # directly without a join for every video.
-        widest_cutoff = datetime.utcnow() - timedelta(days=min(VIDEO_RETENTION_DAYS, VIDEO_RETENTION_DAYS_FREE_TIER))
-        candidates = (
+        cutoff = datetime.utcnow() - timedelta(hours=VIDEO_RETENTION_HOURS)
+        stale_videos = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(Video.purged_at.is_(None))
+            .filter(Video.extended_retention.is_(False))
             .filter(Video.finished_at.isnot(None))
-            .filter(Video.finished_at < widest_cutoff)
+            .filter(Video.finished_at < cutoff)
             .all()
         )
-        stale_videos = []
-        for video in candidates:
-            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
-            owner = channel.user if channel else None
-            is_paying = bool(owner and user_has_purchased_credits(db, owner))
-            retention_days = VIDEO_RETENTION_DAYS if is_paying else VIDEO_RETENTION_DAYS_FREE_TIER
-            if video.finished_at < datetime.utcnow() - timedelta(days=retention_days):
-                stale_videos.append((video, retention_days))
-
-        for video, retention_days in stale_videos:
+        for video in stale_videos:
             try:
                 purge_old_render_output(video)
                 video.output_path = None
                 video.source_assets_path = None
                 video.purged_at = datetime.utcnow()
-                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {retention_days}d).")
+                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {VIDEO_RETENTION_HOURS}h).")
             except Exception as purge_err:
                 logger.warning(f"Failed to purge video {video.id}: {purge_err}")
         if stale_videos:

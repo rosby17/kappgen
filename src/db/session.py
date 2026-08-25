@@ -34,7 +34,7 @@ def get_db():
         db.close()
 
 def init_db():
-    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog, CreditPot, CreditTransaction, VoiceCloneJob  # ensure models are imported
+    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog, CreditPot, CreditTransaction, VoiceCloneJob, CommunityLibraryFolder  # ensure models are imported
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration: create_all only adds missing tables, not missing
@@ -56,6 +56,7 @@ def init_db():
             "transcribe_audio": "ALTER TABLE videos ADD COLUMN transcribe_audio BOOLEAN DEFAULT TRUE NOT NULL",
             "storage_backend": "ALTER TABLE videos ADD COLUMN storage_backend VARCHAR(10) DEFAULT 'local' NOT NULL",
             "output_size_bytes": "ALTER TABLE videos ADD COLUMN output_size_bytes INTEGER",
+            "extended_retention": "ALTER TABLE videos ADD COLUMN extended_retention BOOLEAN DEFAULT FALSE NOT NULL",
             "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
             "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",
