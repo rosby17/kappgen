@@ -25,6 +25,14 @@ IZIVOICE_STT_CREDITS_PER_SEC = 3
 IZIVOICE_TTS_CREDITS_PER_CHAR = 1
 IZIVOICE_MUSIC_CREDITS = 300
 
+# Thumbnail generation goes through fal.ai's gpt-image-2 (OpenAI), a
+# separate, pricier provider from the Izivoice image credits above — set by
+# the operator at 2000 credits/thumbnail. Falls back to Izivoice's own image
+# model (IZIVOICE_IMAGE_CREDITS) only if fal.ai errors out or its own
+# credits are exhausted, so debiting must happen per attempted provider —
+# see generate_thumbnail_image's caller in youtube_metadata.py.
+THUMBNAIL_CREDITS = 2000
+
 # Converts a real Anthropic/OpenAI/fal.ai script-generation cost (in USD) into
 # KappGen credits, the same way IZIVOICE_* above converts Izivoice's own
 # credit currency. There's no direct USD credit-pack price to read (packs are

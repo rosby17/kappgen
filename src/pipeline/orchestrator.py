@@ -130,12 +130,19 @@ def run_video_pipeline(
     # to the raw narration prompts above if this fails or isn't configured —
     # library-only channels skip this entirely since prompts aren't used.
     image_style_cfg = channel_config.get("image_style") or {}
-    # AI image credits are capped to the first ten minutes. The resulting
-    # per-video pool is shuffled for later scenes by fetch_or_generate_images.
-    # Library/hybrid modes keep their existing behavior because they either use
-    # creator-owned assets or already generate only half of the requested set.
-    ai_original_window_seconds = 10 * 60
-    ai_unique_scene_count = sum(1 for segment in segments if segment["start"] < ai_original_window_seconds)
+    # How many distinct (paid, credit-debited) AI images to generate for this
+    # video — creator-configurable in the wizard (image_style.max_unique_images)
+    # since cost scales directly with this number. Falls back to the original
+    # "first ten minutes of scenes" heuristic for channels saved before that
+    # setting existed. The resulting pool is shuffled across the rest of the
+    # timeline by fetch_or_generate_images either way, so total video length
+    # doesn't drive AI generation cost.
+    max_unique_images = image_style_cfg.get("max_unique_images")
+    if max_unique_images:
+        ai_unique_scene_count = min(int(max_unique_images), len(segments))
+    else:
+        ai_original_window_seconds = 10 * 60
+        ai_unique_scene_count = sum(1 for segment in segments if segment["start"] < ai_original_window_seconds)
     if image_style_cfg.get("source") in ("ai_generated", "hybrid"):
         prompt_source = prompts[:ai_unique_scene_count] if image_style_cfg.get("source") == "ai_generated" else prompts
         directed_prompts = build_scene_prompts(
@@ -271,7 +278,8 @@ def run_video_pipeline(
             duration=total_duration,
             channel_id=channel_config.get("id"),
             niche=channel_config.get("niche"),
-            script_text=script_text
+            script_text=script_text,
+            user_id=channel_config.get("user_id"),
         )
         mix_audio_tracks(
             voiceover_path=raw_vo_path,
@@ -568,6 +576,7 @@ def regenerate_scene_audio(
             channel_id=channel_config.get("id"),
             niche=channel_config.get("niche"),
             script_text=transcript_info["text"],
+            user_id=channel_config.get("user_id"),
         )
         mix_audio_tracks(
             voiceover_path=raw_vo_path,

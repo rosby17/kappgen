@@ -625,12 +625,19 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), cur
     return channel.to_dict()
 
 @router.post("/{channel_id}/overlays")
-async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), replace_id: Optional[str] = Form(None), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Adds one extra sticker overlay (e.g. a "Subscribe" button, a bell icon —
     the kind of thing creators used to paste on by hand) burned into every
     render of this channel, on top of the single channel logo. Unlike the logo
     endpoint above, this appends a new slot instead of replacing one — a
-    channel can stack several of these in different corners."""
+    channel can stack several of these in different corners.
+
+    `replace_id`, when set, is an existing overlay's id the frontend is about
+    to swap this new upload in for — it's excluded from the 6-slot cap check
+    so "replace this image" doesn't spuriously fail at the cap, and lets the
+    frontend upload the new file *before* deleting the old one instead of the
+    other way round (a failed upload after an eager delete previously could
+    leave an overlay referencing nothing at all)."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -643,7 +650,8 @@ async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), 
 
     branding = dict(channel.branding or {})
     overlays = list(branding.get("overlays") or [])
-    if len(overlays) >= 6:
+    counted_overlays = [o for o in overlays if o.get("id") != replace_id] if replace_id else overlays
+    if len(counted_overlays) >= 6:
         raise HTTPException(status_code=400, detail="Maximum de 6 incrustations par chaîne.")
 
     overlay_id = str(uuid.uuid4())
@@ -742,6 +750,10 @@ async def preview_ai_music(
     render time (Claude-written prompt, or the client's own override)."""
     if not IZIVOICE_API_KEY:
         raise HTTPException(status_code=503, detail="La génération musicale IA n'est pas configurée sur le serveur.")
+
+    from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
+    if not debit_izivoice_usage_by_user_id(current_user.id, IZIVOICE_MUSIC_CREDITS, "ai_music_preview"):
+        raise HTTPException(status_code=402, detail=f"Crédits insuffisants — un aperçu musical IA coûte {IZIVOICE_MUSIC_CREDITS} crédits.")
 
     prompt = (ai_prompt or "").strip()
     if not prompt:

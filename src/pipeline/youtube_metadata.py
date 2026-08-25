@@ -128,6 +128,16 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     ]
     reference_paths = [p for p in reference_paths if p.exists()] or None
 
+    # Billed like the per-scene AI images: debited BEFORE calling out to the
+    # provider, so an insufficient balance never places the real (paid) call
+    # — it just falls through to generate_thumbnail's own video-frame-grab
+    # fallback below, same as any other AI-generation failure.
+    if channel.user_id:
+        from src.utils.billing import debit_izivoice_usage_by_user_id
+        from src.utils.billing import THUMBNAIL_CREDITS
+        if not debit_izivoice_usage_by_user_id(channel.user_id, THUMBNAIL_CREDITS, "ai_thumbnail_generation"):
+            raise RuntimeError(f"Insufficient KappGen credit balance for AI thumbnail generation (user {channel.user_id}).")
+
     # Unlike the bulk per-scene image generation (many images, needs to fail fast to
     # avoid stalling the whole render), this is the single standalone call for the
     # thumbnail — the one image viewers judge the video by — so it's worth waiting

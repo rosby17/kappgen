@@ -94,15 +94,19 @@ def get_background_music_track(
     channel_id: Optional[str] = None,
     niche: Optional[str] = None,
     script_text: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Path:
     """
     Resolves the background music track for a render:
       - mode "library": picks a random track from the channel's own uploaded
         set (music_pref["tracks"], storage-relative paths) — the user's own
-        music, never third-party stock tracks.
+        music, never third-party stock tracks. Free — nothing is billed.
       - mode "ai_generate": generates a track with Izivoice, using a prompt
         Claude derives from the channel niche and this video's script (or an
         explicit music_pref["ai_prompt"] override, which skips the Claude step).
+        Billed IZIVOICE_MUSIC_CREDITS, same as the wizard's own preview
+        (channels.py's /preview-ai-music) — but only on an actual cache miss,
+        since a cache hit never calls Izivoice at all.
       - anything else / on failure: a synthetic ambient drone, generated
         locally, so a render never blocks on missing music.
     """
@@ -135,6 +139,11 @@ def get_background_music_track(
             output_path = cache_dir / f"{abs(hash((prompt, round(duration)))) }.mp3"
             if output_path.exists():
                 return output_path
+            if user_id:
+                from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
+                if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "ai_music_generation"):
+                    logger.warning(f"Insufficient KappGen credit balance for AI music generation (user {user_id}); using fallback tone instead.")
+                    return _generate_synthetic_fallback_track(duration)
             return generate_music_izivoice(prompt, duration, output_path)
         except Exception as e:
             logger.warning(f"Izivoice music generation failed ({e}). Falling back to synthetic tone.")
