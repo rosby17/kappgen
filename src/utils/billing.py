@@ -7,13 +7,11 @@ from math import ceil
 from sqlalchemy.orm import Session
 from src.db.models import User, Subscription, CreditPot, CreditTransaction
 
-# Every KappGen credit debited for an Izivoice-billed call (voice, images,
-# transcription, music) costs this many times the real Izivoice credits it
-# consumed — the operator's target margin. Applied at debit time, not at
-# purchase time: a credit pack costs the buyer exactly what Izivoice charges
-# per credit (see the Starter/Creator/Standard/Pro packs), but each API call
-# is metered against more of the buyer's balance than it actually cost us.
-CREDIT_MARKUP_MULTIPLIER = 3.5
+# Izivoice-billed calls (voice, images, transcription, music) are metered at
+# cost (x1) rather than marked up — the operator owns Izivoice too, so that
+# spend is already profit on the Izivoice side; charging a markup here on top
+# would be double-margining the same unit of work.
+CREDIT_MARKUP_MULTIPLIER = 1.0
 
 # Real Izivoice/ai33.pro credit costs per unit of work, in Izivoice's own
 # credit currency — the same unit KappGen sells to creators, so a KappGen
