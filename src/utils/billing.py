@@ -172,36 +172,83 @@ def user_has_active_subscription(db: Session, user: User) -> bool:
     return get_active_subscription(db, user) is not None
 
 
-def user_ai_features_enabled(db: Session, user: User) -> bool:
-    """Whether this user is allowed to touch AI features (image generation,
-    AI music, ...) at all — independent of whether they have spare credits
-    sitting in their balance. Two paths:
-
-    - Subscription (hybrid tier): a subscription whose plan has
-      ai_features_enabled=False (the base "manuel uniquement" tier) blocks
-      AI features outright. An admin-granted subscription with no plan
-      attached (plan_id is nullable) is treated as permissive.
-    - Credit packs (the current model): a user who has ONLY ever bought
-      packs with ai_features_enabled=False (e.g. the entry-level Starter
-      pack — voiceover only, no AI images) is blocked even though their
-      credits would technically cover the cost; a plain credit balance
-      isn't proof they paid for AI access specifically. A user who has
-      never purchased anything at all (welcome credits / free quota only)
-      is unaffected — unrestricted, same as before this distinction existed."""
+def _user_relevant_plans(db: Session, user: User) -> list:
+    """Every plan this user currently "has access through": their active
+    subscription's plan (if any) plus every credit pack they've ever
+    successfully bought. Used as the shared basis for every per-feature/
+    per-limit gate below — a user gets the best of whatever they've paid
+    for, and an empty list (never purchased anything, welcome credits/free
+    quota only) is the caller's cue to fall back to "unrestricted"."""
+    plans = []
     sub = get_active_subscription(db, user)
-    if sub:
-        return True if not sub.plan else sub.plan.ai_features_enabled
-
+    if sub and sub.plan:
+        plans.append(sub.plan)
     purchased_plan_ids = [
         row[0] for row in
         db.query(Order.plan_id).join(Plan, Order.plan_id == Plan.id)
         .filter(Order.user_id == user.id, Order.status == "success", Plan.credits.isnot(None))
         .distinct().all()
     ]
-    if not purchased_plan_ids:
+    if purchased_plan_ids:
+        plans.extend(db.query(Plan).filter(Plan.id.in_(purchased_plan_ids)).all())
+    return plans
+
+
+def _feature_enabled(db: Session, user: User, attr: str) -> bool:
+    """True if ANY plan the user has access through grants this specific
+    feature (attr is one of Plan's ai_*_enabled column names) — independent
+    of whether they have spare credits sitting in their balance; a plain
+    balance isn't proof they paid for that feature specifically. A
+    subscription with no plan attached (admin-granted, plan_id nullable) is
+    treated as permissive, same as never having purchased anything."""
+    sub = get_active_subscription(db, user)
+    if sub and not sub.plan:
         return True
-    purchased_plans = db.query(Plan).filter(Plan.id.in_(purchased_plan_ids)).all()
-    return any(p.ai_features_enabled for p in purchased_plans)
+    plans = _user_relevant_plans(db, user)
+    if not plans:
+        return True
+    return any(getattr(p, attr) for p in plans)
+
+
+def user_ai_transcription_enabled(db: Session, user: User) -> bool:
+    return _feature_enabled(db, user, "ai_transcription_enabled")
+
+
+def user_ai_images_enabled(db: Session, user: User) -> bool:
+    return _feature_enabled(db, user, "ai_images_enabled")
+
+
+def user_ai_script_enabled(db: Session, user: User) -> bool:
+    return _feature_enabled(db, user, "ai_script_enabled")
+
+
+def user_autopublish_enabled(db: Session, user: User) -> bool:
+    return _feature_enabled(db, user, "autopublish_enabled")
+
+
+def user_max_channels(db: Session, user: User) -> Optional[int]:
+    """None means unlimited. Best-of across every plan the user has access
+    through (the highest cap they've ever paid for wins) — a user who
+    upgraded shouldn't be capped by a smaller pack bought earlier."""
+    plans = _user_relevant_plans(db, user)
+    if not plans:
+        return None
+    caps = [p.max_channels for p in plans]
+    if any(c is None for c in caps):
+        return None
+    return max(caps)
+
+
+def user_max_video_duration_seconds(db: Session, user: User) -> Optional[int]:
+    """Same best-of-across-plans shape as user_max_channels, for the
+    per-tier video-length cap shown on the pricing cards."""
+    plans = _user_relevant_plans(db, user)
+    if not plans:
+        return None
+    caps = [p.max_video_duration_seconds for p in plans]
+    if any(c is None for c in caps):
+        return None
+    return max(caps)
 
 
 def user_video_quota_status(db: Session, user: User) -> tuple[Optional[int], int]:

@@ -420,6 +420,16 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
     if not payload.effects_config.watermark_enabled and not user_has_purchased_credits(db, current_user):
         raise HTTPException(status_code=403, detail="Achète au moins un pack de crédits pour retirer le filigrane KappGen.")
 
+    from src.utils.billing import user_max_channels
+    max_channels = user_max_channels(db, current_user)
+    if max_channels is not None:
+        existing_count = db.query(Channel).filter(Channel.user_id == current_user.id).count()
+        if existing_count >= max_channels:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Ton abonnement actuel est limité à {max_channels} chaîne{'s' if max_channels > 1 else ''}. Passe à un palier supérieur pour en créer davantage.",
+            )
+
     channel = Channel(
         user_id=current_user.id,
         name=payload.name,
@@ -550,6 +560,13 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     if payload.voice_settings is not None:
         channel.voice_settings = payload.voice_settings
     if payload.publish_mode is not None:
+        if payload.publish_mode in ("auto", "scheduled"):
+            from src.utils.billing import user_autopublish_enabled
+            if not user_autopublish_enabled(db, current_user):
+                raise HTTPException(
+                    status_code=403,
+                    detail="La publication automatique sur YouTube n'est pas incluse dans ton abonnement actuel. Passe à un palier supérieur pour l'activer.",
+                )
         channel.publish_mode = payload.publish_mode
     if payload.publish_time_mode is not None:
         channel.publish_time_mode = payload.publish_time_mode
@@ -586,8 +603,8 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if channel.automation_mode != "auto":
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
-    from src.utils.billing import user_ai_features_enabled
-    if not user_ai_features_enabled(db, current_user):
+    from src.utils.billing import user_ai_script_enabled
+    if not user_ai_script_enabled(db, current_user):
         raise HTTPException(
             status_code=403,
             detail="La génération automatique de script (IA) n'est pas incluse dans ton abonnement actuel. Passe à un palier supérieur pour l'utiliser.",

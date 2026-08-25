@@ -767,11 +767,15 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         _record_automation_failure(db, channel)
         return None
 
+    from src.utils.billing import user_max_video_duration_seconds
+    tier_max_duration = user_max_video_duration_seconds(db, owner)
+    effective_max_duration = MAX_VIDEO_DURATION_SECONDS if tier_max_duration is None else min(MAX_VIDEO_DURATION_SECONDS, tier_max_duration)
+
     estimated_duration = max(3.0, len(result["script_text"].split()) / 2.5)
-    if estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+    if estimated_duration > effective_max_duration:
         logger.warning(
             f"Daily automation: generated script for channel {channel.id} ('{channel.name}') "
-            f"would produce a {estimated_duration/60:.0f} min video (max {MAX_VIDEO_DURATION_SECONDS//60}); skipping."
+            f"would produce a {estimated_duration/60:.0f} min video (max {effective_max_duration//60} for this tier); skipping."
         )
         return None
 

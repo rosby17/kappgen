@@ -47,11 +47,11 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
         # just "can render at all", so free-tier usage can't run up the
         # image-generation bill. Voiceover/TTS is unaffected — it's covered
         # by the regular free-quota/credit check in user_can_render.
-        from src.utils.billing import get_credit_balance, user_ai_features_enabled
+        from src.utils.billing import get_credit_balance, user_ai_images_enabled
         owner = channel.user
         if not owner:
             raise HTTPException(status_code=402, detail="La génération d’images IA nécessite des crédits.")
-        if not user_ai_features_enabled(db, owner):
+        if not user_ai_images_enabled(db, owner):
             raise HTTPException(
                 status_code=403,
                 detail="Les fonctionnalités IA ne sont pas incluses dans ton abonnement actuel. Passe à un palier supérieur pour les débloquer, ou choisis une bibliothèque d’images à la place.",
@@ -107,8 +107,8 @@ async def submit_video_subject(
     validate_channel_visual_source(channel, db)
 
     if input_type == "audio" and transcribe_audio:
-        from src.utils.billing import user_ai_features_enabled
-        if not user_ai_features_enabled(db, current_user):
+        from src.utils.billing import user_ai_transcription_enabled
+        if not user_ai_transcription_enabled(db, current_user):
             raise HTTPException(
                 status_code=403,
                 detail="La transcription automatique (IA) n'est pas incluse dans ton abonnement actuel. Désactive-la pour utiliser le titre du fichier comme sous-titre, ou passe à un palier supérieur.",
@@ -117,6 +117,10 @@ async def submit_video_subject(
     can_render, reason = user_can_render(db, current_user)
     if not can_render:
         raise HTTPException(status_code=402, detail=reason)
+
+    from src.utils.billing import user_max_video_duration_seconds
+    tier_max_duration = user_max_video_duration_seconds(db, current_user)
+    effective_max_duration = MAX_VIDEO_DURATION_SECONDS if tier_max_duration is None else min(MAX_VIDEO_DURATION_SECONDS, tier_max_duration)
 
     created_videos = []
     uploads_dir = STORAGE_PATH / "uploads"
@@ -156,11 +160,11 @@ async def submit_video_subject(
             except Exception:
                 estimated_duration = None
 
-            if estimated_duration and estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+            if estimated_duration and estimated_duration > effective_max_duration:
                 dest_file.unlink(missing_ok=True)
                 raise HTTPException(
                     status_code=400,
-                    detail=f"« {audio_file.filename} » dure {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min.",
+                    detail=f"« {audio_file.filename} » dure {estimated_duration/60:.0f} min — la durée maximale de ton abonnement est de {effective_max_duration//60} min.",
                 )
 
             estimated_cost = estimate_video_cost_credits(
@@ -206,10 +210,10 @@ async def submit_video_subject(
         word_count = len(script_text.split())
         estimated_duration = max(3.0, word_count / 2.5)
 
-        if estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+        if estimated_duration > effective_max_duration:
             raise HTTPException(
                 status_code=400,
-                detail=f"Ce script produirait une vidéo d'environ {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min. Raccourcissez le texte ou divisez-le en plusieurs vidéos.",
+                detail=f"Ce script produirait une vidéo d'environ {estimated_duration/60:.0f} min — la durée maximale de ton abonnement est de {effective_max_duration//60} min. Raccourcissez le texte ou divisez-le en plusieurs vidéos, ou passe à un palier supérieur.",
             )
 
         estimated_cost = estimate_video_cost_credits(

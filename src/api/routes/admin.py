@@ -167,12 +167,19 @@ class PlanPayload(BaseModel):
     duration_days: int = 30
     is_active: bool = True
     # Credit-pack plans (Izivoice-style) set `credits`; hybrid subscription
-    # tiers leave it null and use the three fields below instead — see
-    # Plan.video_quota_per_cycle's docstring in src/db/models.py.
+    # tiers leave it null and use video_quota_per_cycle/monthly_credit_grant
+    # instead — see Plan.video_quota_per_cycle's docstring in src/db/models.py.
+    # The feature/cap fields below apply to both kinds of plan (a credit pack
+    # can gate features exactly like a subscription tier does).
     credits: Optional[int] = None
     video_quota_per_cycle: Optional[int] = None
-    ai_features_enabled: bool = True
+    ai_transcription_enabled: bool = True
+    ai_images_enabled: bool = True
+    ai_script_enabled: bool = True
+    autopublish_enabled: bool = True
     monthly_credit_grant: Optional[int] = None
+    max_channels: Optional[int] = None
+    max_video_duration_seconds: Optional[int] = None
 
 
 @router.post("/plans")

@@ -161,7 +161,13 @@ def init_db():
             "original_price_fcfa": "ALTER TABLE plans ADD COLUMN original_price_fcfa INTEGER",
             "video_quota_per_cycle": "ALTER TABLE plans ADD COLUMN video_quota_per_cycle INTEGER",
             "ai_features_enabled": "ALTER TABLE plans ADD COLUMN ai_features_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            "ai_transcription_enabled": "ALTER TABLE plans ADD COLUMN ai_transcription_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            "ai_images_enabled": "ALTER TABLE plans ADD COLUMN ai_images_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            "ai_script_enabled": "ALTER TABLE plans ADD COLUMN ai_script_enabled BOOLEAN DEFAULT TRUE NOT NULL",
+            "autopublish_enabled": "ALTER TABLE plans ADD COLUMN autopublish_enabled BOOLEAN DEFAULT TRUE NOT NULL",
             "monthly_credit_grant": "ALTER TABLE plans ADD COLUMN monthly_credit_grant INTEGER",
+            "max_channels": "ALTER TABLE plans ADD COLUMN max_channels INTEGER",
+            "max_video_duration_seconds": "ALTER TABLE plans ADD COLUMN max_video_duration_seconds INTEGER",
         }
         with engine.begin() as conn:
             for col_name, ddl in plan_migrations.items():

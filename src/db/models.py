@@ -431,8 +431,19 @@ class Plan(Base):
     # credit-pack plans (credits is set): those already sell exactly what
     # they say on the tin, no separate quota/gate needed.
     video_quota_per_cycle = Column(Integer, nullable=True)
+    # Superseded by the three granular flags below (transcription/images/
+    # script gate independently now, matching the pricing cards' per-row
+    # checklist) — column kept only so existing rows/migrations don't need a
+    # backfill; nothing reads it any more.
     ai_features_enabled = Column(Boolean, nullable=False, default=True)
+    ai_transcription_enabled = Column(Boolean, nullable=False, default=True)
+    ai_images_enabled = Column(Boolean, nullable=False, default=True)
+    ai_script_enabled = Column(Boolean, nullable=False, default=True)
+    autopublish_enabled = Column(Boolean, nullable=False, default=True)
     monthly_credit_grant = Column(Integer, nullable=True)
+    # Plan caps shown on the pricing cards — null means unlimited on both.
+    max_channels = Column(Integer, nullable=True)
+    max_video_duration_seconds = Column(Integer, nullable=True)
 
     def to_dict(self):
         return {
@@ -443,8 +454,13 @@ class Plan(Base):
             "duration_days": self.duration_days,
             "credits": self.credits,
             "video_quota_per_cycle": self.video_quota_per_cycle,
-            "ai_features_enabled": self.ai_features_enabled,
+            "ai_transcription_enabled": self.ai_transcription_enabled,
+            "ai_images_enabled": self.ai_images_enabled,
+            "ai_script_enabled": self.ai_script_enabled,
+            "autopublish_enabled": self.autopublish_enabled,
             "monthly_credit_grant": self.monthly_credit_grant,
+            "max_channels": self.max_channels,
+            "max_video_duration_seconds": self.max_video_duration_seconds,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
