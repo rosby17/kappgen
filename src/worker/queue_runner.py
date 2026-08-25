@@ -23,9 +23,14 @@ from src.config import STORAGE_PATH, MAX_CONCURRENT_RENDERS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
 
-# Kept at 7 days so the post-render editor's "swap a bad scene image" window
-# never outlives the video itself (edit assets are a subset of what this purges).
-VIDEO_RETENTION_DAYS = 7
+# Tightened from 7 days after the VPS disk filled up (200GB, rendered videos
+# alone were 84GB) and started failing deploys mid-build. Paying creators
+# (anyone who's ever bought a credit pack — user_has_purchased_credits) keep
+# the longer window; a free-tier account's renders are far more likely to be
+# throwaway test content, so they get purged aggressively instead of sitting
+# on disk indefinitely.
+VIDEO_RETENTION_DAYS = 3
+VIDEO_RETENTION_DAYS_FREE_TIER = 1
 # Editable scene assets (images/clips kept for the post-render editor) get
 # their own, separate purge — either at this deadline, or immediately if the
 # user explicitly closes the editor.
@@ -616,29 +621,45 @@ def purge_old_videos_and_uploads():
     """
     Frees disk space on the shared VPS:
     - Deletes rendered video files (output.mp4 + source assets) for videos
-      finished more than VIDEO_RETENTION_DAYS ago. The DB record is kept
+      finished more than VIDEO_RETENTION_DAYS ago (VIDEO_RETENTION_DAYS_FREE_TIER
+      for a creator who's never bought a credit pack). The DB record is kept
       (purged_at is set, output_path cleared) so history/counters remain.
     - Deletes uploaded source audio files older than UPLOAD_RETENTION_HOURS —
       they're only needed once, at render time, and are never reused after.
     """
+    from src.utils.billing import user_has_purchased_credits
+
     db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(days=VIDEO_RETENTION_DAYS)
-        stale_videos = (
+        # The widest cutoff first (paid retention) — a per-video check below
+        # applies the shorter free-tier cutoff, since which one applies
+        # depends on the owning user, not something the query can filter on
+        # directly without a join for every video.
+        widest_cutoff = datetime.utcnow() - timedelta(days=min(VIDEO_RETENTION_DAYS, VIDEO_RETENTION_DAYS_FREE_TIER))
+        candidates = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(Video.purged_at.is_(None))
             .filter(Video.finished_at.isnot(None))
-            .filter(Video.finished_at < cutoff)
+            .filter(Video.finished_at < widest_cutoff)
             .all()
         )
-        for video in stale_videos:
+        stale_videos = []
+        for video in candidates:
+            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+            owner = channel.user if channel else None
+            is_paying = bool(owner and user_has_purchased_credits(db, owner))
+            retention_days = VIDEO_RETENTION_DAYS if is_paying else VIDEO_RETENTION_DAYS_FREE_TIER
+            if video.finished_at < datetime.utcnow() - timedelta(days=retention_days):
+                stale_videos.append((video, retention_days))
+
+        for video, retention_days in stale_videos:
             try:
                 purge_old_render_output(video)
                 video.output_path = None
                 video.source_assets_path = None
                 video.purged_at = datetime.utcnow()
-                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {VIDEO_RETENTION_DAYS}d).")
+                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {retention_days}d).")
             except Exception as purge_err:
                 logger.warning(f"Failed to purge video {video.id}: {purge_err}")
         if stale_videos:
