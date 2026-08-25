@@ -254,13 +254,13 @@ def assemble_final_video(
     has_logo = bool(branding.get("logo_enabled", True) and logo_full_path and logo_full_path.exists())
     if has_logo:
         logo_shape = branding.get("logo_shape") or "rectangle"
-        logo_size = branding.get("logo_size_percent") or 5
+        logo_size = branding.get("logo_size_percent") or 9
         logo_x, logo_y = resolve_overlay_percent({"x_percent": branding.get("logo_x_percent"), "y_percent": branding.get("logo_y_percent"), "corner": branding.get("logo_corner")}, logo_size)
         image_overlays.append({
             "path": apply_overlay_shape_mask(logo_full_path, logo_shape, temp_dir, "logo"),
             "x_percent": logo_x,
             "y_percent": logo_y,
-            "size_percent": branding.get("logo_size_percent") or 5,
+            "size_percent": branding.get("logo_size_percent") or 9,
             "opacity": 1.0,
         })
 
