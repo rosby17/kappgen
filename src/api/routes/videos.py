@@ -264,21 +264,18 @@ def get_video_status(video_id: str, current_user: User = Depends(get_current_use
     return _get_owned_video(db, video_id, current_user).to_dict()
 
 
-@router.get("/{video_id}/cost-recap")
-def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Itemized "what did this video cost" breakdown, shown right after a
-    render finishes. Debits made with a video_id (script generation, the
-    base render fee) are matched directly; older/deep-pipeline debits
-    (transcription, AI images/thumbnail, Izivoice voice/music) don't carry
-    one, so they're matched by falling inside [started_at, finished_at] for
-    this user instead — good enough since a creator rarely has two videos
-    rendering in the exact same window."""
+def _video_cost_transactions(db: Session, video: Video, user_id: str):
+    """Debits made with a video_id (script generation, the base render fee)
+    are matched directly; older/deep-pipeline debits (transcription, AI
+    images/thumbnail, Izivoice voice/music) don't carry one, so they're
+    matched by falling inside [started_at, finished_at] for this user
+    instead — good enough since a creator rarely has two videos rendering in
+    the exact same window. Shared by the creator-facing cost-recap endpoint
+    and the admin video list's per-video cost column."""
     from src.db.models import CreditTransaction
-    video = _get_owned_video(db, video_id, current_user)
-
     window_end = video.finished_at or datetime.utcnow()
     query = db.query(CreditTransaction).filter(
-        CreditTransaction.user_id == current_user.id,
+        CreditTransaction.user_id == user_id,
         CreditTransaction.transaction_type == "debit",
     )
     if video.started_at:
@@ -288,8 +285,14 @@ def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current
         )
     else:
         query = query.filter(CreditTransaction.video_id == video.id)
-    transactions = query.order_by(CreditTransaction.created_at.asc()).all()
+    return query.order_by(CreditTransaction.created_at.asc()).all()
 
+
+@router.get("/{video_id}/cost-recap")
+def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Itemized "what did this video cost" breakdown, shown right after a render finishes."""
+    video = _get_owned_video(db, video_id, current_user)
+    transactions = _video_cost_transactions(db, video, current_user.id)
     items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 

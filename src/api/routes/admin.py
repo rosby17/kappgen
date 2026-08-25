@@ -327,11 +327,16 @@ def admin_list_videos(q: Optional[str] = None, status_filter: Optional[str] = No
     if status_filter:
         query = query.filter(Video.status == status_filter)
     videos = query.order_by(Video.created_at.desc()).limit(300).all()
+    from src.api.routes.videos import _video_cost_transactions
     result = []
     for v in videos:
         data = v.to_dict()
         data["channel_name"] = v.channel.name if v.channel else None
-        data["owner_email"] = v.channel.user.email if v.channel and v.channel.user else None
+        owner = v.channel.user if v.channel else None
+        data["owner_email"] = owner.email if owner else None
+        data["total_credits"] = (
+            -sum(t.amount for t in _video_cost_transactions(db, v, owner.id)) if owner else 0
+        )
         result.append(data)
     return result
 

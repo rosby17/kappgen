@@ -173,18 +173,35 @@ def user_has_active_subscription(db: Session, user: User) -> bool:
 
 
 def user_ai_features_enabled(db: Session, user: User) -> bool:
-    """Hybrid-tier gate: a subscription whose plan has ai_features_enabled=False
-    (the base "manuel uniquement" tier) can't touch AI features at all, even
-    with spare credits sitting in their balance — those two are independent
-    controls on purpose (see the tier discussion this implements). A user
-    with no subscription at all (pure credit-pack model, or between plans)
-    is unaffected — AI usage there is already gated by the credit balance
-    checks at each call site, same as today. An admin-granted subscription
-    with no plan attached (plan_id is nullable) is treated as permissive."""
+    """Whether this user is allowed to touch AI features (image generation,
+    AI music, ...) at all — independent of whether they have spare credits
+    sitting in their balance. Two paths:
+
+    - Subscription (hybrid tier): a subscription whose plan has
+      ai_features_enabled=False (the base "manuel uniquement" tier) blocks
+      AI features outright. An admin-granted subscription with no plan
+      attached (plan_id is nullable) is treated as permissive.
+    - Credit packs (the current model): a user who has ONLY ever bought
+      packs with ai_features_enabled=False (e.g. the entry-level Starter
+      pack — voiceover only, no AI images) is blocked even though their
+      credits would technically cover the cost; a plain credit balance
+      isn't proof they paid for AI access specifically. A user who has
+      never purchased anything at all (welcome credits / free quota only)
+      is unaffected — unrestricted, same as before this distinction existed."""
     sub = get_active_subscription(db, user)
-    if not sub or not sub.plan:
+    if sub:
+        return True if not sub.plan else sub.plan.ai_features_enabled
+
+    purchased_plan_ids = [
+        row[0] for row in
+        db.query(Order.plan_id).join(Plan, Order.plan_id == Plan.id)
+        .filter(Order.user_id == user.id, Order.status == "success", Plan.credits.isnot(None))
+        .distinct().all()
+    ]
+    if not purchased_plan_ids:
         return True
-    return sub.plan.ai_features_enabled
+    purchased_plans = db.query(Plan).filter(Plan.id.in_(purchased_plan_ids)).all()
+    return any(p.ai_features_enabled for p in purchased_plans)
 
 
 def user_video_quota_status(db: Session, user: User) -> tuple[Optional[int], int]:
