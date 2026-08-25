@@ -223,15 +223,20 @@ def assemble_final_video(
 
     # Check if FFmpeg build has libass 'subtitles' filter, and whether the client
     # wants subtitles burned in at all (subtitle_style.enabled, default True).
+    # Kept as its own filter string (not appended into video_filters) so it can
+    # be positioned independently in the compositing order below — e.g. a
+    # creator who wants the watermark or logo painted *under* the subtitles
+    # instead of over them.
     subtitles_enabled = sub_style.get("enabled", True)
     has_subtitles_filter = subtitles_enabled and check_ffmpeg_filter("subtitles")
+    subtitles_filter_str = None
     if has_subtitles_filter:
         ass_path_escaped = str(subtitle_ass_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        video_filters.append(f"subtitles=filename='{ass_path_escaped}'")
+        subtitles_filter_str = f"subtitles=filename='{ass_path_escaped}'"
     elif subtitles_enabled:
         logger.info("FFmpeg missing libass 'subtitles' filter; continuing video assembly without direct ASS filter burn.")
 
-    vf_string = ",".join(video_filters) if video_filters else "null"
+    effects_vf_string = ",".join(video_filters) if video_filters else None
 
     # Every image overlay burned into the render — the channel logo plus any
     # extra creator-added stickers (e.g. a "Subscribe" button or bell icon,
@@ -341,36 +346,69 @@ def assemble_final_video(
 
     filter_parts = [video_chain] if use_xfade else []
     base_label = "v_joined" if use_xfade else "0:v"
-    if vf_string != "null":
-        filter_parts.append(f"[{base_label}]{vf_string}[v_base]")
-        base_label = "v_base"
-
     overlay_base_index = len(clip_paths) if use_xfade else 1
-    for i, ov in enumerate(image_overlays):
-        idx = overlay_base_index + i
-        # Aspect-preserving scale by the configured % of the 1920px-wide
-        # frame, not the old forced 100x100 square crop — arbitrary stickers
-        # (a "Subscribe" button, a bell icon) aren't square like a logo often is.
-        size_px = max(24, round(1920 * (ov["size_percent"] / 100)))
-        label = f"ov{i}"
-        scale_filter = f"[{idx}:v]scale={size_px}:-1"
-        if ov["opacity"] < 1.0:
-            scale_filter += f",format=rgba,colorchannelmixer=aa={ov['opacity']:.2f}"
-        scale_filter += f"[{label}]"
-        filter_parts.append(scale_filter)
-        x_expr, y_expr = _overlay_xy_expr(ov["x_percent"], ov["y_percent"])
-        out_label = f"v_ov{i}"
-        filter_parts.append(f"[{base_label}][{label}]overlay={x_expr}:{y_expr}[{out_label}]")
-        base_label = out_label
+    watermark_index = overlay_base_index + len(image_overlays)
 
-    if has_watermark:
-        watermark_index = overlay_base_index + len(image_overlays)
-        # Roughly 47% of a 1920px frame. Opacity raised from 0.14 to 0.22 so it
-        # actually reads as sitting on top of the subtitles instead of getting
-        # visually lost behind their bold, high-contrast text.
-        filter_parts.append(f"[{watermark_index}:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.22[wm]")
-        filter_parts.append(f"[{base_label}][wm]overlay=(W-w)/2:(H-h)/2[v_wm]")
-        base_label = "v_wm"
+    def _apply_effects_step():
+        nonlocal base_label
+        if effects_vf_string:
+            filter_parts.append(f"[{base_label}]{effects_vf_string}[v_eff]")
+            base_label = "v_eff"
+
+    def _apply_subtitles_step():
+        nonlocal base_label
+        if subtitles_filter_str:
+            filter_parts.append(f"[{base_label}]{subtitles_filter_str}[v_sub]")
+            base_label = "v_sub"
+
+    def _apply_logo_step():
+        nonlocal base_label
+        for i, ov in enumerate(image_overlays):
+            idx = overlay_base_index + i
+            # Aspect-preserving scale by the configured % of the 1920px-wide
+            # frame, not the old forced 100x100 square crop — arbitrary stickers
+            # (a "Subscribe" button, a bell icon) aren't square like a logo often is.
+            size_px = max(24, round(1920 * (ov["size_percent"] / 100)))
+            label = f"ov{i}"
+            scale_filter = f"[{idx}:v]scale={size_px}:-1"
+            if ov["opacity"] < 1.0:
+                scale_filter += f",format=rgba,colorchannelmixer=aa={ov['opacity']:.2f}"
+            scale_filter += f"[{label}]"
+            filter_parts.append(scale_filter)
+            x_expr, y_expr = _overlay_xy_expr(ov["x_percent"], ov["y_percent"])
+            out_label = f"v_ov{i}"
+            filter_parts.append(f"[{base_label}][{label}]overlay={x_expr}:{y_expr}[{out_label}]")
+            base_label = out_label
+
+    def _apply_watermark_step():
+        nonlocal base_label
+        if has_watermark:
+            # Roughly 47% of a 1920px frame. Opacity raised from 0.14 to 0.22 so it
+            # actually reads as sitting on top of the subtitles instead of getting
+            # visually lost behind their bold, high-contrast text.
+            filter_parts.append(f"[{watermark_index}:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.22[wm]")
+            filter_parts.append(f"[{base_label}][wm]overlay=(W-w)/2:(H-h)/2[v_wm]")
+            base_label = "v_wm"
+
+    # Compositing order: creators can drag-reorder "Calques" (effets, sous-titres,
+    # logo/incrustations, filigrane) in the pipeline wizard's preview — that
+    # choice is persisted as effects_config.layer_order (the full 7-id wizard
+    # list; only these 4 actually paint anything here, so it's filtered down to
+    # them, keeping whatever relative order the creator chose). The default
+    # (['effects', 'subtitles', 'logo', 'watermark']) matches this function's
+    # original hardcoded order exactly, so a channel that never touched
+    # reordering renders pixel-identical to before this feature existed.
+    DEFAULT_LAYER_ORDER = ["effects", "subtitles", "logo", "watermark"]
+    STEP_FNS = {
+        "effects": _apply_effects_step,
+        "subtitles": _apply_subtitles_step,
+        "logo": _apply_logo_step,
+        "watermark": _apply_watermark_step,
+    }
+    saved_order = [lid for lid in (effects.get("layer_order") or []) if lid in STEP_FNS]
+    layer_order = saved_order if set(saved_order) == set(DEFAULT_LAYER_ORDER) else DEFAULT_LAYER_ORDER
+    for layer_id in layer_order:
+        STEP_FNS[layer_id]()
 
     if filter_parts:
         cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", f"[{base_label}]", "-map", f"{audio_input_index}:a"])
