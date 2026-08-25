@@ -18,6 +18,7 @@ from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
 from src.pipeline.niche_detector import suggest_niche
+from src.pipeline.script_structure_analyzer import analyze_script_structure_text
 from src.utils.credentials import encrypt_credential, izivoice_key_for_user
 from src.utils.auth import get_current_user
 from src.utils.billing import user_has_purchased_credits
@@ -395,6 +396,32 @@ def suggest_niche_endpoint(payload: NicheSuggestRequest, db: Session = Depends(g
     without requiring a YouTube connection."""
     niche = _suggest_niche_for_channel(db, payload.name, payload.description)
     return {"niche": niche}
+
+
+class ScriptStructurePart(BaseModel):
+    name: str = ""
+    word_count: int = 0
+    guidance: str = ""
+
+
+class ScriptStructureAnalyzeRequest(BaseModel):
+    text: str = ""
+    parts: List[ScriptStructurePart] = []
+
+
+@router.post("/analyze-script-structure")
+def analyze_script_structure_endpoint(payload: ScriptStructureAnalyzeRequest, current_user: User = Depends(get_current_user)):
+    """Lets a creator paste one full block of instructions/script text instead
+    of filling each structure part by hand — the AI splits it across the
+    existing parts (matched by name) and returns their filled-in guidance."""
+    try:
+        parts = analyze_script_structure_text(payload.text, [p.model_dump() for p in payload.parts])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning(f"[analyze-script-structure] failed: {e}")
+        raise HTTPException(status_code=502, detail="L'analyse IA a échoué, réessaie.")
+    return {"parts": parts}
 
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
