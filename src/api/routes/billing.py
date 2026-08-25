@@ -73,14 +73,14 @@ def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_c
     if payload.provider not in ("maketou", "tarapay"):
         raise HTTPException(status_code=400, detail="Fournisseur de paiement inconnu.")
 
-    from src.utils.billing import CREDIT_CYCLE_MARKUPS, price_for_cycle
-    billing_cycle = payload.billing_cycle if payload.billing_cycle in CREDIT_CYCLE_MARKUPS else "monthly"
-    # Credit-pack plans (plan.credits set) support the cycle markup; legacy
-    # subscription-style plans (plan.credits is None) always stay monthly —
-    # there's no per-pot expiry to extend for those.
-    amount_fcfa = price_for_cycle(plan.price_fcfa, billing_cycle) if plan.credits else plan.price_fcfa
-    if not plan.credits:
-        billing_cycle = "monthly"
+    # Credits never expire — there's no "pay more for longer validity" tier
+    # any more, every credit-pack purchase grants a permanent balance at the
+    # plan's plain listed price. billing_cycle stays on the Order only for
+    # historical/reporting reasons (see _activate_subscription below); it no
+    # longer affects price or credit expiry. Legacy subscription-style plans
+    # (plan.credits is None) are unaffected either way.
+    billing_cycle = "lifetime"
+    amount_fcfa = plan.price_fcfa
 
     order = Order(
         user_id=current_user.id,
