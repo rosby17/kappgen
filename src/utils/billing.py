@@ -348,17 +348,19 @@ def estimate_video_cost_credits(
 
 
 def user_has_purchased_credits(db: Session, user: User) -> bool:
-    """Whether this creator has ever paid for at least one credit pack — a
-    lifetime unlock, not a point-in-time balance check. Used to gate the
-    KappGen watermark: once someone has paid once, the watermark stays
-    removable forever, even if their credit balance later drops back to
-    zero — unlike CreditPot balance, a settled Order is a permanent record
-    that never expires or gets spent down, so it's the right thing to check
-    for a one-time unlock instead of "do they currently have credits left"."""
+    """Whether this creator has ever received real credits — through a paid
+    order (transaction_type "purchase", settled in _activate_subscription)
+    or a manual admin top-up ("admin_grant", src/api/routes/admin.py) —
+    as opposed to only ever having the automatic free-trial "welcome_bonus"
+    grant every new signup gets. A lifetime unlock, not a point-in-time
+    balance check: it stays true even if the credits granted have since
+    been fully spent down to zero. Used to gate the KappGen watermark."""
     return (
-        db.query(Order)
-        .join(Plan, Order.plan_id == Plan.id)
-        .filter(Order.user_id == user.id, Order.status == "success", Plan.credits.isnot(None))
+        db.query(CreditTransaction)
+        .filter(
+            CreditTransaction.user_id == user.id,
+            CreditTransaction.transaction_type.in_(("purchase", "admin_grant")),
+        )
         .first() is not None
     )
 

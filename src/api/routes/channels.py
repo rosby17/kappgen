@@ -444,8 +444,13 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
     # check entirely. Free-trial creators (running on free_video_quota, never
     # having paid) always keep the watermark — this is a lifetime unlock tied
     # to having paid at least once, not to a currently-active subscription.
+    # Silently corrected rather than rejecting the whole request: the render
+    # pipeline re-enforces this anyway (see _channel_config_for_render in
+    # queue_runner.py), so failing the entire channel save over one field a
+    # client could have simply omitted would only be worse UX for no real
+    # security benefit.
     if not payload.effects_config.watermark_enabled and not user_has_purchased_credits(db, current_user):
-        raise HTTPException(status_code=403, detail="Achète au moins un pack de crédits pour retirer le filigrane KappGen.")
+        payload.effects_config.watermark_enabled = True
 
     from src.utils.billing import user_max_channels
     max_channels = user_max_channels(db, current_user)
@@ -533,12 +538,17 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
-    # Watermark removal is a lifetime unlock tied to having paid for at
-    # least one credit pack — without this, anyone could just flip the
-    # toggle themselves, free-trial creators included.
+    # Watermark removal is a lifetime unlock tied to having received real
+    # credits at least once (purchase or admin grant) — without this,
+    # anyone could just flip the toggle themselves, free-trial creators
+    # included. Silently corrected rather than rejecting the whole update:
+    # the render pipeline re-enforces this anyway (_channel_config_for_render
+    # in queue_runner.py), so failing the entire channel save over one field
+    # a client could have simply omitted would only be worse UX for no real
+    # security benefit.
     if payload.effects_config is not None and not payload.effects_config.watermark_enabled:
         if not user_has_purchased_credits(db, current_user):
-            raise HTTPException(status_code=403, detail="Achète au moins un pack de crédits pour retirer le filigrane KappGen.")
+            payload.effects_config.watermark_enabled = True
 
     if payload.name is not None:
         channel.name = payload.name
