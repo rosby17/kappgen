@@ -223,8 +223,8 @@ def fetch_or_generate_images(
             # call when we already know it can't be paid for — falling back
             # to a library image instead, same as any other generation failure.
             if user_id:
-                from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_IMAGE_CREDITS
-                if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_IMAGE_CREDITS, "ai_image_generation"):
+                from src.utils.billing import debit_izivoice_usage_by_user_id, random_image_credit_cost
+                if not debit_izivoice_usage_by_user_id(user_id, random_image_credit_cost(), "ai_image_generation"):
                     logger.warning(f"Insufficient KappGen credit balance for AI image generation (user {user_id}); using fallback image instead.")
                     fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
                     return fallback[0] if fallback else None

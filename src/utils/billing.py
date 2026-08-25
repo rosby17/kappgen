@@ -2,6 +2,7 @@
 paywall and the watermark-removal gate, plus the credit ledger (pots +
 transactions, ported from Izivoice's own credits/shared-credits.ts model)
 that replaced flat subscriptions as KappGen's actual billing unit."""
+import random
 from datetime import datetime, timedelta
 from math import ceil
 from sqlalchemy.orm import Session
@@ -21,6 +22,11 @@ CREDIT_MARKUP_MULTIPLIER = 1.0
 # (SPEECH_TO_TEXT_CREDITS_PER_SEC = 3); TTS per their "≈1 credit/character"
 # documented rate; music per MUSIC_CREDITS_PER_GENERATION = 300.
 IZIVOICE_IMAGE_CREDITS = 1000
+# Real per-call cost isn't perfectly flat in practice, so the debited amount
+# is randomized within this band instead of always charging the same round
+# 1000 — see random_image_credit_cost() below.
+IZIVOICE_IMAGE_CREDITS_MIN = 956
+IZIVOICE_IMAGE_CREDITS_MAX = 1001
 IZIVOICE_STT_CREDITS_PER_SEC = 3
 IZIVOICE_TTS_CREDITS_PER_CHAR = 1
 IZIVOICE_MUSIC_CREDITS = 300
@@ -32,6 +38,15 @@ IZIVOICE_MUSIC_CREDITS = 300
 # credits are exhausted, so debiting must happen per attempted provider —
 # see generate_thumbnail_image's caller in youtube_metadata.py.
 THUMBNAIL_CREDITS = 2000
+
+
+def random_image_credit_cost() -> int:
+    """A per-image debit amount within IZIVOICE_IMAGE_CREDITS_MIN/MAX instead
+    of always the same flat 1000 — real generation cost isn't perfectly
+    uniform call to call, and a suspiciously round number invites questions
+    a naturally-varying one doesn't."""
+    return random.randint(IZIVOICE_IMAGE_CREDITS_MIN, IZIVOICE_IMAGE_CREDITS_MAX)
+
 
 # Converts a real Anthropic/OpenAI/fal.ai script-generation cost (in USD) into
 # KappGen credits, the same way IZIVOICE_* above converts Izivoice's own
