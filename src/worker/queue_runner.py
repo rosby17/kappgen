@@ -71,20 +71,22 @@ def _client_facing_error_message(exc: Exception) -> str:
     return text
 
 def _channel_config_for_render(db, channel: Channel) -> dict:
-    """channel.to_dict() with the watermark forced back on if the owner has
-    never actually paid for a credit pack. The stored watermark_enabled flag
-    is checked against this again at render time (not just trusted from what
-    channels.py's create/update routes already enforced) as defense in
-    depth — this is the point where the watermark actually gets burned into
-    (or left out of) the video, so it's the one place that must never be
-    wrong regardless of how the flag ended up set."""
+    """channel.to_dict() with watermark_enabled decided by the owner's actual
+    entitlement, not just trusted from whatever flag ended up stored — this
+    is the point where the watermark actually gets burned into (or left out
+    of) the video, so it's the one place that must never be wrong regardless
+    of how the flag got set:
+    - never paid -> watermark forced back ON, even if the flag says off
+      (defense in depth against the paywall being bypassed client-side)
+    - has paid -> watermark forced OFF, even if the flag still says on —
+      a paying creator who simply never touched the toggle (or bought
+      credits after the channel was already configured) isn't penalized
+      for not remembering to flip a switch."""
     config = channel.to_dict()
     effects = dict(config.get("effects_config") or {})
-    if not effects.get("watermark_enabled", True):
-        from src.utils.billing import user_has_purchased_credits
-        if not user_has_purchased_credits(db, channel.user):
-            effects["watermark_enabled"] = True
-            config["effects_config"] = effects
+    from src.utils.billing import user_has_purchased_credits
+    effects["watermark_enabled"] = not user_has_purchased_credits(db, channel.user)
+    config["effects_config"] = effects
     return config
 
 
