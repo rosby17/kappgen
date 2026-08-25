@@ -77,10 +77,14 @@ class MusicPreference(BaseModel):
     volume: float = 0.10                # Background volume level (0.0 - 1.0)
 
 class ImageStyle(BaseModel):
-    source: str = "library"             # "library" | "ai_generated"
+    source: str = "library"             # "library" | "ai_generated" | "hybrid" | "community"
     style_prompt: str = "cinematic, dramatic lighting, high detail, masterpiece"
     library_path: Optional[str] = None
     library_image_count: int = 0
+    # Opt-in only, set at upload time — this channel's own library becomes
+    # eligible for admin curation into its niche's shared community library
+    # (see CommunityLibraryFolder). Never shared without this being true.
+    share_with_community: bool = False
 
 class EffectsConfig(BaseModel):
     enabled: bool = True                # master on/off for color grade + overlay effects together

@@ -176,6 +176,7 @@ def fetch_or_generate_images(
     image_style: Optional[dict] = None,
     unique_generation_count: Optional[int] = None,
     user_id: Optional[str] = None,
+    niche: Optional[str] = None,
 ) -> List[Path]:
     """
     Fetches images for each scene: either generated via the ai33.pro AI image API
@@ -289,6 +290,33 @@ def fetch_or_generate_images(
                 combined.append(ai_images[index])
         logger.info(f"Hybrid image mode prepared {len(local_images)} library and {len(ai_images)} AI images.")
         return combined[:len(prompts)]
+
+    if source_type == "community":
+        # No library of its own — borrows the union of every other channel's
+        # approved, opted-in library in the same niche (CommunityLibraryFolder),
+        # read live off disk rather than copied. validate_channel_visual_source
+        # (videos.py) already confirmed at least one approved folder exists for
+        # this niche before the render was ever queued.
+        from src.db.session import SessionLocal
+        from src.db.models import CommunityLibraryFolder
+        from src.config import STORAGE_PATH
+        db = SessionLocal()
+        try:
+            folders = (
+                db.query(CommunityLibraryFolder)
+                .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche or ""))
+                .all()
+            )
+            community_dirs = [STORAGE_PATH / "channels" / f.channel_id / "library" for f in folders]
+        finally:
+            db.close()
+        logger.info(f"Using community library for niche '{niche}': {len(community_dirs)} folder(s).")
+        return get_image_pool(
+            output_dir,
+            len(prompts),
+            additional_library_dirs=community_dirs,
+            require_custom_library=True,
+        )
 
     if source_type != "library":
         raise ValueError(f"Mode d’images inconnu: {source_type}")

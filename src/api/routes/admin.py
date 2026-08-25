@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset
+from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder
 from src.utils.auth import get_current_admin
 from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
@@ -395,3 +395,82 @@ def admin_list_orders(admin: User = Depends(get_current_admin), db: Session = De
         data["plan_name"] = o.plan.name if o.plan else None
         result.append(data)
     return result
+
+
+# ── Bibliothèque collaborative ──────────────────────────────────────────
+# Curation of channel image libraries their owners opted to share with the
+# community (see Channel.image_style.share_with_community and
+# CommunityLibraryFolder in models.py). A niche's "master" library is just
+# the union of every folder here with status="approved" for that niche —
+# approving a second folder into a niche IS the merge, no files are copied.
+
+@router.get("/community-library")
+def admin_list_community_library(
+    niche: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CommunityLibraryFolder)
+    if niche:
+        query = query.filter(CommunityLibraryFolder.niche.ilike(f"%{niche}%"))
+    if status_filter:
+        query = query.filter(CommunityLibraryFolder.status == status_filter)
+    folders = query.order_by(CommunityLibraryFolder.niche.asc(), CommunityLibraryFolder.created_at.desc()).limit(500).all()
+    return [f.to_dict() for f in folders]
+
+
+@router.get("/community-library/{folder_id}/images")
+def admin_community_library_images(folder_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Lists up to 24 filenames from this folder's library dir — enough for
+    the admin curation grid without loading a potentially huge folder."""
+    from src.config import STORAGE_PATH
+    from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Dossier introuvable.")
+    library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
+    if not library_dir.is_dir():
+        return {"filenames": []}
+    filenames = sorted(
+        item.name for item in library_dir.iterdir()
+        if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS
+    )[:24]
+    return {"filenames": filenames}
+
+
+@router.get("/community-library/{folder_id}/images/{filename}")
+def admin_community_library_image_file(folder_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    from fastapi.responses import FileResponse
+    from src.config import STORAGE_PATH
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Dossier introuvable.")
+    library_dir = (STORAGE_PATH / "channels" / folder.channel_id / "library").resolve()
+    # Reject any filename that could escape the folder (path traversal) —
+    # same defensive posture as validate_channel_visual_source in videos.py.
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image introuvable.")
+    return FileResponse(candidate)
+
+
+class CommunityLibraryStatusPayload(BaseModel):
+    status: str  # "pending" | "approved" | "flagged"
+
+
+@router.put("/community-library/{folder_id}/status")
+def admin_set_community_library_status(
+    folder_id: str,
+    payload: CommunityLibraryStatusPayload,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    if payload.status not in ("pending", "approved", "flagged"):
+        raise HTTPException(status_code=400, detail="Statut invalide.")
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Dossier introuvable.")
+    folder.status = payload.status
+    db.commit()
+    return folder.to_dict()

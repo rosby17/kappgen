@@ -1,7 +1,7 @@
 import random
 import math
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from src.utils.logger import logger
 from src.config import ASSETS_PATH, STORAGE_PATH
@@ -112,13 +112,16 @@ def get_image_pool(
     required_count: int,
     custom_library_path: str = None,
     require_custom_library: bool = False,
+    additional_library_dirs: Optional[List[Path]] = None,
 ) -> List[Path]:
     """
     Retrieves available images from (in priority order): the client-provided local
     image folder (`custom_library_path`, set per-channel in image_style.library_path),
-    the current render's own image dir, or the shared assets library. If none have
-    images, generates artistic fallback images. Returns a shuffled list of images
-    matching required_count.
+    any `additional_library_dirs` (other channels' own libraries, used for the
+    "community" visual source — see fetch_or_generate_images in images.py; read
+    live off disk, never copied), the current render's own image dir, or the
+    shared assets library. If none have images, generates artistic fallback
+    images. Returns a shuffled list of images matching required_count.
     """
     image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
     existing_images = []
@@ -141,6 +144,10 @@ def get_image_pool(
                 logger.warning(f"Configured library_path '{custom_dir}' contains no supported 16:9 images ({image_extensions}).")
         elif is_safe_path:
             logger.warning(f"Configured library_path '{custom_dir}' does not exist or is not a directory.")
+
+    for extra_dir in (additional_library_dirs or []):
+        if extra_dir.is_dir():
+            existing_images.extend(_filter_landscape([f for f in extra_dir.iterdir() if f.suffix.lower() in image_extensions]))
 
     if require_custom_library and not existing_images:
         raise ValueError(

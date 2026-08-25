@@ -160,6 +160,7 @@ def run_video_pipeline(
         image_style_cfg,
         unique_generation_count=ai_unique_scene_count if image_style_cfg.get("source") == "ai_generated" else None,
         user_id=channel_config.get("user_id"),
+        niche=channel_config.get("niche"),
     )
     
     # 5. Generate Subtitles ASS file

@@ -11,7 +11,7 @@ import time
 import uuid
 import httpx
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL
 from fastapi.responses import RedirectResponse
@@ -55,6 +55,30 @@ def validate_uploaded_image(contents: bytes, ext: str, filename: str = "") -> No
             img.verify()
     except (UnidentifiedImageError, OSError):
         raise HTTPException(status_code=400, detail=f"Le fichier {filename or ''} n'est pas une image valide.".strip())
+
+
+def _sync_community_library_folder(db: Session, channel: Channel, share_with_community: bool, image_count: int) -> None:
+    """Keeps CommunityLibraryFolder in sync with a channel's own opt-in flag
+    and current image count, called after every library upload. Never
+    touches `status` on an existing row — a creator re-uploading/adding more
+    images shouldn't reset an admin's earlier "approved"/"flagged" call,
+    only the raw image_count and eligibility (share or not) change here.
+    Caller is responsible for the db.commit()."""
+    existing = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel.id).first()
+    if not share_with_community or image_count <= 0:
+        if existing:
+            db.delete(existing)
+        return
+    if existing:
+        existing.image_count = image_count
+        existing.niche = channel.niche
+    else:
+        db.add(CommunityLibraryFolder(
+            channel_id=channel.id,
+            user_id=channel.user_id,
+            niche=channel.niche,
+            image_count=image_count,
+        ))
 
 
 def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str]) -> None:
@@ -529,6 +553,23 @@ def get_channel_library_preview(channel_id: str, db: Session = Depends(get_db)):
     response = FileResponse(random.choice(images))
     response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
+
+
+@router.get("/community-library/availability")
+def community_library_availability(niche: str, db: Session = Depends(get_db)):
+    """Whether the "Bibliothèque collaborative" visual source is usable for
+    a given niche — lets the wizard enable/disable that option without a
+    creator having to try it first and hit a render-time error."""
+    folders = (
+        db.query(CommunityLibraryFolder)
+        .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche))
+        .all()
+    )
+    return {
+        "available": len(folders) > 0,
+        "folder_count": len(folders),
+        "image_count": sum(f.image_count for f in folders),
+    }
 
 @router.put("/{channel_id}")
 def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1069,6 +1110,7 @@ async def stage_channel_library_images(
 def attach_staged_channel_library(
     channel_id: str,
     staging_token: str = Form(...),
+    share_with_community: bool = Form(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -1102,7 +1144,9 @@ def attach_staged_channel_library(
     image_style = dict(channel.image_style or {})
     image_style["library_path"] = f"channels/{channel.id}/library"
     image_style["library_image_count"] = saved
+    image_style["share_with_community"] = share_with_community
     channel.image_style = image_style
+    _sync_community_library_folder(db, channel, share_with_community, saved)
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
@@ -1112,6 +1156,7 @@ async def upload_channel_library_images(
     channel_id: str,
     files: List[UploadFile] = File(...),
     append: bool = Form(False),
+    share_with_community: bool = Form(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -1129,7 +1174,9 @@ async def upload_channel_library_images(
     image_style["library_path"] = f"channels/{channel.id}/library"
     image_style["library_image_count"] = saved
     image_style["library_rejected_count"] = rejected
+    image_style["share_with_community"] = share_with_community
     channel.image_style = image_style
+    _sync_community_library_folder(db, channel, share_with_community, saved)
 
     db.commit()
     db.refresh(channel)
