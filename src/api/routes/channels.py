@@ -20,7 +20,7 @@ from src.pipeline import youtube_publisher
 from src.pipeline.niche_detector import suggest_niche
 from src.utils.credentials import encrypt_credential, izivoice_key_for_user
 from src.utils.auth import get_current_user
-from src.utils.billing import user_has_active_subscription
+from src.utils.billing import user_has_purchased_credits
 from src.utils.logger import logger
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -411,11 +411,14 @@ def list_channels(current_user: User = Depends(get_current_user), db: Session = 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_channel(payload: ChannelCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Same paid-feature gate as update_channel below — without this, a
-    # non-subscriber could just create a brand-new channel with the
-    # watermark disabled from the start, skipping the PUT-only check entirely.
-    if not payload.effects_config.watermark_enabled and not user_has_active_subscription(db, current_user):
-        raise HTTPException(status_code=403, detail="Un abonnement actif est requis pour retirer le filigrane KappGen.")
+    # Same paid-feature gate as update_channel below — without this, someone
+    # who never bought a credit pack could just create a brand-new channel
+    # with the watermark disabled from the start, skipping the PUT-only
+    # check entirely. Free-trial creators (running on free_video_quota, never
+    # having paid) always keep the watermark — this is a lifetime unlock tied
+    # to having paid at least once, not to a currently-active subscription.
+    if not payload.effects_config.watermark_enabled and not user_has_purchased_credits(db, current_user):
+        raise HTTPException(status_code=403, detail="Achète au moins un pack de crédits pour retirer le filigrane KappGen.")
 
     channel = Channel(
         user_id=current_user.id,
@@ -493,11 +496,12 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
-    # Watermark removal is a paid feature — without this, any user could
-    # just flip the toggle themselves regardless of subscription status.
+    # Watermark removal is a lifetime unlock tied to having paid for at
+    # least one credit pack — without this, anyone could just flip the
+    # toggle themselves, free-trial creators included.
     if payload.effects_config is not None and not payload.effects_config.watermark_enabled:
-        if not user_has_active_subscription(db, current_user):
-            raise HTTPException(status_code=403, detail="Un abonnement actif est requis pour retirer le filigrane KappGen.")
+        if not user_has_purchased_credits(db, current_user):
+            raise HTTPException(status_code=403, detail="Achète au moins un pack de crédits pour retirer le filigrane KappGen.")
 
     if payload.name is not None:
         channel.name = payload.name

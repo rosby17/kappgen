@@ -71,20 +71,18 @@ def _client_facing_error_message(exc: Exception) -> str:
     return text
 
 def _channel_config_for_render(db, channel: Channel) -> dict:
-    """channel.to_dict() with the watermark forced back on if the owner no
-    longer has an active subscription. The stored watermark_enabled flag
-    alone can't be trusted at render time: it only reflects whether they had
-    an active subscription the moment they toggled it off (enforced in
-    channels.py's create/update routes) — a creator could disable it while
-    subscribed, then simply let the subscription lapse afterwards, and every
-    future render would stay watermark-free forever with nothing else ever
-    re-checking. This is the actual enforcement point: whatever the flag
-    says, the real render always reflects the owner's *current* status."""
+    """channel.to_dict() with the watermark forced back on if the owner has
+    never actually paid for a credit pack. The stored watermark_enabled flag
+    is checked against this again at render time (not just trusted from what
+    channels.py's create/update routes already enforced) as defense in
+    depth — this is the point where the watermark actually gets burned into
+    (or left out of) the video, so it's the one place that must never be
+    wrong regardless of how the flag ended up set."""
     config = channel.to_dict()
     effects = dict(config.get("effects_config") or {})
     if not effects.get("watermark_enabled", True):
-        from src.utils.billing import user_has_active_subscription
-        if not user_has_active_subscription(db, channel.user):
+        from src.utils.billing import user_has_purchased_credits
+        if not user_has_purchased_credits(db, channel.user):
             effects["watermark_enabled"] = True
             config["effects_config"] = effects
     return config

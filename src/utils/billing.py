@@ -5,7 +5,7 @@ that replaced flat subscriptions as KappGen's actual billing unit."""
 from datetime import datetime, timedelta
 from math import ceil
 from sqlalchemy.orm import Session
-from src.db.models import User, Subscription, CreditPot, CreditTransaction
+from src.db.models import User, Subscription, CreditPot, CreditTransaction, Order, Plan
 
 # Izivoice-billed calls (voice, images, transcription, music) are metered at
 # cost (x1) rather than marked up — the operator owns Izivoice too, so that
@@ -99,6 +99,22 @@ def user_has_active_subscription(db: Session, user: User) -> bool:
         Subscription.status == "active",
         Subscription.expires_at > datetime.utcnow(),
     ).first() is not None
+
+
+def user_has_purchased_credits(db: Session, user: User) -> bool:
+    """Whether this creator has ever paid for at least one credit pack — a
+    lifetime unlock, not a point-in-time balance check. Used to gate the
+    KappGen watermark: once someone has paid once, the watermark stays
+    removable forever, even if their credit balance later drops back to
+    zero — unlike CreditPot balance, a settled Order is a permanent record
+    that never expires or gets spent down, so it's the right thing to check
+    for a one-time unlock instead of "do they currently have credits left"."""
+    return (
+        db.query(Order)
+        .join(Plan, Order.plan_id == Plan.id)
+        .filter(Order.user_id == user.id, Order.status == "success", Plan.credits.isnot(None))
+        .first() is not None
+    )
 
 
 def user_can_render(db: Session, user: User) -> tuple[bool, str]:

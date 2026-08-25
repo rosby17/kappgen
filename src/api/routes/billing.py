@@ -37,8 +37,13 @@ def my_subscription(current_user: User = Depends(get_current_user), db: Session 
 
 @router.get("/credits")
 def my_credit_balance(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    from src.utils.billing import get_credit_balance
-    return {"balance": get_credit_balance(db, current_user)}
+    from src.utils.billing import get_credit_balance, user_has_purchased_credits
+    return {
+        "balance": get_credit_balance(db, current_user),
+        # Lifetime unlock for the KappGen watermark: true once this creator
+        # has ever paid for a credit pack, even if their balance is now zero.
+        "has_purchased_credits": user_has_purchased_credits(db, current_user),
+    }
 
 
 class CheckoutPayload(BaseModel):
