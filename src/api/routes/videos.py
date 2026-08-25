@@ -18,7 +18,7 @@ from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
 from src.utils.auth import get_current_user
-from src.utils.billing import user_can_render
+from src.utils.billing import user_can_render, estimate_video_cost_credits
 from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -148,6 +148,19 @@ async def submit_video_subject(
                     detail=f"« {audio_file.filename} » dure {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min.",
                 )
 
+            estimated_cost = estimate_video_cost_credits(
+                estimated_duration_seconds=estimated_duration or 0,
+                transcribe_audio=transcribe_audio,
+                image_style=channel.image_style,
+                music_preference=channel.music_preference,
+            )
+            can_render, reason = user_can_render(db, current_user, estimated_cost)
+            if not can_render:
+                dest_file.unlink(missing_ok=True)
+                if not created_videos:
+                    raise HTTPException(status_code=402, detail=reason)
+                break
+
             video = Video(
                 channel_id=channel.id,
                 script_text=auto_title,
@@ -183,6 +196,15 @@ async def submit_video_subject(
                 status_code=400,
                 detail=f"Ce script produirait une vidéo d'environ {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min. Raccourcissez le texte ou divisez-le en plusieurs vidéos.",
             )
+
+        estimated_cost = estimate_video_cost_credits(
+            script_char_count=len(script_text),
+            image_style=channel.image_style,
+            music_preference=channel.music_preference,
+        )
+        can_render, reason = user_can_render(db, current_user, estimated_cost)
+        if not can_render:
+            raise HTTPException(status_code=402, detail=reason)
 
         video = Video(
             channel_id=channel.id,
@@ -225,6 +247,36 @@ def _get_owned_video(db: Session, video_id: str, current_user: User) -> Video:
 @router.get("/{video_id}")
 def get_video_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _get_owned_video(db, video_id, current_user).to_dict()
+
+
+@router.get("/{video_id}/cost-recap")
+def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Itemized "what did this video cost" breakdown, shown right after a
+    render finishes. Debits made with a video_id (script generation, the
+    base render fee) are matched directly; older/deep-pipeline debits
+    (transcription, AI images/thumbnail, Izivoice voice/music) don't carry
+    one, so they're matched by falling inside [started_at, finished_at] for
+    this user instead — good enough since a creator rarely has two videos
+    rendering in the exact same window."""
+    from src.db.models import CreditTransaction
+    video = _get_owned_video(db, video_id, current_user)
+
+    window_end = video.finished_at or datetime.utcnow()
+    query = db.query(CreditTransaction).filter(
+        CreditTransaction.user_id == current_user.id,
+        CreditTransaction.transaction_type == "debit",
+    )
+    if video.started_at:
+        query = query.filter(
+            (CreditTransaction.video_id == video.id) |
+            ((CreditTransaction.video_id.is_(None)) & (CreditTransaction.created_at >= video.started_at) & (CreditTransaction.created_at <= window_end))
+        )
+    else:
+        query = query.filter(CreditTransaction.video_id == video.id)
+    transactions = query.order_by(CreditTransaction.created_at.asc()).all()
+
+    items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
+    return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
 @router.get("/{video_id}/download")
 def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get_db)):

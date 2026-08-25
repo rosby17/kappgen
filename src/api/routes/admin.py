@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset
 from src.utils.auth import get_current_admin
-from src.utils.billing import user_has_active_subscription
+from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -25,6 +25,7 @@ def list_users(q: Optional[str] = None, admin: User = Depends(get_current_admin)
             db.query(Video).join(Channel, Video.channel_id == Channel.id).filter(Channel.user_id == u.id).count()
         )
         data["has_active_subscription"] = user_has_active_subscription(db, u)
+        data["credit_balance"] = get_credit_balance(db, u)
         result.append(data)
     return result
 
@@ -42,6 +43,7 @@ def get_user_detail(user_id: str, admin: User = Depends(get_current_admin), db: 
     data["orders"] = [
         o.to_dict() for o in db.query(Order).filter(Order.user_id == user_id).order_by(Order.created_at.desc()).all()
     ]
+    data["credit_balance"] = get_credit_balance(db, user)
     return data
 
 
@@ -111,6 +113,46 @@ def revoke_subscription(user_id: str, admin: User = Depends(get_current_admin), 
         s.status = "cancelled"
     db.commit()
     return {"revoked": len(subs)}
+
+
+class CreditAdjustPayload(BaseModel):
+    amount: int
+    note: Optional[str] = None
+
+
+@router.post("/users/{user_id}/credits/grant")
+def grant_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Adds credits to a user's balance — a permanent grant (never expires,
+    same convention as the welcome bonus), not tied to any Order/Plan, for
+    manual top-ups, goodwill compensation, promo grants, etc."""
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Le montant doit être positif.")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    note = f"Crédit admin ({admin.email}){': ' + payload.note if payload.note else ''}"
+    credit_user(db, user, payload.amount, 36500, note, transaction_type="admin_grant")
+    return {"credit_balance": get_credit_balance(db, user)}
+
+
+@router.post("/users/{user_id}/credits/revoke")
+def revoke_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Debits credits from a user's balance. Unlike a normal usage debit,
+    this is allowed to bring the balance to exactly 0 even if `amount`
+    slightly overshoots what's actually left — an admin correcting a
+    mistaken grant shouldn't fail because the user already spent a few
+    credits since."""
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Le montant doit être positif.")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    note = f"Retrait admin ({admin.email}){': ' + payload.note if payload.note else ''}"
+    balance = get_credit_balance(db, user)
+    ok = debit_credits(db, user, min(payload.amount, balance), note)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Échec du retrait de crédits.")
+    return {"credit_balance": get_credit_balance(db, user)}
 
 
 @router.get("/plans")

@@ -7,24 +7,36 @@ from src.utils.logger import logger
 class FFmpegError(Exception):
     pass
 
-def run_ffmpeg(command: List[str], check: bool = True) -> subprocess.CompletedProcess:
+def run_ffmpeg(command: List[str], check: bool = True, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
     """
     Executes an FFmpeg command with proper error handling and logging.
+    `timeout` (seconds) is optional and off by default — most callers here
+    are known-good, controlled pipeline steps (encoding a rendered video,
+    etc.) that can legitimately take minutes. Pass one explicitly for calls
+    that run ffmpeg directly on a raw, untrusted, unpredictable input (e.g.
+    a user-uploaded audio sample of unknown format/length) — without it, a
+    single malformed file hangs the subprocess forever, wedging whichever
+    worker lane called it until the process is restarted.
     """
     cmd_str = " ".join(command)
     logger.info(f"Executing FFmpeg command: {cmd_str}")
-    
-    process = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-    
+
+    try:
+        process = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error(f"FFmpeg timed out after {timeout}s: {cmd_str}")
+        raise FFmpegError(f"FFmpeg command timed out after {timeout}s") from exc
+
     if check and process.returncode != 0:
         logger.error(f"FFmpeg failed with code {process.returncode}:\n{process.stderr}")
         raise FFmpegError(f"FFmpeg command failed: {process.stderr}")
-        
+
     return process
 
 def get_audio_duration(file_path: Path) -> float:

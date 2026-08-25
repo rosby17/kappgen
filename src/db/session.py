@@ -176,3 +176,18 @@ def init_db():
                 if col_name not in existing_order_columns:
                     logger.info(f"Migrating orders table: adding {col_name} column.")
                     conn.execute(text(ddl))
+
+    if "credit_transactions" in inspector.get_table_names():
+        existing_ct_columns = {col["name"] for col in inspector.get_columns("credit_transactions")}
+        # Lets the per-video cost recap tie a debit back to the video that
+        # caused it — only set on debits made with a video already in hand
+        # (the base render fee); older/untagged debits fall back to a
+        # time-window match in the recap endpoint.
+        ct_migrations = {
+            "video_id": "ALTER TABLE credit_transactions ADD COLUMN video_id VARCHAR(36)",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in ct_migrations.items():
+                if col_name not in existing_ct_columns:
+                    logger.info(f"Migrating credit_transactions table: adding {col_name} column.")
+                    conn.execute(text(ddl))

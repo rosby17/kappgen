@@ -15,6 +15,7 @@ from src.utils.logger import logger
 from src.utils.auth import create_session_token, get_current_user, set_session_cookie, clear_session_cookie
 from src.utils.email import SUPPORTED_LOCALES, detect_locale, send_brevo_email, email_shell, EMAIL_ACCENT
 from src.utils.rate_limit import rate_limit
+from src.utils.billing import grant_welcome_credits
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -37,17 +38,12 @@ RESET_CODE_LIFETIME_MINUTES = 10
 RESET_MAX_REQUESTS_PER_HOUR = 5
 RESET_MAX_ATTEMPTS = 5
 RESET_GENERIC_MESSAGE = "Si un compte correspond à cette adresse, un code de vérification vient d'être envoyé."
-# The first 20 accounts ever created get a bigger free trial (10 videos)
-# instead of the standard 3 — confirmed by the user, a one-time early-user
-# bonus, not a recurring promotion.
-EARLY_USER_COUNT = 20
-EARLY_USER_FREE_QUOTA = 10
-STANDARD_FREE_QUOTA = 3
-
-
-def _free_quota_for_new_user(db: Session) -> int:
-    existing_count = db.query(User).count()
-    return EARLY_USER_FREE_QUOTA if existing_count < EARLY_USER_COUNT else STANDARD_FREE_QUOTA
+# New accounts no longer get a flat "N free videos" quota (free_video_quota_granted
+# stays 0) — they get a spendable credit pot instead (grant_welcome_credits,
+# see registration below), so free usage tracks real cost per video rather
+# than counting a cheap short video the same as an hour-long AI-generated
+# one. Existing accounts created before this change keep whatever quota they
+# already had; this only affects new registrations going forward.
 
 
 def _auth_response(user: User, response: Response) -> dict:
@@ -106,7 +102,7 @@ def register_user(payload: UserCreate, request: Request, response: Response, db:
         email=email_clean,
         name=default_name,
         hashed_password=hash_password(payload.password),
-        free_video_quota_granted=_free_quota_for_new_user(db),
+        free_video_quota_granted=0,
         locale=detect_locale(request.headers.get("accept-language")),
         email_verify_token=secrets.token_urlsafe(EMAIL_VERIFY_TOKEN_BYTES),
         email_verify_sent_at=datetime.utcnow(),
@@ -114,6 +110,7 @@ def register_user(payload: UserCreate, request: Request, response: Response, db:
     db.add(user)
     db.commit()
     db.refresh(user)
+    grant_welcome_credits(db, user)
 
     try:
         send_welcome_email(user.email, user.name, user.locale)
@@ -398,13 +395,14 @@ def google_auth(payload: GoogleAuthPayload, response: Response, db: Session = De
             hashed_password=hash_password(os.urandom(32).hex()),
             picture_url=picture_url,
             auth_provider="google",
-            free_video_quota_granted=_free_quota_for_new_user(db),
+            free_video_quota_granted=0,
             # Google already verified this address before issuing the id_token.
             email_verified=True,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
+        grant_welcome_credits(db, user)
     elif picture_url and user.picture_url != picture_url:
         user.picture_url = picture_url
         db.commit()

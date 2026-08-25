@@ -613,6 +613,10 @@ class CreditTransaction(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # Nullable: only set on debits made with a video already in hand (e.g. the
+    # base render fee) — the per-video cost recap falls back to a time-window
+    # match against the video's render window for older/untagged debits.
+    video_id = Column(String(36), nullable=True, index=True)
     amount = Column(Integer, nullable=False)
     transaction_type = Column(String(30), nullable=False)  # "purchase" | "debit" | "admin_grant" | "refund"
     description = Column(Text, nullable=True)
@@ -622,6 +626,7 @@ class CreditTransaction(Base):
         return {
             "id": self.id,
             "user_id": self.user_id,
+            "video_id": self.video_id,
             "amount": self.amount,
             "transaction_type": self.transaction_type,
             "description": self.description,

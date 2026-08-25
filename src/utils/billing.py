@@ -5,6 +5,7 @@ that replaced flat subscriptions as KappGen's actual billing unit."""
 import random
 from datetime import datetime, timedelta
 from math import ceil
+from typing import Optional
 from sqlalchemy.orm import Session
 from src.db.models import User, Subscription, CreditPot, CreditTransaction, Order, Plan
 
@@ -66,6 +67,48 @@ CREDIT_VALUE_FCFA = STARTER_PACK_PRICE_FCFA / STARTER_PACK_CREDITS  # 0.035 FCFA
 # Anthropic/OpenAI/fal.ai spend instead of Izivoice spend.
 SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER = 4.0
 
+# Flat "conventional" fee charged on a render that used NO paid AI feature at
+# all — own script, own voice recording (transcription off), own images, own
+# music. Those creators generate zero Izivoice/Anthropic/fal.ai spend, but
+# still cost real server compute (ffmpeg) and storage, so this covers that
+# instead of letting a fully-BYO video render for free. Only applies when the
+# render triggered no other debit — see maybe_debit_base_render_fee below.
+BASE_RENDER_FEE_FCFA = 100
+
+def _base_render_fee_credits() -> int:
+    return ceil(BASE_RENDER_FEE_FCFA / CREDIT_VALUE_FCFA)
+
+
+def maybe_debit_base_render_fee(db: Session, user: User, video) -> None:
+    """Charges BASE_RENDER_FEE_FCFA for a just-finished render, but only if
+    nothing else was already debited for it — i.e. the creator used no paid
+    AI feature (transcription, AI images/thumbnail, Izivoice voice/music) at
+    all. Since most debits along the pipeline don't have a video_id to tag
+    themselves with (see debit_credits), "nothing else was debited" is
+    approximated by no debit existing for this user between the video's
+    render start and now — good enough in practice since a single creator
+    rarely has two videos rendering in the exact same window. Best-effort:
+    never raises, never blocks/undoes the render itself if the balance is
+    short (same fail-open posture as debit_script_generation_cost)."""
+    if not video.started_at:
+        return
+    already_debited = db.query(CreditTransaction).filter(
+        CreditTransaction.user_id == user.id,
+        CreditTransaction.transaction_type == "debit",
+        CreditTransaction.created_at >= video.started_at,
+    ).first() is not None
+    if already_debited:
+        return
+    charge = _base_render_fee_credits()
+    ok = debit_credits(
+        db, user, charge,
+        f"Frais forfaitaire vidéo ({BASE_RENDER_FEE_FCFA} FCFA — aucune fonctionnalité IA payante utilisée)",
+        video_id=video.id,
+    )
+    if not ok:
+        from src.utils.logger import logger
+        logger.warning(f"Base render fee debit failed for user {user.id}, video {video.id}: needed {charge} credits, balance insufficient.")
+
 
 def usd_to_credits(cost_usd: float) -> int:
     """Converts a real USD provider cost into the equivalent number of
@@ -124,6 +167,66 @@ def user_has_active_subscription(db: Session, user: User) -> bool:
     ).first() is not None
 
 
+# New accounts get a spendable credit pot instead of a flat "N free videos"
+# counter — a short/cheap video and a 1h AI-generated one used to cost the
+# exact same "1 free video" regardless of real spend. Existing users already
+# on the old quota keep it untouched; this only applies going forward.
+WELCOME_CREDIT_AMOUNT = 10_000
+# Never expires — same "effectively forever" convention as the paid
+# "lifetime" pack cycle elsewhere in this file (expires_at is NOT NULL, so
+# "never" still needs a real date). A welcome bonus that quietly evaporated
+# after a month would defeat the point of it being a permanent credit grant.
+WELCOME_CREDIT_VALID_DAYS = 36500
+
+
+def grant_welcome_credits(db: Session, user: User) -> None:
+    credit_user(db, user, WELCOME_CREDIT_AMOUNT, WELCOME_CREDIT_VALID_DAYS, "Crédits de bienvenue à l'inscription", transaction_type="welcome_bonus")
+
+
+def estimate_video_cost_credits(
+    script_char_count: int = 0,
+    estimated_duration_seconds: float = 0.0,
+    transcribe_audio: bool = False,
+    image_style: Optional[dict] = None,
+    music_preference: Optional[dict] = None,
+    scene_count: Optional[int] = None,
+) -> int:
+    """Rough upfront credit cost of one video, from the same per-unit rates
+    debit_izivoice_usage/_by_user_id charge as the pipeline actually runs —
+    used to reject a render before it starts instead of letting it burn
+    partial credit and fail mid-way once the balance runs out. Deliberately
+    conservative (rounds generously) since under-estimating just means a
+    render that was truly affordable gets blocked, which is a much smaller
+    problem than one that starts and can't finish."""
+    image_style = image_style or {}
+    music_preference = music_preference or {}
+    total = 0.0
+
+    # Voiceover (TTS) always runs for a text-input video; for an audio upload
+    # it's skipped (the creator supplied their own recording) but STT may run
+    # instead, priced per second of that recording.
+    if script_char_count:
+        total += script_char_count * IZIVOICE_TTS_CREDITS_PER_CHAR
+    elif transcribe_audio and estimated_duration_seconds:
+        total += estimated_duration_seconds * IZIVOICE_STT_CREDITS_PER_SEC
+
+    source = image_style.get("source", "library")
+    if source in ("ai_generated", "hybrid"):
+        # Mirrors fetch_or_generate_images' own budget: only the opening
+        # window's images are ever actually generated, the rest of a long
+        # video reuses that pool — so cost caps out instead of scaling
+        # linearly with total scene count.
+        generation_count = scene_count if scene_count is not None else max(1, round(estimated_duration_seconds / 6))
+        if source == "hybrid":
+            generation_count = (generation_count + 1) // 2
+        total += min(generation_count, 100) * IZIVOICE_IMAGE_CREDITS_MAX
+
+    if music_preference.get("enabled") and music_preference.get("mode") == "ai_generate":
+        total += IZIVOICE_MUSIC_CREDITS
+
+    return ceil(max(total, 0) * CREDIT_MARKUP_MULTIPLIER)
+
+
 def user_has_purchased_credits(db: Session, user: User) -> bool:
     """Whether this creator has ever paid for at least one credit pack — a
     lifetime unlock, not a point-in-time balance check. Used to gate the
@@ -140,13 +243,21 @@ def user_has_purchased_credits(db: Session, user: User) -> bool:
     )
 
 
-def user_can_render(db: Session, user: User) -> tuple[bool, str]:
+def user_can_render(db: Session, user: User, estimated_cost_credits: int = 0) -> tuple[bool, str]:
+    """estimated_cost_credits (from estimate_video_cost_credits) checks the
+    balance can actually cover THIS video before it starts, instead of just
+    "has any credit at all" — a render that's guaranteed to run out of
+    balance partway through wastes the portion that did complete for
+    nothing, so it's better rejected upfront with a clear reason."""
     if user.free_videos_used < user.free_video_quota_granted:
         return True, ""
     if user_has_active_subscription(db, user):
         return True, ""
-    if get_credit_balance(db, user) > 0:
+    balance = get_credit_balance(db, user)
+    if balance >= max(estimated_cost_credits, 1):
         return True, ""
+    if estimated_cost_credits > 0:
+        return False, f"Solde de crédits insuffisant pour cette vidéo (environ {estimated_cost_credits} crédits nécessaires, {balance} disponibles) — recharge des crédits."
     return False, "Quota gratuit épuisé — recharge des crédits pour générer d'autres vidéos."
 
 
@@ -177,11 +288,13 @@ def credit_user(db: Session, user: User, amount: int, valid_days: int, descripti
     return pot
 
 
-def debit_credits(db: Session, user: User, amount: int, description: str) -> bool:
+def debit_credits(db: Session, user: User, amount: int, description: str, video_id: Optional[str] = None) -> bool:
     """FIFO-deducts `amount` credits from the soonest-expiring pots first (so
     a creator's promo credits get used before they'd expire unused). Returns
     False — deducting nothing — if the balance can't cover the full amount;
-    never partially debits a call that then fails anyway."""
+    never partially debits a call that then fails anyway. `video_id` is
+    optional and only meaningful to the per-video cost recap — most call
+    sites deep in the pipeline don't have a Video object in hand."""
     if amount <= 0:
         return True
     pots = db.query(CreditPot).filter(
@@ -198,7 +311,7 @@ def debit_credits(db: Session, user: User, amount: int, description: str) -> boo
         take = min(pot.amount, remaining)
         pot.amount -= take
         remaining -= take
-    db.add(CreditTransaction(user_id=user.id, amount=-amount, transaction_type="debit", description=description))
+    db.add(CreditTransaction(user_id=user.id, video_id=video_id, amount=-amount, transaction_type="debit", description=description))
     db.commit()
     return True
 
@@ -262,7 +375,7 @@ def estimate_script_generation_cost(total_words: int, num_parts: int) -> dict:
     }
 
 
-def debit_script_generation_cost(db: Session, user: User, cost_usd: float) -> bool:
+def debit_script_generation_cost(db: Session, user: User, cost_usd: float, video_id: Optional[str] = None) -> bool:
     """Meters an "Automatique" script generation's real provider cost against
     the creator's KappGen balance, at SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER
     times the real cost. Called after generation succeeds (the real cost is
@@ -275,6 +388,7 @@ def debit_script_generation_cost(db: Session, user: User, cost_usd: float) -> bo
     ok = debit_credits(
         db, user, charge,
         f"Génération auto de script ({cost_usd:.4f} $ réel x{SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER:.0f})",
+        video_id=video_id,
     )
     if not ok:
         from src.utils.logger import logger

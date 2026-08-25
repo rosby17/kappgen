@@ -224,6 +224,12 @@ def process_single_queued_video() -> bool:
         db.commit()
         logger.info(f"Worker successfully finished rendering video ID: {video.id}")
 
+        try:
+            from src.utils.billing import maybe_debit_base_render_fee
+            maybe_debit_base_render_fee(db, channel.user, video)
+        except Exception as e:
+            logger.warning(f"Base render fee check failed for video {video.id}: {e}")
+
         # Pre-generate the SD download variant now, while the video is fresh —
         # by the time a user actually clicks "Télécharger (SD)" it's usually
         # already sitting on disk instead of making them wait through a
@@ -787,7 +793,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     db.refresh(video)
 
     from src.utils.billing import debit_script_generation_cost
-    debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0)
+    debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
     return video
 
 

@@ -63,7 +63,10 @@ def transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
         dst_path = Path(tmp) / "out.flac"
         src_path.write_bytes(contents)
         try:
-            run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-t", str(CLONE_MAX_SECONDS), "-ar", "24000", "-ac", "1", "-c:a", "flac", str(dst_path)])
+            run_ffmpeg(
+                ["ffmpeg", "-y", "-i", str(src_path), "-t", str(CLONE_MAX_SECONDS), "-ar", "24000", "-ac", "1", "-c:a", "flac", str(dst_path)],
+                timeout=60,
+            )
             return dst_path.read_bytes()
         except (FFmpegError, OSError) as exc:
             logger.warning(f"Voice-clone pre-transcode failed, sending original file as-is: {exc}")
