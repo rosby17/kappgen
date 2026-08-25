@@ -214,6 +214,39 @@ def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, opera
         return True
 
 
+def estimate_script_generation_cost(total_words: int, num_parts: int) -> dict:
+    """Predicts what an "Automatique" script generation of this shape will
+    actually cost, in the same terms debit_script_generation_cost charges
+    afterwards — so the structure editor can show the creator a real number
+    before they commit to a length, instead of them finding out after the
+    fact. Mirrors generate_daily_script's real call shape (script_writer.py):
+    one topic-pick call plus one call per part, each with the shared
+    style/rules/continuity-tail overhead baked into its prompt.
+
+    Token counts are approximate (real usage is only known after the actual
+    Claude call), tuned from that prompt template's typical size — good
+    enough for a "what will this roughly cost" preview, not exact billing."""
+    from src.utils.cost_tracking import estimate_anthropic_cost
+
+    num_parts = max(1, num_parts)
+    TOPIC_INPUT_TOKENS = 400
+    TOPIC_OUTPUT_TOKENS = 60
+    PART_PROMPT_OVERHEAD_TOKENS = 550  # rules, style/CTA lines, continuity tail
+    WORDS_TO_TOKENS = 1.4  # rough English-ish words-to-tokens ratio for narration prose
+
+    input_tokens = TOPIC_INPUT_TOKENS + num_parts * PART_PROMPT_OVERHEAD_TOKENS
+    output_tokens = TOPIC_OUTPUT_TOKENS + int(total_words * WORDS_TO_TOKENS)
+
+    cost_usd = estimate_anthropic_cost(input_tokens, output_tokens)
+    charge_credits = ceil(cost_usd * SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER * FCFA_PER_USD / CREDIT_VALUE_FCFA)
+    charge_fcfa = charge_credits * CREDIT_VALUE_FCFA
+    return {
+        "cost_usd": round(cost_usd, 4),
+        "credits": charge_credits,
+        "fcfa": round(charge_fcfa, 2),
+    }
+
+
 def debit_script_generation_cost(db: Session, user: User, cost_usd: float) -> bool:
     """Meters an "Automatique" script generation's real provider cost against
     the creator's KappGen balance, at SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER

@@ -46,6 +46,17 @@ def my_credit_balance(current_user: User = Depends(get_current_user), db: Sessio
     }
 
 
+@router.get("/estimate-script-cost")
+def estimate_script_cost(total_words: int, num_parts: int = 1, current_user: User = Depends(get_current_user)):
+    """Preview of what an "Automatique" script of this length will cost the
+    creator — shown live in the script-structure editor as they adjust
+    length/parts, so they know the price before generating instead of after."""
+    from src.utils.billing import estimate_script_generation_cost
+    if total_words <= 0:
+        return {"cost_usd": 0, "credits": 0, "fcfa": 0}
+    return estimate_script_generation_cost(total_words, num_parts)
+
+
 class CheckoutPayload(BaseModel):
     plan_id: str
     provider: str  # "maketou" | "tarapay"
