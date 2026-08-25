@@ -70,6 +70,26 @@ def _client_facing_error_message(exc: Exception) -> str:
         return SERVICE_UNAVAILABLE_MESSAGE
     return text
 
+def _channel_config_for_render(db, channel: Channel) -> dict:
+    """channel.to_dict() with the watermark forced back on if the owner no
+    longer has an active subscription. The stored watermark_enabled flag
+    alone can't be trusted at render time: it only reflects whether they had
+    an active subscription the moment they toggled it off (enforced in
+    channels.py's create/update routes) — a creator could disable it while
+    subscribed, then simply let the subscription lapse afterwards, and every
+    future render would stay watermark-free forever with nothing else ever
+    re-checking. This is the actual enforcement point: whatever the flag
+    says, the real render always reflects the owner's *current* status."""
+    config = channel.to_dict()
+    effects = dict(config.get("effects_config") or {})
+    if not effects.get("watermark_enabled", True):
+        from src.utils.billing import user_has_active_subscription
+        if not user_has_active_subscription(db, channel.user):
+            effects["watermark_enabled"] = True
+            config["effects_config"] = effects
+    return config
+
+
 def process_single_queued_video() -> bool:
     """
     Picks the oldest 'queued' video, marks it 'rendering', runs pipeline, and records result.
@@ -116,7 +136,7 @@ def process_single_queued_video() -> bool:
             # rebuild output.mp4 from the kept clips/subtitles/audio only.
             edit = video.pending_edit or {}
             edit_type = edit.get("type", "image")
-            channel_config = channel.to_dict()
+            channel_config = _channel_config_for_render(db, channel)
             channel_config["voice_id"] = video.voice_id
             if edit_type == "subtitle_text":
                 output_mp4 = edit_scene_subtitle_text(
@@ -178,7 +198,7 @@ def process_single_queued_video() -> bool:
             db.commit()
 
         output_mp4 = run_video_pipeline(
-            channel_config=channel.to_dict(),
+            channel_config=_channel_config_for_render(db, channel),
             script_text=video.script_text,
             output_dir=video_dir,
             pre_recorded_audio_path=pre_audio_path,

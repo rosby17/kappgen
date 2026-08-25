@@ -411,6 +411,12 @@ def list_channels(current_user: User = Depends(get_current_user), db: Session = 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_channel(payload: ChannelCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Same paid-feature gate as update_channel below — without this, a
+    # non-subscriber could just create a brand-new channel with the
+    # watermark disabled from the start, skipping the PUT-only check entirely.
+    if not payload.effects_config.watermark_enabled and not user_has_active_subscription(db, current_user):
+        raise HTTPException(status_code=403, detail="Un abonnement actif est requis pour retirer le filigrane KappGen.")
+
     channel = Channel(
         user_id=current_user.id,
         name=payload.name,
