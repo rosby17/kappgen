@@ -135,6 +135,11 @@ def generate_text(
     """Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
     Raises if every configured provider fails (or none are configured).
 
+    The OpenRouter free-tier model is deliberately NOT in this chain — it's
+    unreliable enough (leaks its own chain-of-thought in English into the
+    answer, ignores the requested language) that a clean failure + retry on
+    the next scheduled run beats silently publishing garbage text.
+
     `operation`/`user_id`/`channel_id`/`video_id` are purely for cost
     attribution (see src/utils/cost_tracking.py) — all optional, and a
     missing one just means that dimension shows up blank on the admin
@@ -145,7 +150,6 @@ def generate_text(
         ("anthropic", lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx)),
         ("fal.ai", lambda: _fal_complete(prompt, max_tokens, usage_ctx)),
         ("openai", lambda: _openai_complete(prompt, max_tokens, usage_ctx)),
-        ("openrouter", lambda: _openrouter_complete(prompt, max_tokens, usage_ctx)),
     ]:
         try:
             return fn()

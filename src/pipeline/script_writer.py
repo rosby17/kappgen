@@ -169,6 +169,7 @@ def generate_daily_script(
     recent_titles: List[str],
     style_prompt: Optional[str] = None,
     script_structure: Optional[Dict] = None,
+    default_language: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -176,13 +177,19 @@ def generate_daily_script(
     if the channel hasn't configured one), or None if Claude isn't configured /
     the call fails — callers should treat None as "skip today, try again on the
     next scheduled run" rather than publishing a broken video.
+
+    Language priority: the channel's own script_structure.language always wins.
+    If the channel hasn't configured one, `default_language` (the creator's own
+    locale, passed by the caller) is used instead of silently defaulting to
+    English — a channel run by a French creator should never get an English
+    script just because nobody explicitly typed "French" into its settings.
     """
     if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
         logger.warning("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
         return None
 
     structure = script_structure or DEFAULT_SCRIPT_STRUCTURE
-    language = structure.get("language") or "English"
+    language = structure.get("language") or default_language or "English"
     raw_parts = structure.get("parts") or DEFAULT_SCRIPT_STRUCTURE["parts"]
     parts = _split_oversized_parts(raw_parts)
     formatting_rules = structure.get("formatting_rules") or DEFAULT_SCRIPT_STRUCTURE["formatting_rules"]
