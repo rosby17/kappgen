@@ -516,6 +516,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         publish_schedule_day_offset=payload.publish_schedule_day_offset,
         timezone=payload.timezone or "Africa/Douala",
         transcribe_audio_default=payload.transcribe_audio_default if payload.transcribe_audio_default is not None else True,
+        thumbnail_style=payload.thumbnail_style,
     )
     db.add(channel)
     db.commit()
@@ -658,6 +659,14 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.transcribe_audio_default = payload.transcribe_audio_default
     if payload.is_active is not None:
         channel.is_active = payload.is_active
+    if payload.thumbnail_style is not None:
+        # Merge rather than replace: this path is how a creator hand-types
+        # their own style_prompt (no reference images involved), so it must
+        # not wipe out reference_image_paths a prior upload already set —
+        # only the upload/delete endpoints below own that list.
+        merged = dict(channel.thumbnail_style or {})
+        merged.update(payload.thumbnail_style)
+        channel.thumbnail_style = merged
 
     db.commit()
     db.refresh(channel)

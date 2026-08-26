@@ -127,6 +127,7 @@ class ChannelCreate(BaseModel):
     publish_schedule_day_offset: int = 1
     timezone: str = "Africa/Douala"  # IANA name, auto-detected client-side
     transcribe_audio_default: bool = True  # auto-mode videos only; manual submissions choose per-video
+    thumbnail_style: Optional[dict] = None  # {"style_prompt": str, "reference_image_paths": [str]}
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -158,6 +159,7 @@ class ChannelUpdate(BaseModel):
     timezone: Optional[str] = None
     transcribe_audio_default: Optional[bool] = None
     is_active: Optional[bool] = None
+    thumbnail_style: Optional[dict] = None  # {"style_prompt": str, "reference_image_paths": [str]}
 
 class VideoCreate(BaseModel):
     channel_id: str
