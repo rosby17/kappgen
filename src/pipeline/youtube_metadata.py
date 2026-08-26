@@ -6,21 +6,26 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, STORAGE_PATH
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, STORAGE_PATH, ASSETS_PATH
 from src.pipeline.ai_text import generate_text
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
 
-# A few distinct font + accent-color combos, picked deterministically per
-# video (hashed from its thumbnail text) so the same video always renders
-# the same way on regeneration, but different videos on the same channel
-# don't all look identical — creators were asking for more visual variety
-# than the single fixed white/cyan DejaVu-Bold look.
+# Anton (bundled in assets/fonts) is the condensed, ultra-bold display font
+# real "faceless channel" YouTube thumbnails use (the reference style
+# creators pointed us at) — DejaVu Sans/Serif Bold read as generic document
+# fonts by comparison, not a poster headline. Kept as a list (one entry) so
+# _pick_thumbnail_variant's hash-based selection code doesn't need special
+# casing if a second display font is added later.
 _THUMBNAIL_FONT_FILES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    str(ASSETS_PATH / "fonts" / "Anton-Regular.ttf"),
 ]
-_THUMBNAIL_ACCENT_COLORS = ["#5edcff", "#ffd166", "#ff6b8a", "#7ee787"]
+# Gold/yellow is the one color virtually every high-CTR thumbnail in this
+# style uses for its "punch" line — swapped from the previous multi-hue
+# palette (cyan/pink/green read as generic app-UI accents, not a thumbnail
+# highlight color). Kept as a list of near-gold shades so regenerating still
+# varies slightly between videos without ever picking an off-brand hue.
+_THUMBNAIL_ACCENT_COLORS = ["#ffd400", "#f7c600", "#ffcc33"]
 
 
 def _fallback_metadata(video, channel) -> dict:
@@ -114,7 +119,17 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     thumbnail_style_prompt = (thumbnail_style.get("style_prompt") or "").strip()
     style_prompt = thumbnail_style_prompt or ((channel.image_style or {}).get("style_prompt") or "").strip()
     niche = (channel.niche or "").strip()
-    prompt = f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, cinematic, high detail, dramatic lighting, eye-catching, no text, no watermark, 16:9"
+    # "no text" alone is routinely ignored by image models on scenes with
+    # books/scrolls/signs (a lit candle + open book prompt, for instance,
+    # tends to render actual lettering on the page) — our own headline text
+    # then gets drawn on top of that, producing a visibly duplicated title.
+    # Repeating and escalating the instruction cuts this down noticeably.
+    prompt = (
+        f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, "
+        f"cinematic, high detail, dramatic lighting, eye-catching, 16:9. "
+        f"Absolutely no text, no letters, no words, no titles, no captions, no typography, "
+        f"no writing of any kind anywhere in the image, no watermark — pure photographic/artistic scene only."
+    )
     ai_path = destination.with_suffix(".ai.jpg")
 
     # Feed the creator's own uploaded thumbnail references straight into the
@@ -176,39 +191,91 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    words, lines, current = text.upper().split(), [], ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if len(candidate) > 18 and current:
-            lines.append(current); current = word
-        else:
-            current = candidate
-    if current: lines.append(current)
-    lines = lines[:3]
-
-    # Poster-style layout: a big bold title banked top-left over the AI visual
-    # (like a real thumbnail's headline), instead of a heavy bar across the
-    # bottom third that hides most of the generated image. Only a soft
-    # top-down gradient sits behind the text for legibility — the visual
-    # itself stays the star of the thumbnail.
     font_file, accent_color = _pick_thumbnail_variant(text)
-    font = _font(108 if len(lines) < 3 else 88, font_file)
-    line_height = 122 if len(lines) < 3 else 100
-    text_block_height = line_height * len(lines)
-    gradient_height = min(720, text_block_height + 170)
-    for row in range(gradient_height):
-        alpha = int(220 * (1 - row / gradient_height) ** 1.6)
-        draw.line([(0, row), (1280, row)], fill=(2, 8, 18, alpha))
+    accent_rgb = tuple(int(accent_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
 
-    y = 56
+    # Reference-quality "faceless channel" thumbnails (the style creators
+    # pointed us at) wrap by actual rendered pixel width, not a fixed
+    # character count — Anton is condensed enough that a char-count heuristic
+    # either wrapped far too early or overflowed the frame depending on which
+    # letters were involved. Wrap against MAX_TEXT_WIDTH at the largest font
+    # size that still fits in <=4 lines, shrinking one step at a time.
+    MAX_TEXT_WIDTH = 1180
+    LEFT_MARGIN = 50
+
+    def _wrap(words, font):
+        lines, current = [], ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if font.getlength(candidate) > MAX_TEXT_WIDTH and current:
+                lines.append(current); current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
+
+    words = text.upper().split()
+    for size in (140, 122, 104, 88, 74):
+        font = _font(size, font_file)
+        lines = _wrap(words, font)
+        if len(lines) <= 4:
+            break
+    # thumbnail_text is meant to already be short (2-7 words); this only
+    # bites when it isn't (e.g. an older video that fell back to its full
+    # title before that field existed). Ellipsize instead of silently
+    # cutting the sentence mid-word, which read as a broken/incomplete
+    # headline ("LE JOUR OÙ TU ARRÊTES DE / DEMANDER LA").
+    if len(lines) > 4:
+        lines = lines[:4]
+        lines[-1] = lines[-1].rstrip() + "…"
+
+    line_height = int(size * 1.08)
+    stroke_width = max(4, size // 16)
+
+    # Gold on the last line (the "payoff" word/phrase) plus the single
+    # shortest earlier line, if any — mirrors how these thumbnails usually
+    # spotlight one short punch-word mid-headline (e.g. "JESUS", "GOD") in
+    # addition to the closing line, rather than gold on every line or only
+    # ever the last one.
+    highlight_indices = {len(lines) - 1}
+    if len(lines) > 2:
+        earlier = lines[:-1]
+        shortest_idx = min(range(len(earlier)), key=lambda i: len(earlier[i]))
+        highlight_indices.add(shortest_idx)
+
+    text_block_height = line_height * len(lines)
+    top = max(40, (720 - text_block_height) // 2 - 20)
+
+    # A soft, shallow gradient strictly behind the text block only (not the
+    # whole frame) — thick black stroke on the text itself already carries
+    # most of the legibility, so this just softens whatever's directly
+    # behind it instead of dimming the visual the way a full scrim did.
+    pad = 24
+    gradient_top = max(0, top - pad)
+    gradient_bottom = min(720, top + text_block_height + pad)
+    for row in range(gradient_top, gradient_bottom):
+        rel = (row - gradient_top) / max(1, gradient_bottom - gradient_top)
+        alpha = int(120 * (1 - abs(rel - 0.5) * 1.6))
+        draw.line([(0, row), (1280, row)], fill=(2, 8, 18, max(0, alpha)))
+
+    y = top
     for index, line in enumerate(lines):
-        color = accent_color if index == len(lines) - 1 else "white"
-        draw.text((60, y), line, font=font, fill=color, stroke_width=5, stroke_fill="#020812")
+        color = accent_color if index in highlight_indices else "white"
+        draw.text((LEFT_MARGIN, y), line, font=font, fill=color, stroke_width=stroke_width, stroke_fill="#000000")
         y += line_height
 
-    # Thin brand accent bar along the bottom edge instead of a solid block.
-    accent_rgb = tuple(int(accent_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
-    draw.rectangle((0, 706, 1280, 720), fill=accent_rgb + (235,))
+    # Small diamond-dash divider under the headline, like the reference
+    # style's decorative rule beneath the closing line — purely cosmetic
+    # polish, not brand-critical, so it stays a subtle gold accent rather
+    # than a full-width bar.
+    divider_y = top + text_block_height + 14
+    divider_width = min(360, int(font.getlength(lines[-1])) or 360)
+    draw.line([(LEFT_MARGIN, divider_y), (LEFT_MARGIN + divider_width, divider_y)], fill=accent_rgb + (255,), width=3)
+    for dx in (-14, divider_width + 14):
+        cx = LEFT_MARGIN + dx
+        r = 7
+        draw.polygon([(cx, divider_y - r), (cx + r, divider_y), (cx, divider_y + r), (cx - r, divider_y)], fill=accent_rgb + (255,))
 
     result = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     result.save(destination, "JPEG", quality=90, optimize=True)
