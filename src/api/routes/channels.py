@@ -656,6 +656,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.timezone = payload.timezone
     if payload.transcribe_audio_default is not None:
         channel.transcribe_audio_default = payload.transcribe_audio_default
+    if payload.is_active is not None:
+        channel.is_active = payload.is_active
 
     db.commit()
     db.refresh(channel)
@@ -681,6 +683,8 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if channel.automation_mode != "auto":
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
+    if not channel.is_active:
+        raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
     from src.utils.billing import user_ai_script_enabled
     if not user_ai_script_enabled(db, current_user):
         raise HTTPException(

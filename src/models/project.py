@@ -157,6 +157,7 @@ class ChannelUpdate(BaseModel):
     publish_schedule_day_offset: Optional[int] = None
     timezone: Optional[str] = None
     transcribe_audio_default: Optional[bool] = None
+    is_active: Optional[bool] = None
 
 class VideoCreate(BaseModel):
     channel_id: str

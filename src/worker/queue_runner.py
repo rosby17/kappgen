@@ -899,7 +899,7 @@ def run_daily_automation():
     """
     db = SessionLocal()
     try:
-        channels = db.query(Channel).filter(Channel.automation_mode == "auto").all()
+        channels = db.query(Channel).filter(Channel.automation_mode == "auto", Channel.is_active.is_(True)).all()
         for channel in channels:
             today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
             if channel.last_auto_run_date != today_str:

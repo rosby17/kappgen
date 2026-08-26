@@ -118,6 +118,8 @@ async def submit_video_subject(
         raise HTTPException(status_code=404, detail="Channel not found")
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
+    if not channel.is_active:
+        raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
     validate_channel_visual_source(channel, db)
 
     if input_type == "audio" and transcribe_audio:

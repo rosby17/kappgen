@@ -107,6 +107,12 @@ class Channel(Base):
     description = Column(Text, nullable=True)
     niche = Column(String(255), nullable=False, default="General")
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Pause switch: a creator who wants to stop production without losing the
+    # channel's config/history/videos (unlike deleting it) sets this False.
+    # Blocks manual submissions, on-demand "Nouvelle vidéo", and the daily
+    # automation pass alike — see is_active checks in videos.py/channels.py
+    # and the daily automation loop in queue_runner.py.
+    is_active = Column(Boolean, nullable=False, default=True)
 
     # Whether auto-generated videos (automation_mode "auto", which has no
     # per-video submission form to ask) get real Izivoice speech-to-text for
@@ -248,6 +254,7 @@ class Channel(Base):
             "name": self.name,
             "description": self.description,
             "niche": self.niche,
+            "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "subtitle_style": self.subtitle_style,
             "transcribe_audio_default": self.transcribe_audio_default if self.transcribe_audio_default is not None else True,

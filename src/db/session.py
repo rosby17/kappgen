@@ -107,6 +107,7 @@ def init_db():
     if "channels" in inspector.get_table_names():
         existing_channel_columns = {col["name"] for col in inspector.get_columns("channels")}
         channel_migrations = {
+            "is_active": "ALTER TABLE channels ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL",
             "automation_mode": "ALTER TABLE channels ADD COLUMN automation_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
             "automation_style_prompt": "ALTER TABLE channels ADD COLUMN automation_style_prompt TEXT",
             "last_auto_run_date": "ALTER TABLE channels ADD COLUMN last_auto_run_date VARCHAR(10)",
