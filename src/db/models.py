@@ -623,21 +623,6 @@ class HuggingFaceAccount(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "provider": self.provider,
-            "operation": self.operation,
-            "quantity": self.quantity,
-            "unit": self.unit,
-            "cost_usd": self.cost_usd,
-            "user_id": self.user_id,
-            "channel_id": self.channel_id,
-            "video_id": self.video_id,
-            "meta": self.meta,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
-
 
 class VoiceCloneJob(Base):
     """A voice-cloning request, processed by the worker (not the API process)
