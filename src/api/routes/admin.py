@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder
+from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, HuggingFaceAccount
 from src.utils.auth import get_current_admin
 from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
@@ -474,3 +474,99 @@ def admin_set_community_library_status(
     folder.status = payload.status
     db.commit()
     return folder.to_dict()
+
+
+# --- Hugging Face free-tier image generation accounts ------------------------
+# Admin-managed pool of accounts for the free FLUX.1-schnell path (see
+# src/pipeline/images.py) — lets new accounts keep being added over time
+# without a redeploy, and shows which ones are currently working vs
+# quota-exhausted/invalid.
+
+@router.get("/hf-accounts")
+def list_hf_accounts(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    accounts = db.query(HuggingFaceAccount).order_by(HuggingFaceAccount.created_at.asc()).all()
+    return [a.to_dict() for a in accounts]
+
+
+class HfAccountPayload(BaseModel):
+    token: str
+    label: Optional[str] = None
+
+
+def _test_hf_token(token: str) -> tuple[str, Optional[str]]:
+    """Fires one real (cheap) generation request to classify the token as
+    active/quota_exhausted/invalid. Returns (status, error_message)."""
+    import httpx
+    try:
+        resp = httpx.post(
+            "https://router.huggingface.co/nscale/v1/images/generations",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"prompt": "a simple test image", "model": "black-forest-labs/FLUX.1-schnell"},
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            return "active", None
+        if resp.status_code in (401, 403):
+            return "invalid", resp.text[:300]
+        if resp.status_code in (402, 429):
+            return "quota_exhausted", resp.text[:300]
+        return "invalid", f"HTTP {resp.status_code}: {resp.text[:300]}"
+    except Exception as exc:
+        return "invalid", str(exc)[:300]
+
+
+@router.post("/hf-accounts")
+def add_hf_account(payload: HfAccountPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    token = payload.token.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Le token ne peut pas être vide.")
+    if db.query(HuggingFaceAccount).filter(HuggingFaceAccount.token == token).first():
+        raise HTTPException(status_code=400, detail="Ce token est déjà enregistré.")
+
+    status, error = _test_hf_token(token)
+    account = HuggingFaceAccount(
+        token=token,
+        label=(payload.label or "").strip() or None,
+        status=status,
+        last_checked_at=datetime.utcnow(),
+        last_error=error,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account.to_dict()
+
+
+@router.post("/hf-accounts/{account_id}/check")
+def check_hf_account(account_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Compte introuvable.")
+    status, error = _test_hf_token(account.token)
+    account.status = status
+    account.last_error = error
+    account.last_checked_at = datetime.utcnow()
+    db.commit()
+    db.refresh(account)
+    return account.to_dict()
+
+
+@router.patch("/hf-accounts/{account_id}")
+def toggle_hf_account(account_id: str, is_enabled: bool, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Compte introuvable.")
+    account.is_enabled = is_enabled
+    db.commit()
+    db.refresh(account)
+    return account.to_dict()
+
+
+@router.delete("/hf-accounts/{account_id}")
+def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Compte introuvable.")
+    db.delete(account)
+    db.commit()
+    return {"deleted": True}

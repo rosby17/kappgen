@@ -158,11 +158,53 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
     return output_path
 
 
-# Rotated across calls (module-level, best-effort — not persisted, so a
-# restart just starts back at index 0) so successive images spread across
-# every configured free-tier account instead of hammering the first one
-# until it's exhausted before ever trying the others.
-_hf_key_rotation_index = 0
+def _hf_accounts_from_db() -> List[Any]:
+    """Admin-managed pool (src/api/routes/admin.py's hf-accounts routes) —
+    ordered by last_used_at ascending (nulls first) so load spreads evenly
+    across accounts instead of hammering whichever sorts first. Falls back to
+    the static HUGGINGFACE_API_KEYS env list (wrapped as plain dicts, no id)
+    only if the table is empty, so an existing single-env-var deployment
+    keeps working before anyone's added an account via the admin UI."""
+    from src.db.session import SessionLocal
+    from src.db.models import HuggingFaceAccount
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(HuggingFaceAccount)
+            .filter(HuggingFaceAccount.is_enabled == True)  # noqa: E712
+            .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst())
+            .all()
+        )
+        if rows:
+            return [{"id": r.id, "token": r.token} for r in rows]
+    finally:
+        db.close()
+    return [{"id": None, "token": key} for key in HUGGINGFACE_API_KEYS]
+
+
+def _mark_hf_account(account_id: Optional[str], status: str, error: Optional[str] = None) -> None:
+    """Best-effort status update after a real attempt — never allowed to
+    fail the actual generation it's tracking (same fail-open convention as
+    cost_tracking.log_usage)."""
+    if not account_id:
+        return
+    try:
+        from src.db.session import SessionLocal
+        from src.db.models import HuggingFaceAccount
+        from datetime import datetime
+        db = SessionLocal()
+        try:
+            account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
+            if account:
+                account.status = status
+                account.last_used_at = datetime.utcnow()
+                if status != "active":
+                    account.last_error = error
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: httpx.Client, size: str = "1280x720", operation: str = "image") -> Path:
@@ -173,21 +215,19 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
     only), so callers with reference images must skip this and go straight
     to a provider that supports it (fal.ai gpt-image-2 or Izivoice).
 
-    HUGGINGFACE_API_KEYS may list several accounts' tokens — tries each in
-    turn (starting from a rotating offset) so one account being quota-capped
-    (429) doesn't block the others still having free credit left."""
-    global _hf_key_rotation_index
-    if not HUGGINGFACE_API_KEYS:
-        raise RuntimeError("HUGGINGFACE_API_KEYS is not configured on the server.")
+    Tries every enabled account in the admin-managed pool (least-recently-used
+    first) so one account being quota-capped (429) doesn't block the others
+    still having free credit left."""
+    accounts = _hf_accounts_from_db()
+    if not accounts:
+        raise RuntimeError("No Hugging Face account configured (add one in the admin panel, or set HUGGINGFACE_API_KEYS).")
 
     last_exc = None
-    n = len(HUGGINGFACE_API_KEYS)
-    for offset in range(n):
-        key = HUGGINGFACE_API_KEYS[(_hf_key_rotation_index + offset) % n]
+    for account in accounts:
         try:
             resp = client.post(
                 "https://router.huggingface.co/nscale/v1/images/generations",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
                 json={"prompt": prompt[:4000], "model": "black-forest-labs/FLUX.1-schnell", "size": size},
                 timeout=90.0,
             )
@@ -198,19 +238,23 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
                 raise ValueError(f"Hugging Face (nscale/FLUX.1-schnell) returned no image: {resp.json()}")
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(base64.b64decode(b64))
-            log_usage("huggingface_image", operation, 1, "images", 0.0, meta={"model": "black-forest-labs/FLUX.1-schnell (nscale, free tier)", "hf_account_index": (_hf_key_rotation_index + offset) % n})
-            _hf_key_rotation_index = (_hf_key_rotation_index + offset + 1) % n
+            log_usage("huggingface_image", operation, 1, "images", 0.0, meta={"model": "black-forest-labs/FLUX.1-schnell (nscale, free tier)", "hf_account_id": account["id"]})
+            _mark_hf_account(account["id"], "active")
             return output_path
         except httpx.HTTPStatusError as exc:
             last_exc = exc
             if exc.response is not None and exc.response.status_code in (401, 402, 429):
-                logger.warning(f"Hugging Face account #{(_hf_key_rotation_index + offset) % n} exhausted/rejected ({exc.response.status_code}), trying next account...")
+                logger.warning(f"Hugging Face account {account['id'] or '(env)'} exhausted/rejected ({exc.response.status_code}), trying next account...")
+                status = "invalid" if exc.response.status_code == 401 else "quota_exhausted"
+                _mark_hf_account(account["id"], status, str(exc)[:300])
                 continue
+            _mark_hf_account(account["id"], "invalid", str(exc)[:300])
             raise
         except Exception as exc:
             last_exc = exc
+            _mark_hf_account(account["id"], "invalid", str(exc)[:300])
             continue
-    raise RuntimeError(f"All {n} Hugging Face account(s) failed. Last error: {last_exc}")
+    raise RuntimeError(f"All {len(accounts)} Hugging Face account(s) failed. Last error: {last_exc}")
 
 
 def generate_thumbnail_image(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:

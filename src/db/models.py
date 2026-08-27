@@ -587,6 +587,42 @@ class ApiUsageLog(Base):
     meta = Column(JSON, nullable=True)  # free-form extra detail (model name, provider fallback used, etc.)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+
+class HuggingFaceAccount(Base):
+    """One free-tier Hugging Face account's API token, for the free
+    FLUX.1-schnell image generation path (src/pipeline/images.py) tried
+    before any paid provider. Admin-managed (add/remove/see live status) so
+    new accounts' small monthly free quota can keep being added over time
+    without a redeploy — see src/api/routes/admin.py's hf-accounts routes."""
+    __tablename__ = "huggingface_accounts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    token = Column(String(255), nullable=False, unique=True)
+    label = Column(String(255), nullable=True)
+    # "active" (last use succeeded or never tried), "quota_exhausted" (401/402/429
+    # from the provider), "invalid" (any other hard failure) — purely informational,
+    # rotation still tries every row regardless of status (a quota can refill
+    # monthly), this just drives the admin dashboard's live status column.
+    status = Column(String(20), nullable=False, default="active")
+    last_used_at = Column(DateTime, nullable=True)
+    last_checked_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "token_preview": f"{self.token[:8]}...{self.token[-4:]}" if len(self.token) > 12 else self.token,
+            "label": self.label,
+            "status": self.status,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_checked_at": self.last_checked_at.isoformat() if self.last_checked_at else None,
+            "last_error": self.last_error,
+            "is_enabled": self.is_enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
     def to_dict(self):
         return {
             "id": self.id,
