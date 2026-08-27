@@ -6,7 +6,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_image_cost
 from src.pipeline.image_pool import get_image_pool
@@ -158,11 +158,73 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
     return output_path
 
 
+# Rotated across calls (module-level, best-effort — not persisted, so a
+# restart just starts back at index 0) so successive images spread across
+# every configured free-tier account instead of hammering the first one
+# until it's exhausted before ever trying the others.
+_hf_key_rotation_index = 0
+
+
+def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: httpx.Client, size: str = "1280x720", operation: str = "image") -> Path:
+    """Free-tier image generation: FLUX.1-schnell (open-source, Apache 2.0)
+    routed through Hugging Face's Inference Providers to nscale — costs
+    nothing up to each account's small monthly free credit, so this is tried
+    before any paid provider. No image-conditioning support (text-to-image
+    only), so callers with reference images must skip this and go straight
+    to a provider that supports it (fal.ai gpt-image-2 or Izivoice).
+
+    HUGGINGFACE_API_KEYS may list several accounts' tokens — tries each in
+    turn (starting from a rotating offset) so one account being quota-capped
+    (429) doesn't block the others still having free credit left."""
+    global _hf_key_rotation_index
+    if not HUGGINGFACE_API_KEYS:
+        raise RuntimeError("HUGGINGFACE_API_KEYS is not configured on the server.")
+
+    last_exc = None
+    n = len(HUGGINGFACE_API_KEYS)
+    for offset in range(n):
+        key = HUGGINGFACE_API_KEYS[(_hf_key_rotation_index + offset) % n]
+        try:
+            resp = client.post(
+                "https://router.huggingface.co/nscale/v1/images/generations",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"prompt": prompt[:4000], "model": "black-forest-labs/FLUX.1-schnell", "size": size},
+                timeout=90.0,
+            )
+            resp.raise_for_status()
+            data = (resp.json() or {}).get("data") or []
+            b64 = data[0].get("b64_json") if data else None
+            if not b64:
+                raise ValueError(f"Hugging Face (nscale/FLUX.1-schnell) returned no image: {resp.json()}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(base64.b64decode(b64))
+            log_usage("huggingface_image", operation, 1, "images", 0.0, meta={"model": "black-forest-labs/FLUX.1-schnell (nscale, free tier)", "hf_account_index": (_hf_key_rotation_index + offset) % n})
+            _hf_key_rotation_index = (_hf_key_rotation_index + offset + 1) % n
+            return output_path
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response is not None and exc.response.status_code in (401, 402, 429):
+                logger.warning(f"Hugging Face account #{(_hf_key_rotation_index + offset) % n} exhausted/rejected ({exc.response.status_code}), trying next account...")
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(f"All {n} Hugging Face account(s) failed. Last error: {last_exc}")
+
+
 def generate_thumbnail_image(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:
-    """Thumbnail-specific image generation: tries fal.ai's gpt-image-2 first
-    (best visual fidelity to reference images), falling back to Izivoice
-    (generate_ai_image) if fal.ai fails or its credits are exhausted — e.g. a
-    402/429 from fal, a missing FAL_API_KEY, or any other error."""
+    """Thumbnail-specific image generation. Order: Hugging Face FLUX.1-schnell
+    (free — but only when there's no reference image to condition on, since
+    this endpoint is text-to-image only) -> fal.ai's gpt-image-2 (best visual
+    fidelity to reference images, first paid option) -> Izivoice
+    (generate_ai_image), falling through on any error — a missing/invalid
+    key, an exhausted free quota, a 402/429, or anything else."""
+    if not reference_image_paths:
+        try:
+            return _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail")
+        except Exception as exc:
+            logger.warning(f"Hugging Face (FLUX.1-schnell) thumbnail generation failed, falling back to fal.ai: {exc}")
     try:
         return _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths)
     except Exception as exc:
@@ -218,6 +280,13 @@ def fetch_or_generate_images(
         def fetch_one(i: int, p: str, client: httpx.Client) -> Optional[Path]:
             img_file = output_dir / f"{prefix}_{i+1}.png"
             full_prompt = f"{p}, {style_prompt}" if style_prompt else p
+            # Free tier tried first, before any credit is touched — costs
+            # nothing up to Hugging Face's small monthly free allowance, so a
+            # video's whole visual pool can render for free as long as it lasts.
+            try:
+                return _generate_with_huggingface_flux(full_prompt, img_file, client, operation="scene_image")
+            except Exception as e:
+                logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, falling back to Izivoice: {e}")
             # Debited BEFORE generating, not after: debit_izivoice_usage_by_user_id
             # returns False on insufficient balance, and the whole point of
             # checking is to never place the real (money-costing) Izivoice

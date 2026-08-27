@@ -85,6 +85,19 @@ VISION_PROVIDER = os.getenv("VISION_PROVIDER", "anthropic")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 FAL_API_KEY = os.getenv("FAL_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Hugging Face Inference Providers (routed to nscale's FLUX.1-schnell) — free
+# tier, tried FIRST for image generation before any paid provider (fal.ai,
+# Izivoice) since it costs nothing up to each account's small monthly free
+# credit. No image-conditioning support, so callers with reference images
+# skip straight to the paid providers that do support it.
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
+# Optional: several free-tier accounts' tokens, comma-separated — rotated
+# through on quota-exhaustion (429) before falling back to a paid provider,
+# so the combined free allowance is the sum of every account's own quota
+# instead of just one. Falls back to the single HUGGINGFACE_API_KEY above if unset.
+HUGGINGFACE_API_KEYS = [
+    k.strip() for k in os.getenv("HUGGINGFACE_API_KEYS", "").split(",") if k.strip()
+] or ([HUGGINGFACE_API_KEY] if HUGGINGFACE_API_KEY else [])
 # Extra text-generation-only fallback (see src/pipeline/ai_text.py) — not
 # used by vision.py, which stays on the three providers above.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
