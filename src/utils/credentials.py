@@ -29,5 +29,14 @@ def decrypt_credential(value: Optional[str]) -> Optional[str]:
 
 
 def izivoice_key_for_user(user) -> str:
-    """Customer BYOK first, NicheCut's shared key as the seamless fallback."""
-    return decrypt_credential(getattr(user, "izivoice_api_key_encrypted", None)) or IZIVOICE_API_KEY
+    """Customer BYOK first, NicheCut's shared key as the seamless fallback.
+
+    The stored credential can become undecryptable if the encryption seed
+    changes under it (e.g. CREDENTIAL_ENCRYPTION_KEY isn't set, so IZIVOICE_API_KEY
+    doubles as the seed, and that key later gets rotated) — every voice
+    endpoint for that user would otherwise 500 forever. Fall back to the
+    shared key instead of raising, same as if BYOK were never set."""
+    try:
+        return decrypt_credential(getattr(user, "izivoice_api_key_encrypted", None)) or IZIVOICE_API_KEY
+    except RuntimeError:
+        return IZIVOICE_API_KEY
