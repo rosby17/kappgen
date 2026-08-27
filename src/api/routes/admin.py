@@ -552,11 +552,14 @@ def check_hf_account(account_id: str, admin: User = Depends(get_current_admin), 
 
 
 @router.patch("/hf-accounts/{account_id}")
-def toggle_hf_account(account_id: str, is_enabled: bool, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+def update_hf_account(account_id: str, is_enabled: Optional[bool] = None, label: Optional[str] = None, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
-    account.is_enabled = is_enabled
+    if is_enabled is not None:
+        account.is_enabled = is_enabled
+    if label is not None:
+        account.label = label.strip() or None
     db.commit()
     db.refresh(account)
     return account.to_dict()
