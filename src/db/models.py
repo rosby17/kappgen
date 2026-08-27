@@ -351,6 +351,10 @@ class Video(Base):
     duration_seconds = Column(Float, nullable=True)
     estimated_duration_seconds = Column(Float, nullable=True)
     purged_at = Column(DateTime, nullable=True)
+    # Set once the "ta vidéo va être supprimée" email has gone out for this
+    # video — prevents re-sending it on every purge-loop tick between the
+    # warning and the actual deletion (see warn_expiring_videos, queue_runner.py).
+    expiry_warning_sent_at = Column(DateTime, nullable=True)
     restart_count = Column(Integer, nullable=False, default=0)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
@@ -415,6 +419,7 @@ class Video(Base):
             "progress_stage": self.progress_stage,
             "progress_percent": self.progress_percent or 0,
             "purged_at": self.purged_at.isoformat() if self.purged_at else None,
+            "expiry_warning_sent_at": self.expiry_warning_sent_at.isoformat() if self.expiry_warning_sent_at else None,
             "editable": bool(self.status == VideoStatus.DONE.value and self.output_path and not self.edit_assets_purged_at),
             "transcribe_audio": self.transcribe_audio,
             "voice_id": self.voice_id,

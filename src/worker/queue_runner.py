@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.db.session import SessionLocal, init_db
-from src.db.models import Video, Channel, VoiceCloneJob
+from src.db.models import Video, Channel, User, VoiceCloneJob
+from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
+from src.config import FRONTEND_BASE_URL
 from src.models.project import VideoStatus
 from src.pipeline.orchestrator import (
     run_video_pipeline,
@@ -32,6 +34,10 @@ from src.utils.ffmpeg_runner import get_audio_duration
 # disk (see _finalize_output_storage below), so "keep it longer" doesn't
 # just mean "sit on the same small VPS disk longer."
 VIDEO_RETENTION_HOURS = 48
+# How long before the 48h purge a creator gets emailed a heads-up — enough
+# time to notice and download, not so early the warning arrives while the
+# video is barely finished rendering.
+VIDEO_EXPIRY_WARNING_HOURS_BEFORE = 6
 # Editable scene assets (images/clips kept for the post-render editor) get
 # their own, separate purge — either at this deadline, or immediately if the
 # user explicitly closes the editor.
@@ -663,6 +669,109 @@ def purge_stale_edit_assets():
         db.close()
 
 
+def send_video_expiry_warning_email(email: str, video_title: str, hours_left: int, locale: str = "fr") -> None:
+    video_url = f"{FRONTEND_BASE_URL}/videos"
+    copy = {
+        "fr": {
+            "eyebrow": "Dernière chance",
+            "title": "Ta vidéo va être supprimée bientôt",
+            "intro": f"« {video_title} » sera automatiquement supprimée dans environ {hours_left}h pour libérer de l'espace serveur. Télécharge-la maintenant si tu veux la garder.",
+            "cta": "Télécharger ma vidéo",
+            "footer": "Les vidéos KappGen ne sont conservées que 48h après leur génération. Besoin de les garder plus longtemps ? Contacte le support.",
+            "subject": f"⏳ Ta vidéo sera supprimée dans {hours_left}h",
+            "preheader": f"« {video_title} » sera supprimée dans environ {hours_left}h — télécharge-la avant qu'il ne soit trop tard.",
+            "text": f"« {video_title} » sera automatiquement supprimée dans environ {hours_left}h. Télécharge-la ici avant qu'il ne soit trop tard : {video_url}",
+        },
+        "en": {
+            "eyebrow": "Last chance",
+            "title": "Your video is about to be deleted",
+            "intro": f'"{video_title}" will be automatically deleted in about {hours_left}h to free up server space. Download it now if you want to keep it.',
+            "cta": "Download my video",
+            "footer": "KappGen videos are only kept for 48h after generation. Need to keep them longer? Contact support.",
+            "subject": f"⏳ Your video will be deleted in {hours_left}h",
+            "preheader": f'"{video_title}" will be deleted in about {hours_left}h — download it before it\'s too late.',
+            "text": f'"{video_title}" will be automatically deleted in about {hours_left}h. Download it here before it\'s too late: {video_url}',
+        },
+    }[locale if locale in SUPPORTED_LOCALES else "fr"]
+
+    body = f"""
+      <p style="color:{EMAIL_ACCENT};font-size:12px;font-weight:700;letter-spacing:1.4px;margin:0 0 16px;text-transform:uppercase">{copy['eyebrow']}</p>
+      <h1 style="color:#eaf6ff;font-size:24px;font-weight:700;margin:0 0 12px;line-height:1.3">{copy['title']}</h1>
+      <p style="color:#9badc0;font-size:15px;line-height:1.7;margin:0 0 28px">{copy['intro']}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center">
+            <table role="presentation" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:{EMAIL_ACCENT};border-radius:10px">
+                  <a href="{video_url}" style="display:inline-block;padding:12px 24px;color:#07101a;font-size:15px;font-weight:700;text-decoration:none">{copy['cta']}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+      <p style="color:#5b6779;font-size:13px;line-height:1.6;margin:24px 0 0">{copy['footer']}</p>
+    """
+    send_brevo_email(
+        email,
+        copy["subject"],
+        email_shell(copy["preheader"], body),
+        copy["text"],
+    )
+
+
+def warn_expiring_videos():
+    """Emails a creator ~VIDEO_EXPIRY_WARNING_HOURS_BEFORE hours before their
+    finished video gets swept up by purge_old_videos_and_uploads() — without
+    this, a video just disappeared with zero notice, which is fine for a free
+    render cache but not for something a creator might not have downloaded
+    yet. Runs on the same hourly tick as the purge, right before it, so the
+    warning is always sent with time to spare before deletion actually
+    happens. expiry_warning_sent_at guards against re-sending it every hour
+    in that window.
+    """
+    db = SessionLocal()
+    try:
+        warn_cutoff = datetime.utcnow() - timedelta(hours=VIDEO_RETENTION_HOURS - VIDEO_EXPIRY_WARNING_HOURS_BEFORE)
+        purge_cutoff = datetime.utcnow() - timedelta(hours=VIDEO_RETENTION_HOURS)
+        expiring_videos = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.purged_at.is_(None))
+            .filter(Video.extended_retention.is_(False))
+            .filter(Video.output_path.isnot(None))
+            .filter(Video.expiry_warning_sent_at.is_(None))
+            .filter(Video.finished_at.isnot(None))
+            .filter(Video.finished_at <= warn_cutoff)
+            .filter(Video.finished_at > purge_cutoff)
+            .all()
+        )
+        for video in expiring_videos:
+            try:
+                channel = video.channel or db.query(Channel).filter(Channel.id == video.channel_id).first()
+                user = db.query(User).filter(User.id == channel.user_id).first() if channel and channel.user_id else None
+                if not user or not user.email:
+                    # Pas de propriétaire identifiable : on marque quand même
+                    # comme "traité" pour ne pas re-tenter indéfiniment chaque heure.
+                    video.expiry_warning_sent_at = datetime.utcnow()
+                    continue
+
+                hours_left = max(1, round(VIDEO_RETENTION_HOURS - (datetime.utcnow() - video.finished_at).total_seconds() / 3600))
+                title = video.title or (video.script_text or "").strip()[:60] or "Ta vidéo"
+                send_video_expiry_warning_email(user.email, title, hours_left, user.locale or "fr")
+                video.expiry_warning_sent_at = datetime.utcnow()
+                logger.info(f"Sent expiry warning for video {video.id} to {user.email} ({hours_left}h left).")
+            except Exception as warn_err:
+                logger.warning(f"Failed to send expiry warning for video {video.id}: {warn_err}")
+        if expiring_videos:
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Expiry warning pass failed: {e}")
+    finally:
+        db.close()
+
+
 def purge_old_videos_and_uploads():
     """
     Frees disk space on the shared VPS:
@@ -1075,6 +1184,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     while not _shutdown_requested:
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
+            warn_expiring_videos()
             purge_old_videos_and_uploads()
             purge_stale_edit_assets()
             last_purge = now
