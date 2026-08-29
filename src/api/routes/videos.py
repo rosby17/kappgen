@@ -125,6 +125,15 @@ async def submit_video_subject(
             status_code=409,
             detail="Les chaînes de vidéo musicale n'ont pas de formulaire par vidéo — utilise \"Générer une vidéo\" à la place.",
         )
+    # Nothing downstream ever rejected a near-empty script for a text-input
+    # video — it would render "successfully" on almost nothing (a couple
+    # seconds of near-silent audio), with the post-render AI metadata step
+    # then improvising a title describing the missing content, since that's
+    # all it had to go on (this is exactly what produced several
+    # "Script manquant..." videos in production). 40 chars is generous
+    # enough for no real narration to ever be rejected by mistake.
+    if input_type == "text" and len((script_text or "").strip()) < 40:
+        raise HTTPException(status_code=400, detail="Le script est trop court (ou vide) pour générer une vidéo.")
     validate_channel_visual_source(channel, db)
 
     if input_type == "audio" and transcribe_audio:

@@ -279,7 +279,15 @@ def generate_daily_script(
             tail = part_text[-600:]
 
         script_text = " ".join(written_parts).strip()
-        if not script_text:
+        # A part_text that's technically non-empty (passes the guard above)
+        # but collapses to almost nothing after stripping — a stray newline,
+        # a couple of words — would otherwise sail through as a "successful"
+        # script and render into a few seconds of near-silent video with a
+        # metadata step improvising a title off of it afterward. Treated the
+        # same as a fully empty result: a real narration part is always at
+        # least a full sentence or two, comfortably over this floor.
+        if len(script_text) < 100:
+            logger.warning(f"Daily script generation: final script only {len(script_text)} char(s) long, treating as a failure.")
             return None
         return {"title": title, "script_text": script_text, "generation_cost_usd": sum(cost_sink)}
     except Exception as e:
