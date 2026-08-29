@@ -127,8 +127,23 @@ def _pick_topic(
     # they want to emulate — treated as "study this pattern", not "avoid it".
     examples_block = ""
     if topic_examples and topic_examples.strip():
-        examples_lines = "\n".join(f"- {line.strip()}" for line in topic_examples.splitlines() if line.strip())
-        examples_block = f"""
+        # Creators sometimes paste a whole YouTube search-results page here
+        # instead of a clean list of titles — timestamps, view counts, "il y a
+        # X mois", bullet glyphs. Left unfiltered, that noise (seen in
+        # production as a 40KB+ paste) overwhelms the prompt and reliably
+        # broke topic selection outright. A real title is close to a full
+        # sentence; junk lines are short fragments or match an obvious
+        # metadata pattern — filtered instead of trusted verbatim.
+        _junk_line_pattern = re.compile(
+            r"^\d{1,2}:\d{2}$|vues?$|^il y a\b|^•$|^\d[\d\s.,]*$", re.IGNORECASE
+        )
+        candidate_lines = [
+            line.strip() for line in topic_examples[:8000].splitlines()
+            if line.strip() and len(line.strip()) >= 15 and not _junk_line_pattern.search(line.strip())
+        ][:20]
+        if candidate_lines:
+            examples_lines = "\n".join(f"- {line}" for line in candidate_lines)
+            examples_block = f"""
 Here are example titles/topics that show exactly the kind of angle, specificity, and hook style this channel's audience responds to (these are either the creator's own best videos, or titles from a channel they want to emulate — study the pattern, don't just reuse the surface theme):
 {examples_lines}
 """
