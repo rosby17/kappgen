@@ -120,6 +120,11 @@ async def submit_video_subject(
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if not channel.is_active:
         raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
+    if channel.content_type == "music":
+        raise HTTPException(
+            status_code=409,
+            detail="Les chaînes de vidéo musicale n'ont pas de formulaire par vidéo — utilise \"Générer une vidéo\" à la place.",
+        )
     validate_channel_visual_source(channel, db)
 
     if input_type == "audio" and transcribe_audio:

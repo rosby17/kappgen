@@ -209,6 +209,13 @@ def process_single_queued_video() -> bool:
                 video.progress_percent = percent
                 db.commit()
 
+            # Same absolute rule as _channel_config_for_render for narration
+            # videos: this pipeline has no effects_config/watermark_enabled
+            # concept of its own, so entitlement is checked directly here
+            # rather than trusting any stored flag.
+            from src.utils.billing import user_has_purchased_credits
+            watermark_enabled = not user_has_purchased_credits(db, channel.user)
+
             music_config = channel.music_channel_config or {}
             output_mp4, tracks_generated = render_music_video(
                 style_prompt=music_config.get("style_prompt") or "",
@@ -218,6 +225,7 @@ def process_single_queued_video() -> bool:
                 niche=channel.niche,
                 output_dir=video_dir,
                 progress_callback=update_progress,
+                watermark_enabled=watermark_enabled,
             )
 
             try:
@@ -1163,7 +1171,17 @@ def run_daily_automation():
     """
     db = SessionLocal()
     try:
-        channels = db.query(Channel).filter(Channel.automation_mode == "auto", Channel.is_active.is_(True)).all()
+        # content_type == "music" excluded: this loop only knows how to write
+        # a narration script (generate_and_queue_auto_video calls Claude with
+        # the channel's niche/script_structure, neither of which mean anything
+        # for a music channel) — daily automation for music channels is its
+        # own not-yet-built feature (Phase 5), not this loop silently
+        # mis-running them through the narration pipeline in the meantime.
+        channels = db.query(Channel).filter(
+            Channel.automation_mode == "auto",
+            Channel.is_active.is_(True),
+            Channel.content_type != "music",
+        ).all()
         for channel in channels:
             today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
             if channel.last_auto_run_date != today_str:
