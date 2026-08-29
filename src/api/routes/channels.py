@@ -915,6 +915,39 @@ async def preview_ai_music(
 
     return FileResponse(tmp_path, media_type="audio/mpeg", filename="preview.mp3")
 
+
+@router.post("/music-video/preview")
+async def preview_music_video_track(
+    style_prompt: str = Form(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Free preview for the Music Video channel setup wizard (content_type
+    "music") — lets a creator hear their chosen style before committing to a
+    channel, with NO credit debit. Unlike preview-ai-music (used by narration
+    channels' background-music picker, which does debit), the plan here is
+    to only ever charge once a real video finishes rendering — see
+    src/utils/billing.py's future per-music-video charge (Phase 4) — so
+    experimenting with style during setup has to stay free or creators would
+    pay just to find the sound that fits their channel."""
+    if not IZIVOICE_API_KEY:
+        raise HTTPException(status_code=503, detail="La génération musicale IA n'est pas configurée sur le serveur.")
+
+    prompt = style_prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Décris le style musical voulu.")
+
+    from src.pipeline.music import generate_music_izivoice
+    tmp_dir = STORAGE_PATH / "tmp" / "music-previews"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"{uuid.uuid4()}.mp3"
+    try:
+        generate_music_izivoice(prompt, 20.0, tmp_path)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Génération musicale impossible : {e}")
+
+    return FileResponse(tmp_path, media_type="audio/mpeg", filename="preview.mp3")
+
+
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 
 @router.post("/{channel_id}/music")
