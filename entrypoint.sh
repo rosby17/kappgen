@@ -11,7 +11,18 @@ ROLE="${ROLE:-all}"
 
 case "$ROLE" in
   api)
-    exec uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+    # 4 worker processes instead of the previous single-process default:
+    # route handlers make plenty of synchronous/blocking calls (outbound
+    # HTTP to Anthropic/OpenAI/fal.ai/Izivoice, sync SQLAlchemy queries)
+    # inside `async def` endpoints — on one process, any one of those in
+    # flight froze the single event loop, stalling every OTHER unrelated
+    # request (even a trivial one like submitting a new video) for as long
+    # as that call took. Multiple processes mean a slow request in one no
+    # longer blocks requests being served by the others. Note: the simple
+    # in-memory rate limiter (src/utils/rate_limit.py) is now per-process,
+    # not global — its limits are correspondingly looser, an acceptable
+    # trade-off for fixing this.
+    exec uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --workers 4
     ;;
   worker)
     exec python -m src.worker.queue_runner
@@ -20,7 +31,18 @@ case "$ROLE" in
     # Background queue worker (polls the DB for queued videos and renders them).
     python -m src.worker.queue_runner &
     # Foreground API server (PID 1).
-    exec uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+    # 4 worker processes instead of the previous single-process default:
+    # route handlers make plenty of synchronous/blocking calls (outbound
+    # HTTP to Anthropic/OpenAI/fal.ai/Izivoice, sync SQLAlchemy queries)
+    # inside `async def` endpoints — on one process, any one of those in
+    # flight froze the single event loop, stalling every OTHER unrelated
+    # request (even a trivial one like submitting a new video) for as long
+    # as that call took. Multiple processes mean a slow request in one no
+    # longer blocks requests being served by the others. Note: the simple
+    # in-memory rate limiter (src/utils/rate_limit.py) is now per-process,
+    # not global — its limits are correspondingly looser, an acceptable
+    # trade-off for fixing this.
+    exec uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --workers 4
     ;;
   *)
     echo "Unknown ROLE '$ROLE' (expected api, worker, or all)" >&2
