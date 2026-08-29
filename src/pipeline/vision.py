@@ -6,11 +6,15 @@ from src.utils.logger import logger
 STYLE_ANALYSIS_INSTRUCTION = (
     "You are helping configure an AI image generator for a video pipeline. "
     "Look at this reference image and write a single, dense image-generation prompt "
-    "(comma-separated descriptors, no full sentences, no preamble) that captures its "
-    "visual style: art style/medium, color palette, lighting, mood, composition, and "
-    "level of detail. The goal is that feeding your prompt to an image generator "
-    "reliably produces new images in this same style. Do not describe the specific "
-    "subject/content of this image, only its reusable visual style."
+    "(comma-separated descriptors, no full sentences, no preamble) that captures both its "
+    "visual style — art style/medium, color palette, lighting, mood, composition, level of "
+    "detail — AND its subject matter: what kind of people, objects, settings or scenes it "
+    "shows (e.g. 'doctors in white coats, hospital corridor' for a health reference, or "
+    "'open Bible, praying hands, church interior' for a faith reference). Both halves matter: "
+    "a creator uploads this image not just to fix a look, but to show the AI what their niche "
+    "actually looks like, so later prompts stay visually on-topic instead of defaulting to "
+    "generic or unrelated imagery. The goal is that feeding your prompt to an image generator "
+    "reliably produces new images that share this reference's style AND subject world."
 )
 
 
