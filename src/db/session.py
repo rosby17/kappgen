@@ -68,6 +68,7 @@ def init_db():
             "approved_for_publish": "ALTER TABLE videos ADD COLUMN approved_for_publish BOOLEAN DEFAULT FALSE NOT NULL",
             "thumbnail_text": "ALTER TABLE videos ADD COLUMN thumbnail_text VARCHAR(255)",
             "expiry_warning_sent_at": "ALTER TABLE videos ADD COLUMN expiry_warning_sent_at TIMESTAMP",
+            "downloaded_at": "ALTER TABLE videos ADD COLUMN downloaded_at TIMESTAMP",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
