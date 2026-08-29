@@ -1128,6 +1128,97 @@ def generate_and_queue_music_video_background(channel_id: str):
         db.close()
 
 
+def retry_auto_video_script_background(video_id: str):
+    """Regenerates the script for an existing Video that failed with none at
+    all (see the "no script" branch of retry_video in api/routes/videos.py),
+    instead of the plain retry path re-queuing it as-is — which would just
+    render the empty script_text "successfully" into a near-silent few-second
+    video with a placeholder title, rather than actually retrying what
+    failed. Runs on its own session/thread for the same reason
+    generate_and_queue_auto_video_background does: script generation makes
+    several sequential Claude calls and can run past a request timeout."""
+    from src.pipeline.script_writer import generate_daily_script
+    from src.api.routes.videos import MAX_VIDEO_DURATION_SECONDS
+
+    db = SessionLocal()
+    try:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if not video:
+            return
+        channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+        owner = channel.user if channel else None
+        if not channel or not owner:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+            video.progress_stage = "Échec"
+            db.commit()
+            return
+
+        recent_titles = [
+            (v.script_text or "").split("\n")[0][:120]
+            for v in (
+                db.query(Video)
+                .filter(Video.channel_id == channel.id, Video.id != video.id)
+                .order_by(Video.created_at.desc())
+                .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+                .all()
+            )
+        ]
+        combined_style_prompt = "\n".join(filter(None, [
+            f"What this channel is about: {channel.description}" if channel.description else None,
+            channel.automation_style_prompt,
+        ])) or None
+
+        result = generate_daily_script(
+            niche=channel.niche,
+            recent_titles=recent_titles,
+            style_prompt=combined_style_prompt,
+            script_structure=channel.script_structure,
+            default_language="French" if (owner.locale or "fr") == "fr" else "English",
+            topic_examples=channel.topic_examples,
+            use_web_trends=bool(channel.use_web_trends),
+        )
+        if not result:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+            video.progress_stage = "Échec"
+            db.commit()
+            return
+
+        from src.utils.billing import user_max_video_duration_seconds, debit_script_generation_cost
+        tier_max_duration = user_max_video_duration_seconds(db, owner)
+        effective_max_duration = MAX_VIDEO_DURATION_SECONDS if tier_max_duration is None else min(MAX_VIDEO_DURATION_SECONDS, tier_max_duration)
+        estimated_duration = max(3.0, len(result["script_text"].split()) / 2.5)
+        if estimated_duration > effective_max_duration:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = f"Le script généré ferait une vidéo de {estimated_duration/60:.0f} min, au-delà de la limite de ton palier ({effective_max_duration//60} min)."
+            video.progress_stage = "Échec"
+            db.commit()
+            return
+
+        video.title = result["title"]
+        video.script_text = result["script_text"]
+        video.estimated_duration_seconds = estimated_duration
+        video.status = VideoStatus.QUEUED.value
+        video.progress_stage = "En attente du moteur de rendu"
+        video.progress_percent = 0
+        db.commit()
+        debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
+    except Exception as e:
+        logger.error(f"retry_auto_video_script_background failed for video {video_id}: {e}\n{traceback.format_exc()}")
+        try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if video:
+                video.status = VideoStatus.FAILED.value
+                video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+                video.progress_stage = "Échec"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
 def generate_and_queue_auto_video_background(channel_id: str):
     """Runs generate_and_queue_auto_video on its own DB session/thread, for the
     "Nouvelle vidéo" on-demand trigger: the several sequential Claude calls

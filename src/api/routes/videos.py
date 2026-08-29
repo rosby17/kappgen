@@ -540,13 +540,36 @@ def list_channel_videos(channel_id: str, current_user: User = Depends(get_curren
 @router.post("/{video_id}/retry")
 def retry_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
+    channel = video.channel
+
+    # A failed automation attempt that never got a script at all (created by
+    # _record_automation_failure, script_text left "") can't just be
+    # re-queued for rendering as-is — that renders "successfully" on empty
+    # content instead of actually retrying what failed, producing a
+    # near-silent few-second video with a self-describing placeholder title
+    # ("Script manquant...", from the post-render metadata step improvising
+    # off an empty script) instead of a real one. Regenerate the script
+    # first for this case; a plain manual/audio video always has real
+    # content already and just needs re-queuing.
+    if not (video.script_text or "").strip() and channel and channel.automation_mode == "auto" and channel.content_type != "music":
+        from threading import Thread
+        from src.worker.queue_runner import retry_auto_video_script_background
+        video.status = VideoStatus.QUEUED.value
+        video.error_message = None
+        video.progress_stage = "Régénération du script…"
+        video.progress_percent = 0
+        db.commit()
+        Thread(target=retry_auto_video_script_background, args=(video.id,), daemon=True).start()
+        db.refresh(video)
+        return video.to_dict()
+
     video.status = VideoStatus.QUEUED.value
     video.error_message = None
     video.progress_stage = "En attente du moteur de rendu"
     video.progress_percent = 0
     db.commit()
     db.refresh(video)
-    
+
     return video.to_dict()
 
 class VideoUpdate(BaseModel):
