@@ -79,7 +79,17 @@ def _extract_json(text: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"```$", "", text).strip()
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # With web search enabled Claude sometimes wraps the JSON in a line
+        # or two of commentary despite the "ONLY this JSON object" instruction
+        # (e.g. "Based on my search, here's a topic:\n{...}") — pull out the
+        # first {...} block instead of failing the whole topic-pick call.
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
 
 
 def _split_oversized_parts(parts: List[dict]) -> List[dict]:
@@ -100,18 +110,47 @@ def _split_oversized_parts(parts: List[dict]) -> List[dict]:
     return result
 
 
-def _pick_topic(niche: str, recent_titles: List[str], style_prompt: Optional[str], language: str, cost_sink: Optional[List[float]] = None) -> Optional[str]:
+def _pick_topic(
+    niche: str,
+    recent_titles: List[str],
+    style_prompt: Optional[str],
+    language: str,
+    cost_sink: Optional[List[float]] = None,
+    topic_examples: Optional[str] = None,
+    use_web_trends: bool = False,
+) -> Optional[str]:
     avoid_list = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet — this is the first video)"
+    # Without real examples, topic selection has nothing to anchor on but the
+    # niche label itself, which reads as generic/random rather than matching
+    # a specific angle. `topic_examples` is free text the creator pasted —
+    # either their own best-performing titles, or ones copied from a channel
+    # they want to emulate — treated as "study this pattern", not "avoid it".
+    examples_block = ""
+    if topic_examples and topic_examples.strip():
+        examples_lines = "\n".join(f"- {line.strip()}" for line in topic_examples.splitlines() if line.strip())
+        examples_block = f"""
+Here are example titles/topics that show exactly the kind of angle, specificity, and hook style this channel's audience responds to (these are either the creator's own best videos, or titles from a channel they want to emulate — study the pattern, don't just reuse the surface theme):
+{examples_lines}
+"""
+    web_search_line = (
+        "This channel covers current events/trends — use web search to find something genuinely happening right now (recent news, a real trending story, an actual event) and build the topic around it, instead of a generic evergreen angle."
+        if use_web_trends else ""
+    )
     instruction = f"""You are the head writer for a faceless YouTube channel (niche: {niche or "general"}).
 {f"Creative/tone direction from the channel owner: {style_prompt}" if style_prompt else ""}
+{examples_block}
+{web_search_line}
 
 Titles of videos already published on this channel (never repeat these topics or very close variants):
 {avoid_list}
 
-Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet. Respond in {language} with ONLY this JSON object, no other text:
+Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet{" — matching the style and specificity of the examples above" if examples_block else ""}. Respond in {language} with ONLY this JSON object, no other text:
 {{"title": "short punchy video title"}}"""
     try:
-        raw_text = generate_text(instruction, max_tokens=300, model=SCRIPT_WRITER_MODEL, operation='script_topic', cost_sink=cost_sink)
+        raw_text = generate_text(
+            instruction, max_tokens=1000 if use_web_trends else 300, model=SCRIPT_WRITER_MODEL,
+            operation='script_topic', cost_sink=cost_sink, enable_web_search=use_web_trends,
+        )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
         return title or None
@@ -171,6 +210,8 @@ def generate_daily_script(
     style_prompt: Optional[str] = None,
     script_structure: Optional[Dict] = None,
     default_language: Optional[str] = None,
+    topic_examples: Optional[str] = None,
+    use_web_trends: bool = False,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -202,7 +243,10 @@ def generate_daily_script(
 
     cost_sink: List[float] = []
     try:
-        title = _pick_topic(niche, recent_titles, style_prompt, language, cost_sink=cost_sink)
+        title = _pick_topic(
+            niche, recent_titles, style_prompt, language, cost_sink=cost_sink,
+            topic_examples=topic_examples, use_web_trends=use_web_trends,
+        )
         if not title:
             return None
 

@@ -513,6 +513,8 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         effects_config=payload.effects_config.model_dump(),
         automation_mode=payload.automation_mode or "manual",
         automation_style_prompt=payload.automation_style_prompt,
+        topic_examples=payload.topic_examples,
+        use_web_trends=bool(payload.use_web_trends),
         videos_per_day=max(1, payload.videos_per_day or 1),
         automation_window_start_hour=payload.automation_window_start_hour if payload.automation_window_start_hour is not None else 7,
         automation_window_end_hour=payload.automation_window_end_hour if payload.automation_window_end_hour is not None else 11,
@@ -627,6 +629,10 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.automation_mode = payload.automation_mode
     if payload.automation_style_prompt is not None:
         channel.automation_style_prompt = payload.automation_style_prompt
+    if payload.topic_examples is not None:
+        channel.topic_examples = payload.topic_examples
+    if payload.use_web_trends is not None:
+        channel.use_web_trends = payload.use_web_trends
     if payload.videos_per_day is not None:
         channel.videos_per_day = max(1, payload.videos_per_day)
     if payload.automation_window_start_hour is not None:

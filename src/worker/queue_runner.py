@@ -945,6 +945,8 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         style_prompt=combined_style_prompt,
         script_structure=channel.script_structure,
         default_language="French" if (owner.locale or "fr") == "fr" else "English",
+        topic_examples=channel.topic_examples,
+        use_web_trends=bool(channel.use_web_trends),
     )
     if not result:
         _record_automation_failure(db, channel)

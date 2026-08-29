@@ -27,24 +27,39 @@ _OPENROUTER_LEAKED_REASONING_PREFIXES = ("okay,", "let me", "i need to", "the us
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
 
-def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dict) -> tuple:
+def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dict, enable_web_search: bool = False) -> tuple:
     import anthropic
 
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}])
+    # Anthropic's server-side web_search tool runs the search(es) itself and
+    # feeds the results back into the same response — no client-side tool
+    # loop needed, just pass the tool and read the final text block(s). Only
+    # used for topic ideation on news/trend-driven channels (see
+    # script_writer._pick_topic); every other text call stays search-free.
+    kwargs = {"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
+    if enable_web_search:
+        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+    response = client.messages.create(**kwargs)
     in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
     cost_usd = estimate_anthropic_cost(in_tok, out_tok)
+    # Web searches themselves are billed separately by Anthropic per-use;
+    # not tracked here (token cost is), same tradeoff as other providers'
+    # flat-rate estimates in this file already accept.
     log_usage(
         "anthropic", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok},
+        meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok, "web_search": enable_web_search},
     )
-    for block in response.content:
-        if block.type == "text":
-            return block.text.strip(), cost_usd
+    # With tools enabled, content interleaves server_tool_use/web_search_tool_result
+    # blocks with the final text — collect every text block instead of
+    # returning on the first one, and use the last of them (Claude's actual
+    # answer, after any search commentary).
+    text_blocks = [block.text for block in response.content if block.type == "text"]
+    if text_blocks:
+        return text_blocks[-1].strip(), cost_usd
     raise RuntimeError("Anthropic text generation returned no text content.")
 
 
@@ -135,6 +150,7 @@ def generate_text(
     channel_id: Optional[str] = None,
     video_id: Optional[str] = None,
     cost_sink: Optional[list] = None,
+    enable_web_search: bool = False,
 ) -> str:
     """Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
     Raises if every configured provider fails (or none are configured).
@@ -151,11 +167,15 @@ def generate_text(
 
     `cost_sink`, if given a list, gets this call's real provider cost (USD)
     appended to it — used by callers (e.g. auto script generation) that need
-    to know the actual cost incurred to bill the creator for it."""
+    to know the actual cost incurred to bill the creator for it.
+
+    `enable_web_search` only applies to the Anthropic path (its server-side
+    web_search tool) — if that provider is unavailable and this falls back to
+    fal.ai/OpenAI, the call still succeeds, just without live search results."""
     usage_ctx = {"operation": operation, "user_id": user_id, "channel_id": channel_id, "video_id": video_id}
     last_exc = None
     for name, fn in [
-        ("anthropic", lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx)),
+        ("anthropic", lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search)),
         ("fal.ai", lambda: _fal_complete(prompt, max_tokens, usage_ctx)),
         ("openai", lambda: _openai_complete(prompt, max_tokens, usage_ctx)),
     ]:

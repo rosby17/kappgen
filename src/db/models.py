@@ -139,6 +139,18 @@ class Channel(Base):
     # day, at a randomized time in the configured window, no human input).
     automation_mode = Column(String(20), nullable=False, default="manual")
     automation_style_prompt = Column(Text, nullable=True)  # optional extra creative direction for Claude
+    # Example topics/titles the creator considers "on-brand" for this channel —
+    # either their own best-performing past videos, or titles copied from a
+    # channel they want to emulate. Without this, topic selection was pure
+    # freestyle (niche label + "don't repeat these old titles"), which reads
+    # as random/generic rather than matching a specific angle or style. Free
+    # text, one topic/title per line; see script_writer._pick_topic.
+    topic_examples = Column(Text, nullable=True)
+    # When set, topic selection is allowed to use Claude's live web-search
+    # tool to ground new topics in actual recent events/trends instead of
+    # inventing from the model's training data alone — meant for news/current-
+    # events-style channels where "what's happening right now" is the point.
+    use_web_trends = Column(Boolean, nullable=False, default=False)
     # How many videos the daily pipeline generates per day (automation_mode
     # "auto" only) — each gets its own randomized slot inside the window,
     # spread evenly so they don't all land back-to-back.
@@ -267,6 +279,8 @@ class Channel(Base):
             "is_render_ready": visuals_ready,
             "automation_mode": self.automation_mode or "manual",
             "automation_style_prompt": self.automation_style_prompt,
+            "topic_examples": self.topic_examples,
+            "use_web_trends": bool(self.use_web_trends),
             "videos_per_day": self.videos_per_day or 1,
             "automation_window_start_hour": self.automation_window_start_hour if self.automation_window_start_hour is not None else 7,
             "automation_window_end_hour": self.automation_window_end_hour if self.automation_window_end_hour is not None else 11,

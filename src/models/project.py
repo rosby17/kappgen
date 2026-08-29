@@ -109,6 +109,8 @@ class ChannelCreate(BaseModel):
     effects_config: EffectsConfig = Field(default_factory=EffectsConfig)
     automation_mode: str = "manual"  # "manual" | "auto"
     automation_style_prompt: Optional[str] = None
+    topic_examples: Optional[str] = None  # example titles/topics, one per line — the creator's own or a channel to emulate
+    use_web_trends: bool = False  # let topic selection use live web search (news/trend-driven niches)
     videos_per_day: int = 1
     automation_window_start_hour: int = 7
     automation_window_end_hour: int = 11
@@ -140,6 +142,8 @@ class ChannelUpdate(BaseModel):
     effects_config: Optional[EffectsConfig] = None
     automation_mode: Optional[str] = None
     automation_style_prompt: Optional[str] = None
+    topic_examples: Optional[str] = None
+    use_web_trends: Optional[bool] = None
     videos_per_day: Optional[int] = None
     automation_window_start_hour: Optional[int] = None
     automation_window_end_hour: Optional[int] = None
