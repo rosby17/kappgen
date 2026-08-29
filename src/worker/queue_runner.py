@@ -287,6 +287,16 @@ def process_single_queued_video() -> bool:
                 try_publish_to_youtube(db, channel, video, output_mp4)
             elif channel.publish_mode == "scheduled":
                 video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
+                # Pre-approved by default: "scheduled" means the creator picked
+                # a delay (publish N days after render, not instantly), not
+                # that they also want to click "Approuver" on every single
+                # video before it's allowed to go out — that used to leave
+                # videos silently stuck past their scheduled time until
+                # someone noticed and approved them by hand. The "Annuler"
+                # button in NicheCut still lets a creator pull a specific
+                # video out of the queue before its scheduled time if they
+                # want to review it first.
+                video.approved_for_publish = True
                 db.commit()
                 logger.info(f"Video {video.id} scheduled to publish at {video.scheduled_publish_at} (channel {channel.id}).")
             # "manual": leave the video as-is — the creator downloads it or

@@ -316,6 +316,19 @@ def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current
     items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
+def _download_filename(video: Video, suffix: str) -> str:
+    """Uses the video's real title (sanitized to a safe filename) instead of
+    its opaque id, so a manually re-uploaded/re-posted video keeps its title
+    visible in the downloaded file instead of forcing the creator to retype
+    it from memory."""
+    title = (video.title or "").strip()
+    if not title:
+        return f"kappgen-{video.id}-{suffix}.mp4"
+    safe = re.sub(r'[\\/*?:"<>|]', "", title).strip()
+    safe = re.sub(r"\s+", " ", safe)[:150].strip()
+    return f"{safe or video.id}-{suffix}.mp4"
+
+
 @router.get("/{video_id}/download")
 def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get_db)):
     # Intentionally unauthenticated: reached via a plain download link/window.open,
@@ -329,13 +342,13 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
         raise HTTPException(status_code=404, detail="Video file not found on disk")
 
     if quality != "sd":
-        return FileResponse(source_path, media_type="video/mp4", filename=f"kappgen-{video_id}-hd.mp4")
+        return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "hd"))
 
     # Normally already pre-generated right after the render finished (see
     # queue_runner.py) so this resolves instantly; only actually transcodes
     # here as a fallback if that background step hasn't completed yet.
     cached_path = ensure_sd_variant(source_path)
-    return FileResponse(cached_path, media_type="video/mp4", filename=f"kappgen-{video_id}-sd.mp4")
+    return FileResponse(cached_path, media_type="video/mp4", filename=_download_filename(video, "sd"))
 
 @router.get("/{video_id}/audio")
 def download_video_audio(video_id: str, db: Session = Depends(get_db)):
