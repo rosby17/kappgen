@@ -311,9 +311,7 @@ def fetch_or_generate_images(
         return result[:required_count]
 
     def generate_images(ai_prompts: List[str], prefix: str = "ai_img") -> List[Path]:
-        if not IZIVOICE_API_KEY:
-            raise RuntimeError("La génération d’images IA n’est pas configurée sur le serveur.")
-        logger.info(f"Generating {len(ai_prompts)} images via Izivoice (model={IZIVOICE_IMAGE_MODEL_ID})...")
+        logger.info(f"Generating {len(ai_prompts)} images (free tier: Hugging Face FLUX.1-schnell)...")
         # These are independent network calls (each waits on Izivoice's API, not
         # local CPU), so running them one after another was pure dead time —
         # fanning them out is the single biggest lever for a long video's total
@@ -323,33 +321,26 @@ def fetch_or_generate_images(
 
         def fetch_one(i: int, p: str, client: httpx.Client) -> Optional[Path]:
             img_file = output_dir / f"{prefix}_{i+1}.png"
+            # Niche is appended directly here as a safety net: build_scene_prompts
+            # (the Claude step that's supposed to bake niche-relevant subject
+            # matter into each prompt) can fail or be skipped, in which case
+            # raw narration text reaches this function instead — without this,
+            # that raw text goes straight to the image model with no visual
+            # grounding in the channel's actual topic (e.g. a health-niche
+            # script producing generic "person talking" imagery instead of
+            # doctors/hospitals/medicine).
             full_prompt = f"{p}, {style_prompt}" if style_prompt else p
+            if niche:
+                full_prompt = f"{full_prompt}, in the visual context of {niche}"
             # Free tier tried first, before any credit is touched — costs
             # nothing up to Hugging Face's small monthly free allowance, so a
             # video's whole visual pool can render for free as long as it lasts.
             try:
                 return _generate_with_huggingface_flux(full_prompt, img_file, client, operation="scene_image")
             except Exception as e:
-                logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, falling back to Izivoice: {e}")
-            # Debited BEFORE generating, not after: debit_izivoice_usage_by_user_id
-            # returns False on insufficient balance, and the whole point of
-            # checking is to never place the real (money-costing) Izivoice
-            # call when we already know it can't be paid for — falling back
-            # to a library image instead, same as any other generation failure.
-            if user_id:
-                from src.utils.billing import debit_izivoice_usage_by_user_id, random_image_credit_cost
-                if not debit_izivoice_usage_by_user_id(user_id, random_image_credit_cost(), "ai_image_generation"):
-                    logger.warning(f"Insufficient KappGen credit balance for AI image generation (user {user_id}); using fallback image instead.")
-                    fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
-                    return fallback[0] if fallback else None
-            try:
-                generate_ai_image(full_prompt, img_file, client)
-                return img_file
-            except Exception as e:
-                # ai33.pro is a third-party service that has proven unreliable
-                # (slow/erroring under load) — one failed image shouldn't sink
-                # an otherwise-ready render. Use a fallback asset instead.
-                logger.warning(f"AI image generation failed for prompt '{p[:60]}': {e}. Using fallback image instead.")
+                # Paid fallback (Izivoice) intentionally disabled — free tier
+                # only. On failure, use a library image instead of spending credit.
+                logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, using fallback image instead: {e}")
                 fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
                 return fallback[0] if fallback else None
 
