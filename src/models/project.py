@@ -102,6 +102,8 @@ class ChannelCreate(BaseModel):
     name: str
     description: Optional[str] = None
     niche: str = "General"
+    content_type: str = "narration"  # "narration" | "music"
+    music_channel_config: Optional[dict] = None
     subtitle_style: SubtitleStyle = Field(default_factory=SubtitleStyle)
     branding: BrandingConfig = Field(default_factory=BrandingConfig)
     music_preference: MusicPreference = Field(default_factory=MusicPreference)
@@ -135,6 +137,8 @@ class ChannelUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     niche: Optional[str] = None
+    content_type: Optional[str] = None
+    music_channel_config: Optional[dict] = None
     subtitle_style: Optional[SubtitleStyle] = None
     branding: Optional[BrandingConfig] = None
     music_preference: Optional[MusicPreference] = None

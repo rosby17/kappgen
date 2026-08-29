@@ -106,6 +106,22 @@ class Channel(Base):
     # beyond just the name/niche label.
     description = Column(Text, nullable=True)
     niche = Column(String(255), nullable=False, default="General")
+    # "narration" (default — the existing script+voiceover+scene-images
+    # pipeline) or "music": the channel's content IS the music itself (AI-
+    # generated tracks, no script/voiceover at all), assembled with a much
+    # lighter pipeline — see MusicChannel product plan: style/example-titles
+    # config lives in music_channel_config, the render is a loop-or-
+    # compilation of tracks behind 0-N images + an audio-spectrum visual.
+    # Deliberately its own column rather than overloading `niche` or
+    # automation fields, since it changes which wizard steps and which
+    # worker pipeline apply, not just a content-style knob within one pipeline.
+    content_type = Column(String(20), nullable=False, default="narration")
+    # Only meaningful when content_type == "music". {"style_prompt": str,
+    # "reference_track_path": str|null, "title_examples": str (one per line,
+    # same free-text pattern as topic_examples), "edit_mode": "loop"|"compilation",
+    # "image_count": int (0-N — creator's choice, no fixed montage complexity),
+    # "target_duration_minutes": int}
+    music_channel_config = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     # Pause switch: a creator who wants to stop production without losing the
     # channel's config/history/videos (unlike deleting it) sets this False.
@@ -266,6 +282,8 @@ class Channel(Base):
             "name": self.name,
             "description": self.description,
             "niche": self.niche,
+            "content_type": self.content_type or "narration",
+            "music_channel_config": self.music_channel_config,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "subtitle_style": self.subtitle_style,

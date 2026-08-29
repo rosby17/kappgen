@@ -506,6 +506,8 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         name=payload.name,
         description=payload.description,
         niche=payload.niche,
+        content_type=payload.content_type or "narration",
+        music_channel_config=payload.music_channel_config,
         subtitle_style=payload.subtitle_style.model_dump(),
         branding=payload.branding.model_dump(),
         music_preference=payload.music_preference.model_dump(),
@@ -615,6 +617,10 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.description = payload.description
     if payload.niche is not None:
         channel.niche = payload.niche
+    if payload.content_type is not None:
+        channel.content_type = payload.content_type
+    if payload.music_channel_config is not None:
+        channel.music_channel_config = payload.music_channel_config
     if payload.subtitle_style is not None:
         channel.subtitle_style = payload.subtitle_style.model_dump()
     if payload.branding is not None:

@@ -142,6 +142,8 @@ def init_db():
             "thumbnail_style": "ALTER TABLE channels ADD COLUMN thumbnail_style JSON",
             "description": "ALTER TABLE channels ADD COLUMN description TEXT",
             "transcribe_audio_default": "ALTER TABLE channels ADD COLUMN transcribe_audio_default BOOLEAN DEFAULT TRUE NOT NULL",
+            "content_type": "ALTER TABLE channels ADD COLUMN content_type VARCHAR(20) DEFAULT 'narration' NOT NULL",
+            "music_channel_config": "ALTER TABLE channels ADD COLUMN music_channel_config JSON",
             "topic_examples": "ALTER TABLE channels ADD COLUMN topic_examples TEXT",
             "use_web_trends": "ALTER TABLE channels ADD COLUMN use_web_trends BOOLEAN DEFAULT FALSE NOT NULL",
         }
