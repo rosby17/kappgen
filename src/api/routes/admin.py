@@ -573,3 +573,30 @@ def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin),
     db.delete(account)
     db.commit()
     return {"deleted": True}
+
+
+# --- Global image-generation provider switches ------------------------------
+# Admin-controlled, no redeploy needed — lets the operator flip thumbnail
+# generation between "100% gratuit" (Hugging Face only, no credit ever spent,
+# no paid provider ever called) and "gratuit puis payant" (current default:
+# free tier tried first, falls through to fal.ai then Izivoice, each spending
+# credits/money) at any moment — e.g. switch to free-only the moment a paid
+# provider's balance runs low, switch back once it's topped up.
+
+@router.get("/settings/thumbnail-provider-mode")
+def get_thumbnail_provider_mode(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import thumbnail_provider_mode
+    return {"mode": thumbnail_provider_mode()}
+
+
+class ThumbnailProviderModePayload(BaseModel):
+    mode: str  # "free_only" | "free_then_paid"
+
+
+@router.patch("/settings/thumbnail-provider-mode")
+def set_thumbnail_provider_mode(payload: ThumbnailProviderModePayload, admin: User = Depends(get_current_admin)):
+    if payload.mode not in ("free_only", "free_then_paid"):
+        raise HTTPException(status_code=400, detail="Mode invalide.")
+    from src.utils.app_settings import set_setting, THUMBNAIL_PROVIDER_MODE_KEY
+    set_setting(THUMBNAIL_PROVIDER_MODE_KEY, payload.mode)
+    return {"mode": payload.mode}

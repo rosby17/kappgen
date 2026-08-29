@@ -257,18 +257,37 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
     raise RuntimeError(f"All {len(accounts)} Hugging Face account(s) failed. Last error: {last_exc}")
 
 
-def generate_thumbnail_image(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:
+def generate_thumbnail_image(
+    prompt: str,
+    output_path: Path,
+    client: httpx.Client,
+    reference_image_paths: Optional[List[Path]] = None,
+    allow_paid_fallback: bool = True,
+) -> Path:
     """Thumbnail-specific image generation. Order: Hugging Face FLUX.1-schnell
     (free — but only when there's no reference image to condition on, since
     this endpoint is text-to-image only) -> fal.ai's gpt-image-2 (best visual
     fidelity to reference images, first paid option) -> Izivoice
     (generate_ai_image), falling through on any error — a missing/invalid
-    key, an exhausted free quota, a 402/429, or anything else."""
+    key, an exhausted free quota, a 402/429, or anything else.
+
+    `allow_paid_fallback=False` (see src/utils/app_settings.py's admin-controlled
+    thumbnail_provider_mode) skips straight past both paid providers on a free-tier
+    failure, raising instead — the caller (youtube_metadata.py) then falls
+    through to its own video-frame-grab fallback, same as the per-scene body
+    images already do, so a thumbnail never silently costs money in this mode."""
     if not reference_image_paths:
         try:
             return _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail")
         except Exception as exc:
+            if not allow_paid_fallback:
+                raise
             logger.warning(f"Hugging Face (FLUX.1-schnell) thumbnail generation failed, falling back to fal.ai: {exc}")
+    elif not allow_paid_fallback:
+        # A reference image needs image-conditioning, which the free HF path
+        # doesn't support (text-to-image only) — free-only mode has no
+        # provider left to try in this case.
+        raise RuntimeError("Free-only thumbnail mode can't use a reference image (no free provider supports image conditioning).")
     try:
         return _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths)
     except Exception as exc:

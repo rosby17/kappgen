@@ -189,11 +189,20 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     ]
     reference_paths = [p for p in reference_paths if p.exists()] or None
 
+    # Admin-controlled global switch (src/utils/app_settings.py) — "free_only"
+    # keeps thumbnails on the free Hugging Face path exclusively (no credit
+    # ever touched, no paid provider ever called, same guarantee as the
+    # per-scene body images) so the whole feature can be run at zero cost
+    # until/unless an admin flips it back to allow the paid fallback chain.
+    from src.utils.app_settings import thumbnail_provider_mode
+    allow_paid_fallback = thumbnail_provider_mode() != "free_only"
+
     # Billed like the per-scene AI images: debited BEFORE calling out to the
     # provider, so an insufficient balance never places the real (paid) call
     # — it just falls through to generate_thumbnail's own video-frame-grab
-    # fallback below, same as any other AI-generation failure.
-    if channel.user_id:
+    # fallback below, same as any other AI-generation failure. Skipped
+    # entirely in free-only mode since no paid call can ever happen.
+    if channel.user_id and allow_paid_fallback:
         from src.utils.billing import debit_izivoice_usage_by_user_id
         from src.utils.billing import THUMBNAIL_CREDITS
         if not debit_izivoice_usage_by_user_id(channel.user_id, THUMBNAIL_CREDITS, "ai_thumbnail_generation"):
@@ -204,7 +213,7 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     # thumbnail — the one image viewers judge the video by — so it's worth waiting
     # longer for it rather than falling back to a plain video-frame grab.
     with httpx.Client(timeout=120.0) as client:
-        generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths)
+        generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths, allow_paid_fallback=allow_paid_fallback)
     return ai_path
 
 

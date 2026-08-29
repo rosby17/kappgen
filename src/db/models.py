@@ -613,6 +613,19 @@ class ApiUsageLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class AppSetting(Base):
+    """Generic global key/value flags the admin panel toggles at runtime, with
+    no redeploy needed — started for per-generator image-provider switches
+    (e.g. "thumbnail_provider_mode": force thumbnails free-only vs. allow the
+    paid fallback chain), but deliberately generic so future admin-controlled
+    toggles can reuse this instead of each needing its own column/table."""
+    __tablename__ = "app_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(String(255), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class HuggingFaceAccount(Base):
     """One free-tier Hugging Face account's API token, for the free
     FLUX.1-schnell image generation path (src/pipeline/images.py) tried
