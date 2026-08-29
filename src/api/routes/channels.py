@@ -717,10 +717,20 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Channel not found")
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
-    if channel.automation_mode != "auto":
-        raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
     if not channel.is_active:
         raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
+
+    # Music channels have no per-video form to skip (everything needed lives
+    # in music_channel_config, set once at channel setup) — a click here is
+    # valid regardless of automation_mode, unlike narration's "auto"-only gate.
+    if channel.content_type == "music":
+        from threading import Thread
+        from src.worker.queue_runner import generate_and_queue_music_video_background
+        Thread(target=generate_and_queue_music_video_background, args=(channel.id,), daemon=True).start()
+        return {"status": "started"}
+
+    if channel.automation_mode != "auto":
+        raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
     from src.utils.billing import user_ai_script_enabled
     if not user_ai_script_enabled(db, current_user):
         raise HTTPException(

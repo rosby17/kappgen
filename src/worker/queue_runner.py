@@ -196,6 +196,71 @@ def process_single_queued_video() -> bool:
             try_ensure_sd_variant(output_mp4)
             return True
 
+        # Music Video channels (content_type == "music") skip the entire
+        # script/voiceover/subtitles pipeline — see src/pipeline/music_video.py.
+        # Kept as a distinct branch here rather than threading content_type
+        # through run_video_pipeline itself, which is purpose-built around a
+        # script and would need every internal step guarded otherwise.
+        if channel.content_type == "music":
+            from src.pipeline.music_video import render_music_video
+
+            def update_progress(stage: str, percent: int):
+                video.progress_stage = stage
+                video.progress_percent = percent
+                db.commit()
+
+            music_config = channel.music_channel_config or {}
+            output_mp4, tracks_generated = render_music_video(
+                style_prompt=music_config.get("style_prompt") or "",
+                edit_mode=music_config.get("edit_mode") or "loop",
+                image_count=int(music_config.get("image_count") or 0),
+                target_duration_minutes=float(music_config.get("target_duration_minutes") or 10),
+                niche=channel.niche,
+                output_dir=video_dir,
+                progress_callback=update_progress,
+            )
+
+            try:
+                video.duration_seconds = get_audio_duration(output_mp4)
+            except Exception:
+                video.duration_seconds = None
+
+            video.status = VideoStatus.DONE.value
+            video.finished_at = datetime.utcnow()
+            _finalize_output_storage(db, video, output_mp4)
+            video.error_message = None
+            video.progress_stage = "Vidéo prête"
+            video.progress_percent = 100
+            db.commit()
+            logger.info(f"Worker successfully finished rendering music video ID: {video.id}")
+
+            # Single flat charge for the whole video, only once it's actually
+            # ready — not per intermediate step (per-track, per-image), as
+            # requested when this product was scoped.
+            try:
+                if channel.user_id:
+                    from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
+                    debit_izivoice_usage_by_user_id(channel.user_id, IZIVOICE_MUSIC_CREDITS * tracks_generated, "music_video_generation")
+            except Exception as e:
+                logger.warning(f"Music video billing failed for video {video.id}: {e}")
+
+            try:
+                youtube_metadata.generate_thumbnail(
+                    output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel
+                )
+            except Exception as e:
+                logger.warning(f"Could not pre-generate thumbnail for music video {video.id}: {e}")
+
+            if channel.youtube_refresh_token:
+                if channel.publish_mode == "auto":
+                    try_publish_to_youtube(db, channel, video, output_mp4)
+                elif channel.publish_mode == "scheduled":
+                    video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
+                    video.approved_for_publish = True
+                    db.commit()
+
+            return True
+
         pre_audio_path = None
         if video.audio_input_path:
             p = Path(video.audio_input_path)
@@ -203,7 +268,7 @@ def process_single_queued_video() -> bool:
                 pre_audio_path = p
         if video.input_type == "audio" and pre_audio_path is None:
             raise ValueError("Le fichier audio source est introuvable sur le serveur. Veuillez créer une nouvelle vidéo et le renvoyer.")
-                
+
         # Execute render pipeline
         def update_progress(stage: str, percent: int):
             video.progress_stage = stage
@@ -984,6 +1049,75 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     from src.utils.billing import debit_script_generation_cost
     debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
     return video
+
+
+def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
+    """Queues a new music video for a "music" content_type channel — no
+    script/topic to write, everything needed already lives in
+    channel.music_channel_config (set once at channel setup). Shared by the
+    manual "Nouvelle vidéo" trigger and, later, the daily auto pipeline
+    (Phase 5), same relationship generate_and_queue_auto_video has with its
+    own on-demand trigger."""
+    from src.pipeline.music_video import pick_music_video_title
+    from src.utils.billing import user_can_render
+
+    owner = channel.user
+    if not owner:
+        logger.warning(f"Music video: channel {channel.id} ('{channel.name}') has no owner; skipping.")
+        return None
+    can_render, reason = user_can_render(db, owner)
+    if not can_render:
+        logger.info(f"Music video: channel {channel.id} ('{channel.name}') skipped — {reason}")
+        return None
+
+    music_config = channel.music_channel_config or {}
+    style_prompt = (music_config.get("style_prompt") or "").strip()
+    if not style_prompt:
+        logger.warning(f"Music video: channel {channel.id} ('{channel.name}') has no style configured; skipping.")
+        return None
+
+    recent_titles = [
+        v.title for v in (
+            db.query(Video)
+            .filter(Video.channel_id == channel.id)
+            .filter(Video.title.isnot(None))
+            .order_by(Video.created_at.desc())
+            .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+            .all()
+        )
+    ]
+    title = pick_music_video_title(style_prompt, music_config.get("title_examples"), recent_titles)
+    target_duration_minutes = float(music_config.get("target_duration_minutes") or 10)
+
+    video = Video(
+        channel_id=channel.id,
+        title=title,
+        script_text="",
+        input_type="text",
+        status=VideoStatus.QUEUED.value,
+        estimated_duration_seconds=target_duration_minutes * 60.0,
+    )
+    db.add(video)
+    if owner.free_videos_used < owner.free_video_quota_granted:
+        owner.free_videos_used += 1
+    db.commit()
+    db.refresh(video)
+    return video
+
+
+def generate_and_queue_music_video_background(channel_id: str):
+    """Same reasoning as generate_and_queue_auto_video_background — fired
+    from the on-demand route, runs on its own session/thread so the request
+    can return immediately instead of holding the connection open."""
+    db = SessionLocal()
+    try:
+        channel = db.query(Channel).filter(Channel.id == channel_id).first()
+        if channel:
+            generate_and_queue_music_video(db, channel)
+    except Exception as e:
+        logger.error(f"generate_and_queue_music_video_background failed for channel {channel_id}: {e}\n{traceback.format_exc()}")
+    finally:
+        db.close()
 
 
 def generate_and_queue_auto_video_background(channel_id: str):
