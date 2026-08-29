@@ -11,7 +11,7 @@ import time
 import uuid
 import httpx
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL
 from fastapi.responses import RedirectResponse
@@ -155,22 +155,34 @@ def list_voice_catalog(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Izivoice's real catalog holds 11 000+ voices — far too many to ever load
-    in full into a picker. Without a search term we fetch a first, generously
-    sized page (~1000) so the picker isn't limited to a handful of voices;
-    with a search term we forward it straight to Izivoice (which searches its
-    whole catalog server-side) and only fetch a couple of pages, since the
-    match set is already narrow.
+    """First checks the local `voices` database table for imported synthetic voices.
+    If local voices exist, queries them with high-performance pagination and filtering.
+    Otherwise, falls back to the remote Izivoice catalog endpoint."""
+    local_count = db.query(Voice).filter(Voice.is_active == True).count()
+    if local_count > 0:
+        query = db.query(Voice).filter(Voice.is_active == True)
+        if language:
+            query = query.filter(Voice.language.ilike(f"%{language}%"))
+        if search:
+            query = query.filter(Voice.name.ilike(f"%{search}%"))
 
-    Passing `page` switches to single-page mode: the picker uses this to load
-    further chunks past the initial ~1000 ("Charger plus de voix") instead of
-    eagerly fetching the whole catalog up front."""
+        page_num = page if page is not None else 0
+        page_size = 100
+        total_matching = query.count()
+        voices = query.offset(page_num * page_size).limit(page_size).all()
+        has_more = (page_num + 1) * page_size < total_matching
+
+        return {
+            "voices": [v.to_dict() for v in voices],
+            "has_more": has_more,
+            "page": page_num,
+            "total": total_matching,
+            "source": "local_db"
+        }
+
     api_key = izivoice_key_for_user(current_user)
     if not api_key:
         raise HTTPException(status_code=503, detail="Le catalogue de voix n'est pas configuré.")
-    # Izivoice's `page` is 0-indexed — page=1 silently returns the *second*
-    # page (empty for most accounts), which is why the picker only ever
-    # showed the 4 hardcoded fallback voices instead of the real catalog.
     if page is not None:
         params = {"page": page, "page_size": 100}
         if language:
@@ -182,11 +194,6 @@ def list_voice_catalog(
             response.raise_for_status()
             data = (response.json().get("data") or {})
         batch = data.get("voices") or []
-        # Izivoice's `has_more` flag has been unreliable (see note above about
-        # page indexing) — a full page back is treated as "there might be
-        # more" regardless of what the flag says, so the picker never stops
-        # short of the real end of the catalog. Only a short/empty page is
-        # trusted as the actual end.
         has_more = bool(data.get("has_more")) or len(batch) >= 100
         return {"voices": batch, "has_more": has_more, "page": page}
 
@@ -205,9 +212,6 @@ def list_voice_catalog(
             data = (response.json().get("data") or {})
             batch = data.get("voices") or []
             all_voices.extend(batch)
-            # Same unreliable-flag issue as the single-page branch above: a
-            # full page is treated as "keep going" even if the provider's
-            # has_more says otherwise, so we don't cut the catalog short.
             has_more = bool(data.get("has_more")) or len(batch) >= 100
             if not batch:
                 break
@@ -300,6 +304,17 @@ def get_voice_preview(voice_id: str, current_user: User = Depends(get_current_us
     if not preview_path.exists():
         raise HTTPException(status_code=404, detail="Aperçu introuvable.")
     return FileResponse(preview_path, media_type="audio/mpeg")
+
+
+@router.get("/storage/voices/previews/{filename}")
+def serve_imported_voice_preview(filename: str):
+    """Serves imported voice preview audio files."""
+    clean_name = Path(filename).name
+    preview_path = STORAGE_PATH / "voices" / "previews" / clean_name
+    if not preview_path.exists():
+        raise HTTPException(status_code=404, detail="Extrait audio introuvable.")
+    media_type = "audio/wav" if clean_name.lower().endswith(".wav") else "audio/mpeg"
+    return FileResponse(preview_path, media_type=media_type)
 
 
 @router.post("/voice/{voice_id}/preview/generate")
@@ -1030,6 +1045,109 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
         raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
 
     channel.thumbnail_style = {"reference_image_paths": all_paths, "style_prompt": style_prompt}
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
+@router.post("/{channel_id}/thumbnail-concept/propose")
+def propose_channel_thumbnail_concept(channel_id: str, payload: dict = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Invents ONE concrete, niche-appropriate thumbnail identity (illustration
+    style, recurring subject/character, palette — see propose_thumbnail_concept)
+    and renders a real preview image so the creator can actually see it before
+    committing, instead of approving a text description blind. Pass
+    {"rejected_concepts": [...]} (concept_name + style_prompt strings the
+    creator already declined) to get something meaningfully different on a
+    "propose another style" request rather than a palette shuffle of the same idea.
+    Nothing is saved to the channel here — see the /approve endpoint for that."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    from src.utils.billing import user_ai_images_enabled, get_credit_balance
+    if not user_ai_images_enabled(db, current_user):
+        raise HTTPException(status_code=403, detail="Les fonctionnalités IA ne sont pas incluses dans ton abonnement actuel.")
+    has_own_key = bool(current_user.izivoice_api_key_encrypted)
+    if not has_own_key and get_credit_balance(db, current_user) <= 0:
+        raise HTTPException(status_code=402, detail="Génération de miniature : solde de crédits insuffisant.")
+
+    rejected_concepts = (payload or {}).get("rejected_concepts") or []
+    recent_titles = [
+        v.title for v in
+        db.query(Video).filter(Video.channel_id == channel.id, Video.title.isnot(None))
+        .order_by(Video.created_at.desc()).limit(5).all()
+    ]
+
+    from src.pipeline.youtube_metadata import propose_thumbnail_concept, generate_thumbnail
+    try:
+        concept = propose_thumbnail_concept(channel.niche, recent_titles, rejected_concepts)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Proposition de style impossible : {e}")
+
+    # Render a real preview using a throwaway channel-like view: a plain
+    # object carrying just the fields _generate_ai_thumbnail_background reads,
+    # with thumbnail_style set to the PROPOSED (not yet saved) concept — so
+    # this preview call renders exactly what future thumbnails would look
+    # like if approved, without writing anything to the real channel row.
+    class _PreviewChannel:
+        pass
+    preview_channel = _PreviewChannel()
+    preview_channel.thumbnail_style = {"style_prompt": concept["style_prompt"]}
+    preview_channel.image_style = channel.image_style
+    preview_channel.niche = channel.niche
+    preview_channel.user_id = channel.user_id
+
+    preview_dir = STORAGE_PATH / "channels" / channel.id / "thumbnail_references"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_dest = preview_dir / f"concept_preview_{uuid.uuid4().hex}.jpg"
+    sample_title = recent_titles[0] if recent_titles else (channel.name or channel.niche or "Exemple de titre")
+    try:
+        # video_path is only ever touched by the ffmpeg-frame fallback, which
+        # doesn't run when the AI background step below succeeds — there is
+        # no real rendered video for a not-yet-generated preview.
+        generate_thumbnail(preview_dir / "__no_video__.mp4", preview_dest, sample_title, channel=preview_channel)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Génération de l'aperçu impossible : {e}")
+
+    return {
+        "concept": concept,
+        "preview_url": f"/api/channels/thumbnail-preview/{channel.id}/{preview_dest.name}",
+    }
+
+
+@router.get("/thumbnail-preview/{channel_id}/{filename}")
+def get_thumbnail_concept_preview(channel_id: str, filename: str):
+    path = STORAGE_PATH / "channels" / channel_id / "thumbnail_references" / filename
+    if not path.exists() or not path.is_relative_to(STORAGE_PATH / "channels" / channel_id):
+        raise HTTPException(status_code=404, detail="Aperçu introuvable.")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.post("/{channel_id}/thumbnail-concept/approve")
+def approve_channel_thumbnail_concept(channel_id: str, payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Locks in a proposed concept as this channel's permanent thumbnail
+    identity — every future thumbnail (generated right after a render, and
+    at publish time as a fallback) already prioritizes channel.thumbnail_style
+    over the generic per-video style, so writing it here is the only wiring
+    needed for it to apply automatically to this channel going forward,
+    without affecting any other channel or user."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    style_prompt = (payload or {}).get("style_prompt")
+    if not style_prompt:
+        raise HTTPException(status_code=400, detail="style_prompt manquant.")
+
+    existing = dict(channel.thumbnail_style or {})
+    existing["style_prompt"] = style_prompt
+    existing["concept_name"] = (payload or {}).get("concept_name")
+    existing["text_style"] = (payload or {}).get("text_style")
+    channel.thumbnail_style = existing
     db.commit()
     db.refresh(channel)
     return channel.to_dict()

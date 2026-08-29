@@ -102,6 +102,52 @@ def _pick_thumbnail_variant(seed: str):
     return font_file, accent_color
 
 
+THUMBNAIL_CONCEPT_INSTRUCTION = """You are a YouTube thumbnail art director. A creator is starting a new "{niche}" channel and needs a distinctive, reusable visual identity for their thumbnails — not a single one-off image, but a locked-in STYLE that every future video's thumbnail will follow, the same way real successful channels in this niche have one instantly-recognizable look (e.g. a senior-health channel using a warm flat-illustration mascot instead of stock medical photos; a true-crime channel using a dark grainy photo-collage look; a finance channel using bold chart-and-cash iconography).
+
+Study what actually works for "{niche}" specifically on YouTube today, then invent ONE concrete, opinionated concept for THIS channel — do not default to generic "cinematic dramatic lighting, high detail" descriptors, and do not reach for the same handful of tropes (candles/books for spirituality, gavels for law, etc.) unless you have a genuinely fresh angle on them. Be specific and visual, as if briefing an illustrator.
+{avoid_clause}
+Recent/example video titles from this channel, for context on tone and subject matter:
+{titles}
+
+Respond with ONLY this JSON object, no other text:
+{{
+  "concept_name": "a short 3-5 word label for this style, e.g. 'Mascot flat-illustration, warm muted palette'",
+  "rationale": "1-2 sentences on why this concept fits the niche and will read well as a recognizable, repeatable thumbnail identity",
+  "style_prompt": "a single dense, comma-separated image-generation prompt (no full sentences) describing the reusable visual identity: illustration/photo style, recurring subject or character (if any) and its exact look, color palette (2-3 named colors), mood, composition rules. This will be fed into an image generator for every future thumbnail on this channel, so it must fully capture the identity on its own.",
+  "text_style": "one short phrase on how the bold headline text should look/behave to match this concept, e.g. 'thick rounded sans-serif in cream and terracotta banners' or 'condensed red/white slab caps like a news chyron'"
+}}"""
+
+
+def propose_thumbnail_concept(niche: str, sample_titles: list, rejected_concepts: list = None) -> dict:
+    """Asks Claude to invent one concrete, niche-appropriate thumbnail identity
+    (style + recurring subject/character + palette) — the creative brief a
+    real thumbnail designer would come up with for this specific niche,
+    instead of a single generic template reused for every channel regardless
+    of topic. Pass `rejected_concepts` (concept_name/style_prompt strings the
+    creator has already declined) on a "propose another style" request so the
+    next one is meaningfully different rather than a color-palette shuffle of
+    the same idea."""
+    avoid_clause = ""
+    if rejected_concepts:
+        listed = "\n".join(f"- {c}" for c in rejected_concepts)
+        avoid_clause = (
+            f"\nThe creator already rejected these concepts — propose something genuinely "
+            f"different in approach (not just a different color palette on the same idea):\n{listed}\n"
+        )
+    titles_block = "\n".join(f"- {t}" for t in (sample_titles or [])) or "(no videos yet — infer from the niche alone)"
+    instruction = THUMBNAIL_CONCEPT_INSTRUCTION.format(niche=niche or "general", avoid_clause=avoid_clause, titles=titles_block)
+    raw = generate_text(instruction, max_tokens=800, model="claude-sonnet-5", operation="thumbnail_concept")
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"```$", "", text).strip()
+    data = json.loads(text)
+    for key in ("concept_name", "rationale", "style_prompt", "text_style"):
+        if not data.get(key):
+            raise ValueError(f"Thumbnail concept response missing '{key}'")
+    return data
+
+
 def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> Path:
     """Generates the thumbnail's background image — via fal.ai's gpt-image-2
     (falling back to Izivoice if fal.ai fails or its credits run out) —
