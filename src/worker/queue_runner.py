@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from sqlalchemy import or_
 from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel, User, VoiceCloneJob
 from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
@@ -789,6 +790,13 @@ def purge_old_videos_and_uploads():
       finished more than VIDEO_RETENTION_HOURS ago — unless the video has
       extended_retention set, in which case it's skipped entirely (those
       live on R2, not this disk, and aren't meant to be auto-deleted).
+      Also skipped if the creator hasn't downloaded it or published it to
+      YouTube yet — a video can sit "done" for a couple of days while the
+      creator is still deciding whether to publish it, and auto-deleting
+      their only copy out from under them just because the clock ran out
+      is exactly the kind of surprise this retention job shouldn't cause.
+      Once either downloaded_at or youtube_published_at is set, the file
+      has a copy living elsewhere and is safe to purge on the usual schedule.
       The DB record is kept (purged_at is set, output_path cleared) so
       history/counters remain.
     - Deletes uploaded source audio files older than UPLOAD_RETENTION_HOURS —
@@ -804,6 +812,7 @@ def purge_old_videos_and_uploads():
             .filter(Video.extended_retention.is_(False))
             .filter(Video.finished_at.isnot(None))
             .filter(Video.finished_at < cutoff)
+            .filter(or_(Video.downloaded_at.isnot(None), Video.youtube_published_at.isnot(None)))
             .all()
         )
         for video in stale_videos:

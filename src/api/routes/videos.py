@@ -341,6 +341,10 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found on disk")
 
+    if not video.downloaded_at:
+        video.downloaded_at = datetime.utcnow()
+        db.commit()
+
     if quality != "sd":
         return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "hd"))
 

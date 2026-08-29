@@ -375,6 +375,12 @@ class Video(Base):
     youtube_video_id = Column(String(32), nullable=True)
     youtube_published_at = Column(DateTime, nullable=True)
     youtube_publish_error = Column(Text, nullable=True)
+    # Set the first time the creator downloads the rendered file (see
+    # GET /{video_id}/download) — the retention purge only auto-deletes a
+    # video's local file once it's been either downloaded or published to
+    # YouTube, so a creator who hasn't gotten to it yet doesn't lose their
+    # only copy just because VIDEO_RETENTION_HOURS elapsed.
+    downloaded_at = Column(DateTime, nullable=True)
     # AI-proposed YouTube description, generated as soon as the render finishes
     # (alongside `title`, reused for this) so the creator can review/edit both
     # before publishing instead of only seeing them at the moment of upload.
@@ -661,6 +667,36 @@ class VoiceCloneJob(Base):
             "name": self.name,
             "preview_url": self.preview_url,
             "detail": self.error_message,
+        }
+
+
+class Voice(Base):
+    """Catalog of synthetic AI voices imported into Easy Voice."""
+    __tablename__ = "voices"
+
+    id = Column(String(255), primary_key=True, default=lambda: str(uuid.uuid4()))  # voice_id
+    name = Column(String(255), nullable=False, index=True)
+    language = Column(String(10), nullable=False, default="fr", index=True)
+    gender = Column(String(20), nullable=False, default="neutral", index=True)  # "male" | "female" | "neutral"
+    category = Column(String(100), nullable=True, index=True)
+    preview_url = Column(String(1024), nullable=True)
+    tags = Column(JSON, nullable=True)  # list of tags e.g. ["soft", "storytelling"]
+    provider = Column(String(50), nullable=False, default="easyvoice")
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "voice_id": self.id,
+            "name": self.name,
+            "language": self.language,
+            "gender": self.gender,
+            "category": self.category,
+            "preview_url": self.preview_url,
+            "tags": self.tags or [],
+            "provider": self.provider,
+            "is_active": self.is_active,
         }
 
 
