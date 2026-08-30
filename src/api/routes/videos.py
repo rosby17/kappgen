@@ -29,7 +29,10 @@ LIBRARY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 # At the capped ~4.2Mbps render bitrate a 60min video lands around ~2GB —
 # generous for long-form content while stopping runaway renders (and the
 # very long CPU-bound renders that caused them) before they even start.
-MAX_VIDEO_DURATION_SECONDS = 60 * 60
+# Technical guardrail only. Commercial duration limits come from the user's
+# plan; unrestricted/admin-credit access must not silently fall back to the
+# former one-hour cap.
+MAX_VIDEO_DURATION_SECONDS = 12 * 60 * 60
 
 def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     """Fail before TTS/queueing when the selected visual source cannot work."""

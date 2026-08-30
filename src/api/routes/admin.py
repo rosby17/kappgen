@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
 from src.utils.auth import get_current_admin
-from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
+from src.utils.billing import activate_credit_subscription, user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -122,9 +122,7 @@ class CreditAdjustPayload(BaseModel):
 
 @router.post("/users/{user_id}/credits/grant")
 def grant_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Adds credits to a user's balance — a permanent grant (never expires,
-    same convention as the welcome bonus), not tied to any Order/Plan, for
-    manual top-ups, goodwill compensation, promo grants, etc."""
+    """Adds credits and activates unrestricted credit-backed access."""
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Le montant doit être positif.")
     user = db.query(User).filter(User.id == user_id).first()
@@ -132,7 +130,18 @@ def grant_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Depe
         raise HTTPException(status_code=404, detail="User not found")
     note = f"Crédit admin ({admin.email}){': ' + payload.note if payload.note else ''}"
     credit_user(db, user, payload.amount, 36500, note, transaction_type="admin_grant")
-    return {"credit_balance": get_credit_balance(db, user)}
+    subscription = activate_credit_subscription(
+        db,
+        user,
+        valid_days=36500,
+        granted_by_admin_id=admin.id,
+        note=note,
+    )
+    return {
+        "credit_balance": get_credit_balance(db, user),
+        "has_active_subscription": True,
+        "subscription": subscription.to_dict(),
+    }
 
 
 @router.post("/users/{user_id}/credits/revoke")

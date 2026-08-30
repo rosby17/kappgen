@@ -169,7 +169,44 @@ def get_active_subscription(db: Session, user: User) -> Optional[Subscription]:
 
 
 def user_has_active_subscription(db: Session, user: User) -> bool:
-    return get_active_subscription(db, user) is not None
+    if get_active_subscription(db, user) is not None:
+        return True
+    # Backward compatibility for credit packs/admin grants issued before
+    # credit-backed subscriptions were recorded explicitly. Their remaining
+    # paid balance is already valid access and must be presented as active.
+    return user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0
+
+
+def activate_credit_subscription(
+    db: Session,
+    user: User,
+    valid_days: int,
+    *,
+    plan: Optional[Plan] = None,
+    granted_by_admin_id: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Subscription:
+    """Give credit-backed access the same active-subscription state as a plan.
+
+    Paid credit packs and manual admin credit grants are real access grants,
+    unlike welcome credits.  Keeping this explicit (rather than doing it in
+    ``credit_user``) prevents signup bonuses and refunds from accidentally
+    activating a subscription.
+    """
+    now = datetime.utcnow()
+    sub = Subscription(
+        user_id=user.id,
+        plan_id=plan.id if plan else None,
+        status="active",
+        started_at=now,
+        expires_at=now + timedelta(days=max(1, valid_days)),
+        granted_by_admin_id=granted_by_admin_id,
+        note=note,
+    )
+    db.add(sub)
+    db.commit()
+    db.refresh(sub)
+    return sub
 
 
 def _user_relevant_plans(db: Session, user: User) -> list:
@@ -201,6 +238,8 @@ def _feature_enabled(db: Session, user: User, attr: str) -> bool:
     balance isn't proof they paid for that feature specifically. A
     subscription with no plan attached (admin-granted, plan_id nullable) is
     treated as permissive, same as never having purchased anything."""
+    if user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0:
+        return True
     sub = get_active_subscription(db, user)
     if sub and not sub.plan:
         return True
@@ -230,6 +269,11 @@ def user_max_channels(db: Session, user: User) -> Optional[int]:
     """None means unlimited. Best-of across every plan the user has access
     through (the highest cap they've ever paid for wins) — a user who
     upgraded shouldn't be capped by a smaller pack bought earlier."""
+    if user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0:
+        return None
+    sub = get_active_subscription(db, user)
+    if sub and not sub.plan:
+        return None
     plans = _user_relevant_plans(db, user)
     if not plans:
         return None
@@ -242,6 +286,11 @@ def user_max_channels(db: Session, user: User) -> Optional[int]:
 def user_max_video_duration_seconds(db: Session, user: User) -> Optional[int]:
     """Same best-of-across-plans shape as user_max_channels, for the
     per-tier video-length cap shown on the pricing cards."""
+    if user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0:
+        return None
+    sub = get_active_subscription(db, user)
+    if sub and not sub.plan:
+        return None
     plans = _user_relevant_plans(db, user)
     if not plans:
         return None

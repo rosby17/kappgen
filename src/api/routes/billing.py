@@ -122,15 +122,22 @@ def _activate_subscription(db: Session, order: Order):
     grant a CreditPot; a null-credits plan falls back to the legacy
     unlimited-access Subscription for any pre-migration plan still around."""
     plan = order.plan
-    from src.utils.billing import credit_user, grant_subscription_cycle_credits, CREDIT_CYCLE_DAYS, CREDIT_CYCLE_LABELS_FR
+    from src.utils.billing import activate_credit_subscription, credit_user, grant_subscription_cycle_credits, CREDIT_CYCLE_DAYS, CREDIT_CYCLE_LABELS_FR
     if plan.credits:
         valid_days = CREDIT_CYCLE_DAYS.get(order.billing_cycle, plan.duration_days)
         cycle_label = CREDIT_CYCLE_LABELS_FR.get(order.billing_cycle, "Mensuel")
-        result = credit_user(
+        credit_user(
             db, order.user,
             amount=plan.credits,
             valid_days=valid_days,
             description=f"Achat {plan.name} ({cycle_label}) — {order.amount_fcfa:,} FCFA via {order.provider} (commande {order.id})".replace(",", " "),
+        )
+        result = activate_credit_subscription(
+            db,
+            order.user,
+            valid_days=valid_days,
+            plan=plan,
+            note=f"Payé via {order.provider} (commande {order.id})",
         )
     else:
         result = Subscription(
