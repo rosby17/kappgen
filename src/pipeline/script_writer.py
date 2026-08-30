@@ -127,26 +127,23 @@ def _pick_topic(
     # they want to emulate — treated as "study this pattern", not "avoid it".
     examples_block = ""
     if topic_examples and topic_examples.strip():
-        # Creators sometimes paste a whole YouTube search-results page here
-        # instead of a clean list of titles — timestamps, view counts, "il y a
-        # X mois", bullet glyphs. Left unfiltered, that noise (seen in
-        # production as a 40KB+ paste) overwhelms the prompt and reliably
-        # broke topic selection outright. A real title is close to a full
-        # sentence; junk lines are short fragments or match an obvious
-        # metadata pattern — filtered instead of trusted verbatim.
-        _junk_line_pattern = re.compile(
-            r"^\d{1,2}:\d{2}$|vues?$|^il y a\b|^•$|^\d[\d\s.,]*$", re.IGNORECASE
-        )
-        candidate_lines = [
-            line.strip() for line in topic_examples[:8000].splitlines()
-            if line.strip() and len(line.strip()) >= 15 and not _junk_line_pattern.search(line.strip())
-        ][:20]
-        if candidate_lines:
-            examples_lines = "\n".join(f"- {line}" for line in candidate_lines)
-            examples_block = f"""
-Here are example titles/topics that show exactly the kind of angle, specificity, and hook style this channel's audience responds to (these are either the creator's own best videos, or titles from a channel they want to emulate — study the pattern, don't just reuse the surface theme):
-{examples_lines}
-"""
+        # Creators often paste a whole channel/search-results page here
+        # instead of a clean list — view counts, relative dates, timestamps,
+        # UI chrome mixed in with the actual titles. That's fine and useful
+        # on purpose: view counts are a real virality signal, so Claude is
+        # told to read the mess itself and use it, rather than us silently
+        # stripping it out first (an earlier version tried that and just
+        # threw the signal away along with the noise). Still hard-capped —
+        # a 40KB+ paste seen in production overwhelmed the prompt outright
+        # regardless of what's in it — generous enough for a full top-40
+        # list with metadata on every line.
+        raw_examples = topic_examples.strip()[:6000]
+        examples_block = f"""
+The creator pasted the following as inspiration — likely a raw copy-paste off a channel page (their own, or a competitor's), so it may mix real video titles with view counts, relative dates, timestamps, or UI text ("Voir plus", etc.) rather than being a clean list:
+\"\"\"
+{raw_examples}
+\"\"\"
+Read past the formatting noise yourself: identify the actual titles, and where view counts are present, treat higher-viewed ones as the strongest evidence of what this audience responds to — study THOSE for angle, specificity, and hook style above the rest, don't just average across everything."""
     web_search_line = (
         "This channel covers current events/trends — use web search to find something genuinely happening right now (recent news, a real trending story, an actual event) and build the topic around it, instead of a generic evergreen angle."
         if use_web_trends else ""

@@ -462,29 +462,6 @@ def analyze_script_structure_endpoint(payload: ScriptStructureAnalyzeRequest, cu
         raise HTTPException(status_code=502, detail="L'analyse IA a échoué, réessaie.")
     return {"parts": parts}
 
-
-class TopicExamplesCleanRequest(BaseModel):
-    text: str = ""
-
-
-@router.post("/clean-topic-examples")
-def clean_topic_examples_endpoint(payload: TopicExamplesCleanRequest, current_user: User = Depends(get_current_user)):
-    """Lets a creator paste a raw competitor-channel/video-list dump instead
-    of a clean list of titles — the AI extracts just the real titles,
-    dropping view counts, relative dates, timestamps, and UI chrome that
-    would otherwise get fed verbatim into topic selection (see
-    script_writer._pick_topic's own regex safety net for the cheap fallback
-    when this isn't used)."""
-    from src.pipeline.topic_examples_cleaner import clean_topic_examples
-    try:
-        cleaned = clean_topic_examples(payload.text)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.warning(f"[clean-topic-examples] failed: {e}")
-        raise HTTPException(status_code=502, detail="Le nettoyage IA a échoué, réessaie.")
-    return {"text": cleaned}
-
 @router.get("", response_model=List[Dict[str, Any]])
 def list_channels(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channels = db.query(Channel).filter(Channel.user_id == current_user.id).order_by(Channel.created_at.desc()).all()

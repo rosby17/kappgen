@@ -276,6 +276,16 @@ def process_single_queued_video() -> bool:
                 pre_audio_path = p
         if video.input_type == "audio" and pre_audio_path is None:
             raise ValueError("Le fichier audio source est introuvable sur le serveur. Veuillez créer une nouvelle vidéo et le renvoyer.")
+        # Final backstop, independent of how this row ended up queued: a
+        # text-input video with no real script would otherwise render
+        # "successfully" into a few seconds of near-silent audio, with the
+        # post-render metadata step then improvising a title describing the
+        # missing content (the exact "Script manquant..." videos seen in
+        # production). generate_daily_script and submit_video_subject both
+        # already reject this upstream — this is the last line of defense
+        # for any path that doesn't, known or not.
+        if video.input_type == "text" and len((video.script_text or "").strip()) < 40:
+            raise ValueError("Le script de cette vidéo est vide ou trop court pour générer un rendu.")
 
         # Execute render pipeline
         def update_progress(stage: str, percent: int):
