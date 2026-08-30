@@ -159,8 +159,15 @@ Titles of videos already published on this channel (never repeat these topics or
 Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet{" — matching the style and specificity of the examples above" if examples_block else ""}. Respond in {language} with ONLY this JSON object, no other text:
 {{"title": "short punchy video title"}}"""
     try:
+        # 300 was too tight for a channel with a long "don't repeat these
+        # past titles" list (recent_titles up to 20 entries) — seen in
+        # production hitting stop_reason="max_tokens" with zero text content
+        # at all (the budget ran out before any output text, not mid-JSON),
+        # which _anthropic_complete correctly treats as a failure rather than
+        # silently returning truncated JSON. 1000 for every call, not just
+        # web-search ones, is still a negligible cost for a one-line title.
         raw_text = generate_text(
-            instruction, max_tokens=1000 if use_web_trends else 300, model=SCRIPT_WRITER_MODEL,
+            instruction, max_tokens=1000, model=SCRIPT_WRITER_MODEL,
             operation='script_topic', cost_sink=cost_sink, enable_web_search=use_web_trends,
         )
         data = _extract_json(raw_text)
