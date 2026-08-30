@@ -1431,6 +1431,8 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     runs once regardless of render concurrency.
     """
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    from src.utils.error_tracking import init_error_tracking
+    init_error_tracking("worker")
     init_db()
     requeue_orphaned_videos()
     requeue_orphaned_voice_clone_jobs()

@@ -7,6 +7,11 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Self-hosted GlitchTip (Sentry-protocol-compatible) error tracking — empty
+# means error reporting is simply off (see src/utils/error_tracking.py),
+# never a hard requirement to run the app locally/in dev.
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+
 # API Keys
 # Cloudflare R2 (S3-compatible) — hybrid rendered-video storage: as long as
 # R2 usage tracked in our own DB stays under R2_FREE_TIER_CAP_BYTES, finished
