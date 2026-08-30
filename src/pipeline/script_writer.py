@@ -167,7 +167,13 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
         title = str(data.get("title", "")).strip()
         return title or None
     except Exception as e:
-        logger.warning(f"Daily script topic selection failed: {e}")
+        # error (not warning): this is the actual root cause when a channel's
+        # daily/retry script generation comes up empty — GlitchTip's default
+        # logging integration only turns ERROR+ into an event, so a warning
+        # here would leave every such failure completely invisible in
+        # monitoring, with only the generic SERVICE_UNAVAILABLE_MESSAGE
+        # surfacing to the creator.
+        logger.error(f"Daily script topic selection failed: {e}")
         return None
 
 
@@ -212,7 +218,7 @@ Respond with ONLY the narration text for this section, nothing else — no title
         text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script', cost_sink=cost_sink).strip()
         return text or None
     except Exception as e:
-        logger.warning(f"Daily script part generation failed for part '{part.get('name')}': {e}")
+        logger.error(f"Daily script part generation failed for part '{part.get('name')}': {e}")
         return None
 
 
@@ -239,7 +245,7 @@ def generate_daily_script(
     script just because nobody explicitly typed "French" into its settings.
     """
     if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
-        logger.warning("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
+        logger.error("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
         return None
 
     structure = script_structure or DEFAULT_SCRIPT_STRUCTURE
@@ -288,5 +294,5 @@ def generate_daily_script(
             return None
         return {"title": title, "script_text": script_text, "generation_cost_usd": sum(cost_sink)}
     except Exception as e:
-        logger.warning(f"Daily script generation failed: {e}")
+        logger.error(f"Daily script generation failed: {e}")
         return None
