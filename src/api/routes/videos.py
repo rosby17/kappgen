@@ -12,7 +12,7 @@ from src.db.session import get_db
 from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY
+from src.config import STORAGE_PATH
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
@@ -36,31 +36,26 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     image_style = channel.image_style or {}
     source = image_style.get("source", "library")
     if source in {"ai_generated", "hybrid"}:
-        if not IZIVOICE_API_KEY:
-            raise HTTPException(
-                status_code=503,
-                detail="La génération d’images IA n’est pas configurée sur le serveur.",
-            )
-        # AI image generation (ai33.pro, billed through Izivoice) burns real
-        # credits regardless of the creator's own free-video quota — gated on
-        # having a positive credit balance (or their own Izivoice key), not
-        # just "can render at all", so free-tier usage can't run up the
-        # image-generation bill. Voiceover/TTS is unaffected — it's covered
-        # by the regular free-quota/credit check in user_can_render.
-        from src.utils.billing import get_credit_balance, user_ai_images_enabled
+        # Scene images (unlike thumbnails, which can use a paid
+        # reference-image-conditioned provider) are generated exclusively
+        # through Hugging Face's free-tier FLUX.1-schnell, with a non-billed
+        # local-library fallback if that fails (see images.py's
+        # fetch_or_generate_images / _generate_with_huggingface_flux —
+        # `log_usage(..., 0.0, ...)`, Izivoice's paid image path is never
+        # called for this). The IZIVOICE_API_KEY-configured and
+        # credit-balance checks that used to live here predate that switch
+        # to free-tier generation and were blocking real renders with a
+        # false "needs credits" 402 for creators with an empty balance, even
+        # though this step was never going to touch their balance at all —
+        # seen in production for multiple auto-mode channels in a row.
+        # user_ai_images_enabled stays: unlike the two removed checks, it's
+        # a deliberate tier gate (product decision), not a cost-recovery one.
+        from src.utils.billing import user_ai_images_enabled
         owner = channel.user
-        if not owner:
-            raise HTTPException(status_code=402, detail="La génération d’images IA nécessite des crédits.")
-        if not user_ai_images_enabled(db, owner):
+        if owner and not user_ai_images_enabled(db, owner):
             raise HTTPException(
                 status_code=403,
                 detail="Les fonctionnalités IA ne sont pas incluses dans ton abonnement actuel. Passe à un palier supérieur pour les débloquer, ou choisis une bibliothèque d’images à la place.",
-            )
-        has_own_key = bool(owner.izivoice_api_key_encrypted)
-        if not has_own_key and get_credit_balance(db, owner) <= 0:
-            raise HTTPException(
-                status_code=402,
-                detail="La génération d’images IA nécessite des crédits. Recharge ton solde pour l’utiliser, ou choisis une bibliothèque d’images à la place.",
             )
     if source in {"library", "hybrid"}:
         library_path = str(image_style.get("library_path") or "")
@@ -563,7 +558,16 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
     if not (video.script_text or "").strip() and channel and channel.automation_mode == "auto" and channel.content_type != "music":
         from threading import Thread
         from src.worker.queue_runner import retry_auto_video_script_background
-        video.status = VideoStatus.QUEUED.value
+        # RENDERING, not QUEUED: the render lane's picker claims any 'queued'
+        # row within ~2s of it appearing, but the script isn't written yet —
+        # retry_auto_video_script_background() below runs in the background
+        # and only flips this to QUEUED once it actually has one. Marking it
+        # QUEUED here let the render lane grab it mid-regeneration and crash
+        # on the "script is empty" guard in process_single_queued_video()
+        # (seen in production logs, e.g. video 06856f5a — picked up and
+        # failed twice, seconds after each retry, while the AI call was
+        # still in flight or had already failed silently in the background).
+        video.status = VideoStatus.RENDERING.value
         video.error_message = None
         video.progress_stage = "Régénération du script…"
         video.progress_percent = 0

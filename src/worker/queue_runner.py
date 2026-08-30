@@ -395,9 +395,18 @@ def process_single_queued_video() -> bool:
         if video:
             try:
                 db.refresh(video)
+                # The step that was actually running when this crashed
+                # (e.g. "Génération de la voix et transcription", set by the
+                # last update_progress() call before the exception) — refresh()
+                # above just reloaded it from the last commit. Captured before
+                # the next line overwrites it, and folded into error_message
+                # so a creator sees exactly where it broke ("Échec à l'étape
+                # « ... »") instead of a bare generic failure with no way to
+                # tell an audio problem from an images or subtitles one.
+                last_stage = video.progress_stage or "Démarrage du rendu"
                 video.status = VideoStatus.FAILED.value
                 video.finished_at = datetime.utcnow()
-                video.error_message = _client_facing_error_message(e)
+                video.error_message = f"Échec à l'étape « {last_stage} » : {_client_facing_error_message(e)}"
                 video.progress_stage = "Échec du rendu"
                 db.commit()
             except Exception as db_err:

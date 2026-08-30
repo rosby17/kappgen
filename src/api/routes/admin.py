@@ -455,6 +455,28 @@ def admin_community_library_image_file(folder_id: str, filename: str, admin: Use
     return FileResponse(candidate)
 
 
+@router.delete("/community-library/{folder_id}/images/{filename}")
+def admin_delete_community_library_image(folder_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Removes one specific image an admin judges unfit for its niche/the
+    community, without flagging (or otherwise touching) the whole channel's
+    folder — most images from an auto-shared channel are perfectly fine, so
+    the fix for one bad one is deleting that one, not blocking everything
+    else the channel has already contributed or will contribute."""
+    from src.config import STORAGE_PATH
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.id == folder_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Dossier introuvable.")
+    library_dir = (STORAGE_PATH / "channels" / folder.channel_id / "library").resolve()
+    # Same path-traversal guard as the image-serving route above.
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image introuvable.")
+    candidate.unlink()
+    folder.image_count = max(0, folder.image_count - 1)
+    db.commit()
+    return {"deleted": True, "image_count": folder.image_count}
+
+
 class CommunityLibraryStatusPayload(BaseModel):
     status: str  # "pending" | "approved" | "flagged"
 
