@@ -404,6 +404,73 @@ def admin_list_orders(admin: User = Depends(get_current_admin), db: Session = De
 # the union of every folder here with status="approved" for that niche —
 # approving a second folder into a niche IS the merge, no files are copied.
 
+# Mirrors the frontend's NICHE_OPTIONS (App.jsx) — kept as a separate literal
+# rather than a shared import since the two projects don't share a package;
+# used only to make sure every niche shows up as a browsable folder in the
+# admin overview below even before anyone has uploaded anything into it.
+KNOWN_NICHES = [
+    "Philosophie", "Philosophie Stoïcienne", "Philosophie de Machiavel", "Philosophie de Napoleon Hill",
+    "Stoïcisme", "Spiritualité", "Prière", "Méditation", "Bouddhisme", "Islam",
+    "Mythologie", "Histoires Antiques", "Histoire Africaine", "Histoire Européenne", "Histoire",
+    "Développement Personnel", "Motivation", "Récits Captivants", "Psychologie", "Finance", "Business",
+    "Santé & Bien-être", "Football", "Sport", "Science", "Faits Divers", "True Crime", "Voyage", "Cuisine",
+]
+
+
+@router.get("/community-library/overview")
+def admin_community_library_overview(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Full admin oversight of every user's channel image library, organized
+    niche -> user -> channel — independent of whether a creator opted into
+    community sharing (CommunityLibraryFolder only covers those). Every known
+    niche always appears, even empty, so the admin can browse/organize before
+    a single image has landed in it. Existing CommunityLibraryFolder rows
+    (if any) are joined in to surface each folder's sharing status."""
+    shared_by_channel = {f.channel_id: f for f in db.query(CommunityLibraryFolder).all()}
+
+    niches: dict = {n: {"niche": n, "total_images": 0, "users": {}} for n in KNOWN_NICHES}
+    grand_total = 0
+
+    channels_with_library = (
+        db.query(Channel)
+        .filter(Channel.image_style.isnot(None))
+        .all()
+    )
+    for channel in channels_with_library:
+        count = int((channel.image_style or {}).get("library_image_count") or 0)
+        if count <= 0:
+            continue
+        grand_total += count
+        niche = channel.niche or "Sans niche"
+        bucket = niches.setdefault(niche, {"niche": niche, "total_images": 0, "users": {}})
+        bucket["total_images"] += count
+
+        owner = channel.user
+        user_key = channel.user_id or "unknown"
+        user_bucket = bucket["users"].setdefault(user_key, {
+            "user_id": channel.user_id,
+            "user_email": owner.email if owner else "Utilisateur supprimé",
+            "total_images": 0,
+            "folders": [],
+        })
+        user_bucket["total_images"] += count
+        shared = shared_by_channel.get(channel.id)
+        user_bucket["folders"].append({
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "image_count": count,
+            "community_folder_id": shared.id if shared else None,
+            "share_status": shared.status if shared else "not_shared",
+        })
+
+    niche_list = []
+    for bucket in niches.values():
+        bucket["users"] = sorted(bucket["users"].values(), key=lambda u: u["total_images"], reverse=True)
+        niche_list.append(bucket)
+    niche_list.sort(key=lambda n: (-n["total_images"], n["niche"]))
+
+    return {"total_images": grand_total, "niches": niche_list}
+
+
 @router.get("/community-library")
 def admin_list_community_library(
     niche: Optional[str] = None,

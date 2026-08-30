@@ -645,6 +645,16 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         if "stoic sculpture style" in style_prompt_lower and not niche_matches_stoic:
             image_style["style_prompt"] = ""
         channel.image_style = image_style
+        # The wizard's general save can flip share_with_community on its own,
+        # without going through a library upload — _sync_community_library_folder
+        # was only ever called from the upload routes, so toggling "share"
+        # here (the common path: sharing a library uploaded earlier) silently
+        # updated the flag but never created the admin-visible curation row.
+        _sync_community_library_folder(
+            db, channel,
+            bool(image_style.get("share_with_community")),
+            int(image_style.get("library_image_count") or 0),
+        )
     if payload.effects_config is not None:
         channel.effects_config = payload.effects_config.model_dump()
     if payload.automation_mode is not None:
