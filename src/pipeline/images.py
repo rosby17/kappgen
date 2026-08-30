@@ -20,7 +20,7 @@ def _izivoice_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
 
 
-def _approved_community_library_dirs(niche: Optional[str]) -> List[Path]:
+def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
     """Every other channel's own image library that's been opted into the
     community-sharing program (Channel.image_style.share_with_community) and
     approved by an admin for this niche — read live off disk, never copied.
@@ -32,16 +32,31 @@ def _approved_community_library_dirs(niche: Optional[str]) -> List[Path]:
     if not niche:
         return []
     from src.db.session import SessionLocal
-    from src.db.models import CommunityLibraryFolder
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement
     from src.config import STORAGE_PATH
     db = SessionLocal()
     try:
-        folders = (
-            db.query(CommunityLibraryFolder)
-            .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche))
-            .all()
-        )
-        return [STORAGE_PATH / "channels" / f.channel_id / "library" for f in folders]
+        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status == "approved").all()
+        channel_ids = [folder.channel_id for folder in folders]
+        placements = {
+            (row.channel_id, row.filename): row.niche
+            for row in db.query(CommunityLibraryImagePlacement).filter(
+                CommunityLibraryImagePlacement.channel_id.in_(channel_ids)
+            ).all()
+        } if channel_ids else {}
+        files: List[Path] = []
+        extensions = {".jpg", ".jpeg", ".png", ".webp"}
+        for folder in folders:
+            library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
+            if not library_dir.is_dir():
+                continue
+            files.extend(
+                path for path in library_dir.iterdir()
+                if path.is_file()
+                and path.suffix.lower() in extensions
+                and placements.get((folder.channel_id, path.name), folder.niche).casefold() == niche.casefold()
+            )
+        return files
     finally:
         db.close()
 
@@ -481,7 +496,7 @@ def fetch_or_generate_images(
                 fallback = get_image_pool(
                     output_dir, 1,
                     custom_library_path=library_path,
-                    additional_library_dirs=_approved_community_library_dirs(niche),
+                    additional_library_files=_approved_community_library_files(niche),
                 )
                 return (fallback[0] if fallback else None), False
 
@@ -546,12 +561,12 @@ def fetch_or_generate_images(
         # read live off disk rather than copied. validate_channel_visual_source
         # (videos.py) already confirmed at least one approved folder exists for
         # this niche before the render was ever queued.
-        community_dirs = _approved_community_library_dirs(niche)
-        logger.info(f"Using community library for niche '{niche}': {len(community_dirs)} folder(s).")
+        community_files = _approved_community_library_files(niche)
+        logger.info(f"Using community library for niche '{niche}': {len(community_files)} image(s).")
         return get_image_pool(
             output_dir,
             len(prompts),
-            additional_library_dirs=community_dirs,
+            additional_library_files=community_files,
             require_custom_library=True,
         )
 

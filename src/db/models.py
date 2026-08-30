@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer, Boolean
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship, backref
 from src.db.session import Base
 from src.models.project import VideoStatus
@@ -781,6 +781,21 @@ class CommunityLibraryFolder(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class CommunityLibraryImagePlacement(Base):
+    """Admin-only virtual classification for individual collaborative images.
+    The source file remains in its channel library; only its collaborative
+    niche changes."""
+    __tablename__ = "community_library_image_placements"
+    __table_args__ = (UniqueConstraint("channel_id", "filename", name="uq_community_image_channel_filename"),)
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, index=True)
+    filename = Column(String(512), nullable=False)
+    niche = Column(String(255), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class CreditPot(Base):

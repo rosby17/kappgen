@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import Channel, Video, User
+from src.db.models import Channel, Video, User, CommunityLibraryFolder, CommunityLibraryImagePlacement
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH
@@ -76,11 +76,18 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
                 ),
             )
     if source == "community":
-        from src.db.models import CommunityLibraryFolder
         has_approved_folder = db.query(CommunityLibraryFolder).filter(
             CommunityLibraryFolder.status == "approved",
             CommunityLibraryFolder.niche.ilike(channel.niche or ""),
         ).first() is not None
+        if not has_approved_folder:
+            has_approved_folder = db.query(CommunityLibraryImagePlacement).join(
+                CommunityLibraryFolder,
+                CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
+            ).filter(
+                CommunityLibraryFolder.status == "approved",
+                CommunityLibraryImagePlacement.niche.ilike(channel.niche or ""),
+            ).first() is not None
         if not has_approved_folder:
             raise HTTPException(
                 status_code=400,

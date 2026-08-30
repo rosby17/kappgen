@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, HuggingFaceAccount
+from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
 from src.utils.auth import get_current_admin
 from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
@@ -426,6 +426,9 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
     a single image has landed in it. Existing CommunityLibraryFolder rows
     (if any) are joined in to surface each folder's sharing status."""
     shared_by_channel = {f.channel_id: f for f in db.query(CommunityLibraryFolder).all()}
+    placements_by_channel: dict[str, list[CommunityLibraryImagePlacement]] = {}
+    for placement in db.query(CommunityLibraryImagePlacement).all():
+        placements_by_channel.setdefault(placement.channel_id, []).append(placement)
 
     niches: dict = {n: {"niche": n, "total_images": 0, "users": {}} for n in KNOWN_NICHES}
     grand_total = 0
@@ -440,27 +443,35 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
         if count <= 0:
             continue
         grand_total += count
-        niche = channel.niche or "Sans niche"
-        bucket = niches.setdefault(niche, {"niche": niche, "total_images": 0, "users": {}})
-        bucket["total_images"] += count
+        default_niche = channel.niche or "Sans niche"
+        niche_counts: dict[str, int] = {}
+        placements = placements_by_channel.get(channel.id, [])
+        for placement in placements:
+            niche_counts[placement.niche] = niche_counts.get(placement.niche, 0) + 1
+        default_count = max(0, count - len(placements))
+        if default_count:
+            niche_counts[default_niche] = niche_counts.get(default_niche, 0) + default_count
 
         owner = channel.user
-        user_key = channel.user_id or "unknown"
-        user_bucket = bucket["users"].setdefault(user_key, {
-            "user_id": channel.user_id,
-            "user_email": owner.email if owner else "Utilisateur supprimé",
-            "total_images": 0,
-            "folders": [],
-        })
-        user_bucket["total_images"] += count
         shared = shared_by_channel.get(channel.id)
-        user_bucket["folders"].append({
-            "channel_id": channel.id,
-            "channel_name": channel.name,
-            "image_count": count,
-            "community_folder_id": shared.id if shared else None,
-            "share_status": shared.status if shared else "not_shared",
-        })
+        for niche, niche_count in niche_counts.items():
+            bucket = niches.setdefault(niche, {"niche": niche, "total_images": 0, "users": {}})
+            bucket["total_images"] += niche_count
+            user_key = channel.user_id or "unknown"
+            user_bucket = bucket["users"].setdefault(user_key, {
+                "user_id": channel.user_id,
+                "user_email": owner.email if owner else "Utilisateur supprimé",
+                "total_images": 0,
+                "folders": [],
+            })
+            user_bucket["total_images"] += niche_count
+            user_bucket["folders"].append({
+                "channel_id": channel.id,
+                "channel_name": channel.name,
+                "image_count": niche_count,
+                "community_folder_id": shared.id if shared else None,
+                "share_status": shared.status if shared else "not_shared",
+            })
 
     niche_list = []
     for bucket in niches.values():
@@ -539,6 +550,10 @@ def admin_delete_community_library_image(folder_id: str, filename: str, admin: U
     if candidate.parent != library_dir or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Image introuvable.")
     candidate.unlink()
+    db.query(CommunityLibraryImagePlacement).filter(
+        CommunityLibraryImagePlacement.channel_id == folder.channel_id,
+        CommunityLibraryImagePlacement.filename == filename,
+    ).delete(synchronize_session=False)
     folder.image_count = max(0, folder.image_count - 1)
     db.commit()
     return {"deleted": True, "image_count": folder.image_count}
@@ -572,7 +587,14 @@ def admin_set_community_library_status(
 # independent of what the creator picked — final say stays with the admin.
 
 @router.get("/channel-library/{channel_id}/images")
-def admin_channel_library_images(channel_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+def admin_channel_library_images(
+    channel_id: str,
+    niche: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 60,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
     from src.config import STORAGE_PATH
     from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -580,12 +602,31 @@ def admin_channel_library_images(channel_id: str, admin: User = Depends(get_curr
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
     library_dir = STORAGE_PATH / "channels" / channel_id / "library"
     if not library_dir.is_dir():
-        return {"filenames": []}
-    filenames = sorted(
+        return {"filenames": [], "total": 0, "offset": max(0, offset), "has_more": False}
+    raw_filenames = sorted(
         item.name for item in library_dir.iterdir()
         if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS
-    )[:24]
-    return {"filenames": filenames}
+    )
+    placements = {
+        row.filename: row.niche
+        for row in db.query(CommunityLibraryImagePlacement).filter(
+            CommunityLibraryImagePlacement.channel_id == channel_id
+        ).all()
+    }
+    default_niche = channel.niche or "Sans niche"
+    all_filenames = [
+        filename for filename in raw_filenames
+        if not niche or placements.get(filename, default_niche) == niche
+    ]
+    offset = max(0, offset)
+    limit = max(1, min(limit, 120))
+    filenames = all_filenames[offset:offset + limit]
+    return {
+        "filenames": filenames,
+        "total": len(all_filenames),
+        "offset": offset,
+        "has_more": offset + len(filenames) < len(all_filenames),
+    }
 
 
 @router.get("/channel-library/{channel_id}/images/{filename}")
@@ -613,6 +654,10 @@ def admin_delete_channel_library_image(channel_id: str, filename: str, admin: Us
     if candidate.parent != library_dir or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Image introuvable.")
     candidate.unlink()
+    db.query(CommunityLibraryImagePlacement).filter(
+        CommunityLibraryImagePlacement.channel_id == channel_id,
+        CommunityLibraryImagePlacement.filename == filename,
+    ).delete(synchronize_session=False)
     image_style = dict(channel.image_style or {})
     new_count = max(0, int(image_style.get("library_image_count") or 0) - 1)
     image_style["library_image_count"] = new_count
@@ -626,6 +671,54 @@ def admin_delete_channel_library_image(channel_id: str, filename: str, admin: Us
 
 class AdminForceSharePayload(BaseModel):
     status: str = "approved"  # what to set the folder's curation status to
+
+
+class AdminMoveChannelLibraryPayload(BaseModel):
+    niche: str
+    filenames: list[str]
+
+
+@router.put("/channel-library/{channel_id}/niche")
+def admin_move_channel_library(
+    channel_id: str,
+    payload: AdminMoveChannelLibraryPayload,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Reclassifies selected collaborative images without renaming the
+    channel, changing its production niche, or moving physical files."""
+    target_niche = payload.niche.strip()
+    if target_niche not in KNOWN_NICHES:
+        raise HTTPException(status_code=400, detail="Niche de destination invalide.")
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+
+    filenames = list(dict.fromkeys(name.strip() for name in payload.filenames if name.strip()))
+    if not filenames or len(filenames) > 5000:
+        raise HTTPException(status_code=400, detail="Sélectionnez entre 1 et 5 000 images.")
+    from src.config import STORAGE_PATH
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    for filename in filenames:
+        candidate = (library_dir / filename).resolve()
+        if candidate.parent != library_dir or not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f"Image introuvable : {filename}")
+        placement = db.query(CommunityLibraryImagePlacement).filter(
+            CommunityLibraryImagePlacement.channel_id == channel_id,
+            CommunityLibraryImagePlacement.filename == filename,
+        ).first()
+        if placement:
+            placement.niche = target_niche
+        else:
+            db.add(CommunityLibraryImagePlacement(channel_id=channel_id, filename=filename, niche=target_niche))
+    db.commit()
+    return {
+        "moved": True,
+        "channel_id": channel.id,
+        "channel_name": channel.name,
+        "niche": target_niche,
+        "image_count": len(filenames),
+    }
 
 
 @router.post("/channel-library/{channel_id}/force-share")

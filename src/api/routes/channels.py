@@ -11,7 +11,7 @@ import time
 import uuid
 import httpx
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, Voice
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL
 from fastapi.responses import RedirectResponse
@@ -585,10 +585,27 @@ def community_library_availability(niche: str, db: Session = Depends(get_db)):
         .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche))
         .all()
     )
+    moved_count = db.query(CommunityLibraryImagePlacement).join(
+        CommunityLibraryFolder,
+        CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
+    ).filter(
+        CommunityLibraryFolder.status == "approved",
+        CommunityLibraryImagePlacement.niche.ilike(niche),
+        ~CommunityLibraryFolder.niche.ilike(niche),
+    ).count()
+    moved_out_count = db.query(CommunityLibraryImagePlacement).join(
+        CommunityLibraryFolder,
+        CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
+    ).filter(
+        CommunityLibraryFolder.status == "approved",
+        CommunityLibraryFolder.niche.ilike(niche),
+        ~CommunityLibraryImagePlacement.niche.ilike(niche),
+    ).count()
+    image_count = max(0, sum(f.image_count for f in folders) - moved_out_count) + moved_count
     return {
-        "available": len(folders) > 0,
+        "available": image_count > 0,
         "folder_count": len(folders),
-        "image_count": sum(f.image_count for f in folders),
+        "image_count": image_count,
     }
 
 @router.put("/{channel_id}")

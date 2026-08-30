@@ -113,6 +113,7 @@ def get_image_pool(
     custom_library_path: str = None,
     require_custom_library: bool = False,
     additional_library_dirs: Optional[List[Path]] = None,
+    additional_library_files: Optional[List[Path]] = None,
 ) -> List[Path]:
     """
     Retrieves available images from (in priority order): the client-provided local
@@ -148,6 +149,10 @@ def get_image_pool(
     for extra_dir in (additional_library_dirs or []):
         if extra_dir.is_dir():
             existing_images.extend(_filter_landscape([f for f in extra_dir.iterdir() if f.suffix.lower() in image_extensions]))
+    existing_images.extend(_filter_landscape([
+        path for path in (additional_library_files or [])
+        if path.is_file() and path.suffix.lower() in image_extensions
+    ]))
 
     if require_custom_library and not existing_images:
         raise ValueError(
