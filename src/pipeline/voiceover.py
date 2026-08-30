@@ -74,11 +74,20 @@ def _poll_task(task_id: str, client: httpx.Client, api_key: Optional[str] = None
     """Polls GET /tasks/{task_id} until status is 'done' or 'error' (or timeout).
     Transient 5xx/429 responses (observed intermittently from Izivoice) are
     retried instead of aborting the whole transcription — the underlying task
-    is usually still processing fine server-side."""
+    is usually still processing fine server-side.
+
+    Workaround for an Izivoice API bug (reported upstream): POST
+    /speech-to-text now returns task IDs prefixed "selfhosted_stt_" for its
+    self-hosted transcription backend, but GET /tasks/{id} rejects that exact
+    ID with a 400 "Invalid ID format" — it only recognizes the ID with that
+    prefix stripped. Until fixed upstream, poll with the prefix stripped
+    whenever present; every other task type (TTS, image generation) is
+    unaffected since only speech-to-text ever returns this prefix."""
+    poll_id = task_id[len("selfhosted_stt_"):] if task_id.startswith("selfhosted_stt_") else task_id
     elapsed = 0.0
     while elapsed < TASK_POLL_TIMEOUT_SECONDS:
         try:
-            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(api_key), timeout=30.0)
+            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{poll_id}", headers=_izivoice_headers(api_key), timeout=30.0)
             if resp.status_code == 429 or resp.status_code >= 500:
                 logger.warning(f"Izivoice task poll for {task_id} returned {resp.status_code}, retrying...")
                 time.sleep(TASK_POLL_INTERVAL_SECONDS)
