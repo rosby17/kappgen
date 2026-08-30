@@ -294,6 +294,33 @@ def clone_voice_status(job_id: str, current_user: User = Depends(get_current_use
     return job.to_dict()
 
 
+@router.get("/voice/clone/mine")
+def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every voice this user has successfully cloned, ever — read from
+    VoiceCloneJob (server-side, permanent) instead of the "Mes voix clonées"
+    tab's old localStorage-only tracking (per-browser, wiped by a cleared
+    cache or just never present on a different device/tab), which is why a
+    creator's own cloned voices kept "disappearing" even though they still
+    worked fine for actually generating videos — the channel's voice_id was
+    always saved server-side, only the picker's memory of "this exists" was
+    local and fragile. One entry per voice_id (a creator can re-clone the
+    same sample under a new job; only the latest such job is shown)."""
+    jobs = (
+        db.query(VoiceCloneJob)
+        .filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.status == "done", VoiceCloneJob.voice_id.isnot(None))
+        .order_by(VoiceCloneJob.created_at.desc())
+        .all()
+    )
+    seen = set()
+    voices = []
+    for job in jobs:
+        if job.voice_id in seen:
+            continue
+        seen.add(job.voice_id)
+        voices.append({"id": job.voice_id, "name": job.name, "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None})
+    return {"voices": voices}
+
+
 @router.get("/voice/{voice_id}/preview")
 def get_voice_preview(voice_id: str, current_user: User = Depends(get_current_user)):
     """Serves the short sample generated right after cloning (see
