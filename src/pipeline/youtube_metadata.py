@@ -45,6 +45,19 @@ def generate_metadata(video, channel) -> dict:
     fallback = _fallback_metadata(video, channel)
     if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
         return fallback
+    # A blank/near-empty script_text (e.g. a manual "text" submission with
+    # nothing pasted in, or an edge case upstream) must never reach the
+    # prompt below — sent an empty "Script: " block, Claude reasonably
+    # answers as if talking to the user ("no script was provided, please
+    # paste it..."), and since that's still well-formed JSON, generate_text's
+    # own error handling never catches it: it sails through as if it were a
+    # real title/description. Caught exactly this in production (a video
+    # published with the title "Script manquant : impossible de générer la
+    # publication" — literally Claude's refusal, verbatim). The safe
+    # fallback below never has this failure mode.
+    if len((video.script_text or "").strip()) < 20:
+        logger.warning(f"YouTube metadata generation skipped for video {getattr(video, 'id', '?')}: script_text is blank/too short, using safe fallback.")
+        return fallback
     try:
         script = (video.script_text or "")[:12000]
         prompt = f"""Tu es l'Agent éditorial KappGen. Prépare la publication YouTube de cette vidéo.

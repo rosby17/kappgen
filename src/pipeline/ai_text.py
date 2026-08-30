@@ -41,7 +41,19 @@ def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dic
     kwargs = {"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
     if enable_web_search:
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+    # Retried once, in-process, before ever falling through to fal.ai/OpenAI:
+    # an empty response (no text block at all — no exception, no error
+    # status, just nothing to read) has been observed in production for a
+    # specific recurring prompt shape (a long "don't repeat these past
+    # titles" list on a health-niche script) — a one-off hiccup on Anthropic's
+    # end that a plain retry of the exact same request has cleared every
+    # time it's been seen, rather than a real, repeatable rejection of the
+    # prompt's content. Logs stop_reason on the empty attempt for whichever
+    # case isn't a one-off shows up later.
     response = client.messages.create(**kwargs)
+    if not any(block.type == "text" for block in response.content):
+        logger.warning(f"Anthropic returned no text content (stop_reason={response.stop_reason!r}, operation={usage_ctx.get('operation')}) — retrying once.")
+        response = client.messages.create(**kwargs)
     in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
     cost_usd = estimate_anthropic_cost(in_tok, out_tok)
     # Web searches themselves are billed separately by Anthropic per-use;

@@ -127,11 +127,23 @@ def _pick_topic(
     # they want to emulate — treated as "study this pattern", not "avoid it".
     examples_block = ""
     if topic_examples and topic_examples.strip():
-        examples_lines = "\n".join(f"- {line.strip()}" for line in topic_examples.splitlines() if line.strip())
+        # Creators often paste a whole channel/search-results page here
+        # instead of a clean list — view counts, relative dates, timestamps,
+        # UI chrome mixed in with the actual titles. That's fine and useful
+        # on purpose: view counts are a real virality signal, so Claude is
+        # told to read the mess itself and use it, rather than us silently
+        # stripping it out first (an earlier version tried that and just
+        # threw the signal away along with the noise). Still hard-capped —
+        # a 40KB+ paste seen in production overwhelmed the prompt outright
+        # regardless of what's in it — generous enough for a full top-40
+        # list with metadata on every line.
+        raw_examples = topic_examples.strip()[:6000]
         examples_block = f"""
-Here are example titles/topics that show exactly the kind of angle, specificity, and hook style this channel's audience responds to (these are either the creator's own best videos, or titles from a channel they want to emulate — study the pattern, don't just reuse the surface theme):
-{examples_lines}
-"""
+The creator pasted the following as inspiration — likely a raw copy-paste off a channel page (their own, or a competitor's), so it may mix real video titles with view counts, relative dates, timestamps, or UI text ("Voir plus", etc.) rather than being a clean list:
+\"\"\"
+{raw_examples}
+\"\"\"
+Read past the formatting noise yourself: identify the actual titles, and where view counts are present, treat higher-viewed ones as the strongest evidence of what this audience responds to — study THOSE for angle, specificity, and hook style above the rest, don't just average across everything."""
     web_search_line = (
         "This channel covers current events/trends — use web search to find something genuinely happening right now (recent news, a real trending story, an actual event) and build the topic around it, instead of a generic evergreen angle."
         if use_web_trends else ""
@@ -147,15 +159,28 @@ Titles of videos already published on this channel (never repeat these topics or
 Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet{" — matching the style and specificity of the examples above" if examples_block else ""}. Respond in {language} with ONLY this JSON object, no other text:
 {{"title": "short punchy video title"}}"""
     try:
+        # 300 was too tight for a channel with a long "don't repeat these
+        # past titles" list (recent_titles up to 20 entries) — seen in
+        # production hitting stop_reason="max_tokens" with zero text content
+        # at all (the budget ran out before any output text, not mid-JSON),
+        # which _anthropic_complete correctly treats as a failure rather than
+        # silently returning truncated JSON. 1000 for every call, not just
+        # web-search ones, is still a negligible cost for a one-line title.
         raw_text = generate_text(
-            instruction, max_tokens=1000 if use_web_trends else 300, model=SCRIPT_WRITER_MODEL,
+            instruction, max_tokens=1000, model=SCRIPT_WRITER_MODEL,
             operation='script_topic', cost_sink=cost_sink, enable_web_search=use_web_trends,
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
         return title or None
     except Exception as e:
-        logger.warning(f"Daily script topic selection failed: {e}")
+        # error (not warning): this is the actual root cause when a channel's
+        # daily/retry script generation comes up empty — GlitchTip's default
+        # logging integration only turns ERROR+ into an event, so a warning
+        # here would leave every such failure completely invisible in
+        # monitoring, with only the generic SERVICE_UNAVAILABLE_MESSAGE
+        # surfacing to the creator.
+        logger.error(f"Daily script topic selection failed: {e}")
         return None
 
 
@@ -200,7 +225,7 @@ Respond with ONLY the narration text for this section, nothing else — no title
         text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script', cost_sink=cost_sink).strip()
         return text or None
     except Exception as e:
-        logger.warning(f"Daily script part generation failed for part '{part.get('name')}': {e}")
+        logger.error(f"Daily script part generation failed for part '{part.get('name')}': {e}")
         return None
 
 
@@ -227,7 +252,7 @@ def generate_daily_script(
     script just because nobody explicitly typed "French" into its settings.
     """
     if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
-        logger.warning("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
+        logger.error("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
         return None
 
     structure = script_structure or DEFAULT_SCRIPT_STRUCTURE
@@ -264,9 +289,17 @@ def generate_daily_script(
             tail = part_text[-600:]
 
         script_text = " ".join(written_parts).strip()
-        if not script_text:
+        # A part_text that's technically non-empty (passes the guard above)
+        # but collapses to almost nothing after stripping — a stray newline,
+        # a couple of words — would otherwise sail through as a "successful"
+        # script and render into a few seconds of near-silent video with a
+        # metadata step improvising a title off of it afterward. Treated the
+        # same as a fully empty result: a real narration part is always at
+        # least a full sentence or two, comfortably over this floor.
+        if len(script_text) < 100:
+            logger.warning(f"Daily script generation: final script only {len(script_text)} char(s) long, treating as a failure.")
             return None
         return {"title": title, "script_text": script_text, "generation_cost_usd": sum(cost_sink)}
     except Exception as e:
-        logger.warning(f"Daily script generation failed: {e}")
+        logger.error(f"Daily script generation failed: {e}")
         return None

@@ -27,9 +27,14 @@ from src.pipeline.music import generate_music_izivoice, _generate_synthetic_fall
 from src.pipeline.ai_text import generate_text
 from src.utils.ffmpeg_runner import run_ffmpeg, get_audio_duration
 from src.utils.logger import logger
+from src.config import ASSETS_PATH
 
 WIDTH, HEIGHT = 1920, 1080
 XFADE_DURATION = 1.5  # seconds of overlap between consecutive background images
+# Same asset + look as the narration pipeline's watermark (see WATERMARK_PATH
+# in assembler.py) — kept as a separate constant since this module doesn't
+# import assembler.py at all, not because the asset itself differs.
+WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 
 
 def pick_music_video_title(style_prompt: str, title_examples: Optional[str], recent_titles: List[str]) -> str:
@@ -158,21 +163,35 @@ def build_background_video(image_paths: List[Path], target_duration_seconds: flo
     return output_path
 
 
-def compose_final_video(background_video: Path, final_audio: Path, output_path: Path) -> Path:
+def compose_final_video(background_video: Path, final_audio: Path, output_path: Path, watermark_enabled: bool = True) -> Path:
     """Overlays an audio-reactive waveform strip over the background video
     and muxes in the final audio track — the one visual element that makes
     a plain looping background feel like a real "music video" instead of a
-    static image with sound playing behind it."""
+    static image with sound playing behind it. Also burns in the free-tier
+    KappGen watermark unless the creator has ever paid for credits — same
+    entitlement rule and look (scale=900:-1, 0.22 opacity, dead center) as
+    the narration pipeline's own watermark (assembler.py); this pipeline
+    never shared that code path, so without this a music video would have
+    rendered watermark-free regardless of whether the creator ever paid."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    has_watermark = watermark_enabled and WATERMARK_PATH.exists()
     filter_complex = (
         f"[1:a]showwaves=s={WIDTH}x260:mode=cline:colors=0x00c2ff|0x38d0ff:scale=sqrt,format=yuva420p,"
         f"colorchannelmixer=aa=0.85[wave];"
-        f"[0:v][wave]overlay=(W-w)/2:H-h-70:shortest=1[vout]"
+        f"[0:v][wave]overlay=(W-w)/2:H-h-70:shortest=1[vbase]"
     )
+    inputs = ["-i", str(background_video), "-i", str(final_audio)]
+    if has_watermark:
+        inputs += ["-i", str(WATERMARK_PATH)]
+        filter_complex += (
+            ";[2:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.22[wm];"
+            "[vbase][wm]overlay=(W-w)/2:(H-h)/2[vout]"
+        )
+    else:
+        filter_complex += ";[vbase]copy[vout]"
     run_ffmpeg([
         "ffmpeg", "-y",
-        "-i", str(background_video),
-        "-i", str(final_audio),
+        *inputs,
         "-filter_complex", filter_complex,
         "-map", "[vout]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "medium", "-crf", "22", "-pix_fmt", "yuv420p",
@@ -191,6 +210,7 @@ def render_music_video(
     niche: str,
     output_dir: Path,
     progress_callback=None,
+    watermark_enabled: bool = True,
 ) -> Tuple[Path, int]:
     """Main entry point, called from the worker (see queue_runner.py). Returns
     (output_mp4, tracks_generated) — tracks_generated feeds the single
@@ -226,7 +246,7 @@ def render_music_video(
     background_video = build_background_video(image_paths, target_duration_seconds, output_dir / "background.mp4")
 
     progress("Assemblage final", 90)
-    output_mp4 = compose_final_video(background_video, final_audio, output_dir / "output.mp4")
+    output_mp4 = compose_final_video(background_video, final_audio, output_dir / "output.mp4", watermark_enabled=watermark_enabled)
 
     progress("Vidéo prête", 100)
     return output_mp4, tracks_generated

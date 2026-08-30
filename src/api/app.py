@@ -11,8 +11,11 @@ if str(BASE_DIR) not in sys.path:
 
 from src.config import STORAGE_PATH
 from src.db.session import init_db
+from src.utils.error_tracking import init_error_tracking
 from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin
 from src.utils.auth import get_current_admin
+
+init_error_tracking("api")
 
 app = FastAPI(
     title="KappGen SaaS API",

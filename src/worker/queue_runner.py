@@ -209,6 +209,13 @@ def process_single_queued_video() -> bool:
                 video.progress_percent = percent
                 db.commit()
 
+            # Same absolute rule as _channel_config_for_render for narration
+            # videos: this pipeline has no effects_config/watermark_enabled
+            # concept of its own, so entitlement is checked directly here
+            # rather than trusting any stored flag.
+            from src.utils.billing import user_has_purchased_credits
+            watermark_enabled = not user_has_purchased_credits(db, channel.user)
+
             music_config = channel.music_channel_config or {}
             output_mp4, tracks_generated = render_music_video(
                 style_prompt=music_config.get("style_prompt") or "",
@@ -218,6 +225,7 @@ def process_single_queued_video() -> bool:
                 niche=channel.niche,
                 output_dir=video_dir,
                 progress_callback=update_progress,
+                watermark_enabled=watermark_enabled,
             )
 
             try:
@@ -268,6 +276,16 @@ def process_single_queued_video() -> bool:
                 pre_audio_path = p
         if video.input_type == "audio" and pre_audio_path is None:
             raise ValueError("Le fichier audio source est introuvable sur le serveur. Veuillez créer une nouvelle vidéo et le renvoyer.")
+        # Final backstop, independent of how this row ended up queued: a
+        # text-input video with no real script would otherwise render
+        # "successfully" into a few seconds of near-silent audio, with the
+        # post-render metadata step then improvising a title describing the
+        # missing content (the exact "Script manquant..." videos seen in
+        # production). generate_daily_script and submit_video_subject both
+        # already reject this upstream — this is the last line of defense
+        # for any path that doesn't, known or not.
+        if video.input_type == "text" and len((video.script_text or "").strip()) < 40:
+            raise ValueError("Le script de cette vidéo est vide ou trop court pour générer un rendu.")
 
         # Execute render pipeline
         def update_progress(stage: str, percent: int):
@@ -377,9 +395,18 @@ def process_single_queued_video() -> bool:
         if video:
             try:
                 db.refresh(video)
+                # The step that was actually running when this crashed
+                # (e.g. "Génération de la voix et transcription", set by the
+                # last update_progress() call before the exception) — refresh()
+                # above just reloaded it from the last commit. Captured before
+                # the next line overwrites it, and folded into error_message
+                # so a creator sees exactly where it broke ("Échec à l'étape
+                # « ... »") instead of a bare generic failure with no way to
+                # tell an audio problem from an images or subtitles one.
+                last_stage = video.progress_stage or "Démarrage du rendu"
                 video.status = VideoStatus.FAILED.value
                 video.finished_at = datetime.utcnow()
-                video.error_message = _client_facing_error_message(e)
+                video.error_message = f"Échec à l'étape « {last_stage} » : {_client_facing_error_message(e)}"
                 video.progress_stage = "Échec du rendu"
                 db.commit()
             except Exception as db_err:
@@ -1120,6 +1147,97 @@ def generate_and_queue_music_video_background(channel_id: str):
         db.close()
 
 
+def retry_auto_video_script_background(video_id: str):
+    """Regenerates the script for an existing Video that failed with none at
+    all (see the "no script" branch of retry_video in api/routes/videos.py),
+    instead of the plain retry path re-queuing it as-is — which would just
+    render the empty script_text "successfully" into a near-silent few-second
+    video with a placeholder title, rather than actually retrying what
+    failed. Runs on its own session/thread for the same reason
+    generate_and_queue_auto_video_background does: script generation makes
+    several sequential Claude calls and can run past a request timeout."""
+    from src.pipeline.script_writer import generate_daily_script
+    from src.api.routes.videos import MAX_VIDEO_DURATION_SECONDS
+
+    db = SessionLocal()
+    try:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if not video:
+            return
+        channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+        owner = channel.user if channel else None
+        if not channel or not owner:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+            video.progress_stage = "Échec"
+            db.commit()
+            return
+
+        recent_titles = [
+            (v.script_text or "").split("\n")[0][:120]
+            for v in (
+                db.query(Video)
+                .filter(Video.channel_id == channel.id, Video.id != video.id)
+                .order_by(Video.created_at.desc())
+                .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+                .all()
+            )
+        ]
+        combined_style_prompt = "\n".join(filter(None, [
+            f"What this channel is about: {channel.description}" if channel.description else None,
+            channel.automation_style_prompt,
+        ])) or None
+
+        result = generate_daily_script(
+            niche=channel.niche,
+            recent_titles=recent_titles,
+            style_prompt=combined_style_prompt,
+            script_structure=channel.script_structure,
+            default_language="French" if (owner.locale or "fr") == "fr" else "English",
+            topic_examples=channel.topic_examples,
+            use_web_trends=bool(channel.use_web_trends),
+        )
+        if not result:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+            video.progress_stage = "Échec"
+            db.commit()
+            return
+
+        from src.utils.billing import user_max_video_duration_seconds, debit_script_generation_cost
+        tier_max_duration = user_max_video_duration_seconds(db, owner)
+        effective_max_duration = MAX_VIDEO_DURATION_SECONDS if tier_max_duration is None else min(MAX_VIDEO_DURATION_SECONDS, tier_max_duration)
+        estimated_duration = max(3.0, len(result["script_text"].split()) / 2.5)
+        if estimated_duration > effective_max_duration:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = f"Le script généré ferait une vidéo de {estimated_duration/60:.0f} min, au-delà de la limite de ton palier ({effective_max_duration//60} min)."
+            video.progress_stage = "Échec"
+            db.commit()
+            return
+
+        video.title = result["title"]
+        video.script_text = result["script_text"]
+        video.estimated_duration_seconds = estimated_duration
+        video.status = VideoStatus.QUEUED.value
+        video.progress_stage = "En attente du moteur de rendu"
+        video.progress_percent = 0
+        db.commit()
+        debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
+    except Exception as e:
+        logger.error(f"retry_auto_video_script_background failed for video {video_id}: {e}\n{traceback.format_exc()}")
+        try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if video:
+                video.status = VideoStatus.FAILED.value
+                video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+                video.progress_stage = "Échec"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
 def generate_and_queue_auto_video_background(channel_id: str):
     """Runs generate_and_queue_auto_video on its own DB session/thread, for the
     "Nouvelle vidéo" on-demand trigger: the several sequential Claude calls
@@ -1163,7 +1281,17 @@ def run_daily_automation():
     """
     db = SessionLocal()
     try:
-        channels = db.query(Channel).filter(Channel.automation_mode == "auto", Channel.is_active.is_(True)).all()
+        # content_type == "music" excluded: this loop only knows how to write
+        # a narration script (generate_and_queue_auto_video calls Claude with
+        # the channel's niche/script_structure, neither of which mean anything
+        # for a music channel) — daily automation for music channels is its
+        # own not-yet-built feature (Phase 5), not this loop silently
+        # mis-running them through the narration pipeline in the meantime.
+        channels = db.query(Channel).filter(
+            Channel.automation_mode == "auto",
+            Channel.is_active.is_(True),
+            Channel.content_type != "music",
+        ).all()
         for channel in channels:
             today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
             if channel.last_auto_run_date != today_str:
@@ -1312,6 +1440,8 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     runs once regardless of render concurrency.
     """
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    from src.utils.error_tracking import init_error_tracking
+    init_error_tracking("worker")
     init_db()
     requeue_orphaned_videos()
     requeue_orphaned_voice_clone_jobs()

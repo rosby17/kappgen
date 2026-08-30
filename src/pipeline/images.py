@@ -20,6 +20,104 @@ def _izivoice_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
 
 
+def _approved_community_library_dirs(niche: Optional[str]) -> List[Path]:
+    """Every other channel's own image library that's been opted into the
+    community-sharing program (Channel.image_style.share_with_community) and
+    approved by an admin for this niche — read live off disk, never copied.
+    Used both by the explicit "community" visual source (a creator's own
+    deliberate choice) and, as of the free-fallback chain below, as the
+    imagery-quality safety net when free AI generation itself fails: real,
+    niche-relevant photos from other creators beat generic synthetic
+    gradient artwork with zero niche relevance."""
+    if not niche:
+        return []
+    from src.db.session import SessionLocal
+    from src.db.models import CommunityLibraryFolder
+    from src.config import STORAGE_PATH
+    db = SessionLocal()
+    try:
+        folders = (
+            db.query(CommunityLibraryFolder)
+            .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche))
+            .all()
+        )
+        return [STORAGE_PATH / "channels" / f.channel_id / "library" for f in folders]
+    finally:
+        db.close()
+
+
+def _persist_generated_images_to_channel_library(
+    channel_id: Optional[str], user_id: Optional[str], niche: Optional[str], image_paths: List[Path],
+) -> None:
+    """Copies every freshly AI-generated scene image into the channel's own
+    persistent library folder (channels/{id}/library — the same directory a
+    manual library upload writes to) and keeps its CommunityLibraryFolder row
+    in sync, growing that niche's shared pool automatically as a side effect
+    of ordinary rendering — by default, for every channel, no opt-in
+    checkbox. The intent: the more videos get made, the bigger and more
+    varied each niche's free image pool gets, so new videos increasingly
+    find what they need already sitting there instead of calling any
+    generator at all.
+
+    Auto-approved on first creation — unlike a creator's manually curated
+    upload (which starts "pending" for admin review), these are already
+    AI-generated stock-style scene art, not personal content, so gating
+    every single one behind a review queue would defeat the actual point
+    (an ever-growing pool that needs zero manual upkeep to work). Never
+    touches the status of a folder that already exists, whatever it is
+    (approved/pending/flagged) — this only ever adds images and bumps the
+    count, exactly like the manual-upload sync path.
+
+    Only ever copies — the source video's own working copy (used for that
+    video's own post-render editing) is untouched and follows its own
+    retention/purge schedule independently."""
+    if not channel_id or not image_paths:
+        return
+    import shutil
+    from src.config import STORAGE_PATH
+    from src.db.session import SessionLocal
+    from src.db.models import CommunityLibraryFolder
+
+    library_dir = STORAGE_PATH / "channels" / channel_id / "library"
+    try:
+        library_dir.mkdir(parents=True, exist_ok=True)
+        existing_count = len([f for f in library_dir.iterdir() if f.is_file()])
+        copied = 0
+        for src in image_paths:
+            try:
+                dest = library_dir / f"generated_{existing_count + copied + 1}{src.suffix or '.png'}"
+                shutil.copy2(src, dest)
+                copied += 1
+            except OSError as e:
+                logger.warning(f"Could not persist generated image '{src}' into channel library: {e}")
+        if copied == 0:
+            return
+        total = existing_count + copied
+    except OSError as e:
+        logger.warning(f"Could not access channel library dir for {channel_id}, skipping auto-share: {e}")
+        return
+
+    db = SessionLocal()
+    try:
+        folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+        if folder:
+            folder.image_count = total
+            folder.niche = niche or folder.niche
+        else:
+            db.add(CommunityLibraryFolder(
+                channel_id=channel_id,
+                user_id=user_id,
+                niche=niche or "General",
+                image_count=total,
+                status="approved",
+            ))
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Could not sync CommunityLibraryFolder for channel {channel_id}: {e}")
+    finally:
+        db.close()
+
+
 def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS) -> Dict[str, Any]:
     """Polls GET /api/tasks/{task_id} until status is 'done' or 'error'/'failed' (or timeout).
     Transient 5xx responses are retried rather than treated as a hard failure, since the
@@ -302,6 +400,7 @@ def fetch_or_generate_images(
     unique_generation_count: Optional[int] = None,
     user_id: Optional[str] = None,
     niche: Optional[str] = None,
+    channel_id: Optional[str] = None,
 ) -> List[Path]:
     """
     Fetches images for each scene: either generated via the ai33.pro AI image API
@@ -336,10 +435,23 @@ def fetch_or_generate_images(
         # fanning them out is the single biggest lever for a long video's total
         # render time, since a 1h video can mean 150+ sequential image requests.
         results: List[Optional[Path]] = [None] * len(ai_prompts)
+        # Only a genuinely fresh HF success gets auto-shared into the channel's
+        # library below — never a disk-cache hit from an earlier attempt on
+        # this same video (already handled once) nor a library/community/
+        # synthetic fallback (that would just copy other creators' — or
+        # nobody's — images right back into this channel's own folder).
+        fresh_paths: List[Path] = []
         failures = 0
 
         def fetch_one(i: int, p: str, client: httpx.Client) -> Optional[Path]:
             img_file = output_dir / f"{prefix}_{i+1}.png"
+            # output_dir is deterministic per video (channels/{id}/videos/{id}/source/images),
+            # so retrying a video that already generated some images before
+            # failing at a later step (subtitles, mixing, ...) would otherwise
+            # regenerate every single one from scratch — free, but still real
+            # time and a real HTTP call each. Reuse whatever's already on disk.
+            if img_file.exists():
+                return img_file, False
             # Niche is appended directly here as a safety net: build_scene_prompts
             # (the Claude step that's supposed to bake niche-relevant subject
             # matter into each prompt) can fail or be skipped, in which case
@@ -355,13 +467,23 @@ def fetch_or_generate_images(
             # nothing up to Hugging Face's small monthly free allowance, so a
             # video's whole visual pool can render for free as long as it lasts.
             try:
-                return _generate_with_huggingface_flux(full_prompt, img_file, client, operation="scene_image")
+                return _generate_with_huggingface_flux(full_prompt, img_file, client, operation="scene_image"), True
             except Exception as e:
                 # Paid fallback (Izivoice) intentionally disabled — free tier
-                # only. On failure, use a library image instead of spending credit.
-                logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, using fallback image instead: {e}")
-                fallback = get_image_pool(output_dir, 1, custom_library_path=library_path)
-                return fallback[0] if fallback else None
+                # only, permanently: never spend a credit just because the
+                # free generator had a bad moment. Falls back through the
+                # channel's own library first, then — new — every other
+                # creator's approved library in the same niche (real,
+                # relevant photos beat generic synthetic art), and only then
+                # get_image_pool's own last-resort synthetic gradient
+                # artwork if truly nothing else exists anywhere for this niche.
+                logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, falling back to library images: {e}")
+                fallback = get_image_pool(
+                    output_dir, 1,
+                    custom_library_path=library_path,
+                    additional_library_dirs=_approved_community_library_dirs(niche),
+                )
+                return (fallback[0] if fallback else None), False
 
         with httpx.Client(limits=httpx.Limits(max_connections=8, max_keepalive_connections=8)) as client:
             with ThreadPoolExecutor(max_workers=6) as pool:
@@ -370,14 +492,18 @@ def fetch_or_generate_images(
                 }
                 for future in future_to_index:
                     i = future_to_index[future]
-                    result = future.result()
+                    result, is_fresh = future.result()
                     results[i] = result
                     if result is None:
                         failures += 1
+                    elif is_fresh:
+                        fresh_paths.append(result)
 
         generated_paths = [r for r in results if r is not None]
         if failures:
             logger.warning(f"{failures}/{len(ai_prompts)} AI images fell back to library/synthetic assets due to provider errors.")
+        if fresh_paths:
+            _persist_generated_images_to_channel_library(channel_id, user_id, niche, fresh_paths)
         return generated_paths
 
     if source_type == "ai_generated":
@@ -420,19 +546,7 @@ def fetch_or_generate_images(
         # read live off disk rather than copied. validate_channel_visual_source
         # (videos.py) already confirmed at least one approved folder exists for
         # this niche before the render was ever queued.
-        from src.db.session import SessionLocal
-        from src.db.models import CommunityLibraryFolder
-        from src.config import STORAGE_PATH
-        db = SessionLocal()
-        try:
-            folders = (
-                db.query(CommunityLibraryFolder)
-                .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche or ""))
-                .all()
-            )
-            community_dirs = [STORAGE_PATH / "channels" / f.channel_id / "library" for f in folders]
-        finally:
-            db.close()
+        community_dirs = _approved_community_library_dirs(niche)
         logger.info(f"Using community library for niche '{niche}': {len(community_dirs)} folder(s).")
         return get_image_pool(
             output_dir,
