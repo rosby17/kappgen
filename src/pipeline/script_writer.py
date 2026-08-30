@@ -237,6 +237,7 @@ def generate_daily_script(
     default_language: Optional[str] = None,
     topic_examples: Optional[str] = None,
     use_web_trends: bool = False,
+    on_progress: Optional[callable] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -274,6 +275,8 @@ def generate_daily_script(
         )
         if not title:
             return None
+        if on_progress:
+            on_progress("Rédaction du script", 8)
 
         written_parts: List[str] = []
         tail = ""
@@ -287,6 +290,11 @@ def generate_daily_script(
                 return None
             written_parts.append(part_text)
             tail = part_text[-600:]
+            if on_progress:
+                # Ramps 8 -> 24% across the script's parts, so the stepper
+                # shows real incremental movement instead of jumping straight
+                # from "topic picked" to "script done" on a long multi-part script.
+                on_progress("Rédaction du script", 8 + round(16 * (i + 1) / len(parts)))
 
         script_text = " ".join(written_parts).strip()
         # A part_text that's technically non-empty (passes the guard above)

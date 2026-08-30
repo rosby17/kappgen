@@ -1031,6 +1031,32 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         channel.automation_style_prompt,
     ])) or None
 
+    # Created now, before the topic/script even exist, instead of only once
+    # generate_daily_script returns — a creator watching "Mes Vidéos" during
+    # auto-generation used to see nothing at all until the script (and the
+    # audio/scenes/visuals pipeline after it) was already well underway,
+    # which read as "it goes straight to Audio" when in reality topic
+    # selection and script writing both ran first, just invisibly. This row
+    # is updated in place as each stage completes rather than replaced.
+    video = Video(
+        channel_id=channel.id,
+        input_type="text",
+        script_text="",
+        status=VideoStatus.RENDERING.value,
+        progress_stage="Recherche du sujet",
+        progress_percent=1,
+        transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
+        voice_id=getattr(channel, "voice_id", None),
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+
+    def _on_script_progress(stage: str, percent: int) -> None:
+        video.progress_stage = stage
+        video.progress_percent = percent
+        db.commit()
+
     result = generate_daily_script(
         niche=channel.niche,
         recent_titles=recent_titles,
@@ -1039,8 +1065,11 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         default_language="French" if (owner.locale or "fr") == "fr" else "English",
         topic_examples=channel.topic_examples,
         use_web_trends=bool(channel.use_web_trends),
+        on_progress=_on_script_progress,
     )
     if not result:
+        db.delete(video)
+        db.commit()
         _record_automation_failure(db, channel)
         return None
 
@@ -1054,20 +1083,16 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
             f"Daily automation: generated script for channel {channel.id} ('{channel.name}') "
             f"would produce a {estimated_duration/60:.0f} min video (max {effective_max_duration//60} for this tier); skipping."
         )
+        db.delete(video)
+        db.commit()
         return None
 
-    video = Video(
-        channel_id=channel.id,
-        title=result["title"],
-        script_text=result["script_text"],
-        input_type="text",
-        audio_input_path=None,
-        status=VideoStatus.QUEUED.value,
-        estimated_duration_seconds=estimated_duration,
-        transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
-        voice_id=getattr(channel, "voice_id", None),
-    )
-    db.add(video)
+    video.title = result["title"]
+    video.script_text = result["script_text"]
+    video.status = VideoStatus.QUEUED.value
+    video.progress_stage = None
+    video.progress_percent = 0
+    video.estimated_duration_seconds = estimated_duration
     if owner.free_videos_used < owner.free_video_quota_granted:
         owner.free_videos_used += 1
     db.commit()
