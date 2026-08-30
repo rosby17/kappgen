@@ -565,6 +565,117 @@ def admin_set_community_library_status(
     return folder.to_dict()
 
 
+# --- Admin oversight of a channel's library regardless of its owner's own
+# sharing choice — the community-library/* routes above only ever work for
+# channels that already have a CommunityLibraryFolder row (the owner opted
+# in). The admin needs to browse ANY channel's images and force sharing on,
+# independent of what the creator picked — final say stays with the admin.
+
+@router.get("/channel-library/{channel_id}/images")
+def admin_channel_library_images(channel_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    from src.config import STORAGE_PATH
+    from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    library_dir = STORAGE_PATH / "channels" / channel_id / "library"
+    if not library_dir.is_dir():
+        return {"filenames": []}
+    filenames = sorted(
+        item.name for item in library_dir.iterdir()
+        if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS
+    )[:24]
+    return {"filenames": filenames}
+
+
+@router.get("/channel-library/{channel_id}/images/{filename}")
+def admin_channel_library_image_file(channel_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    from fastapi.responses import FileResponse
+    from src.config import STORAGE_PATH
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image introuvable.")
+    return FileResponse(candidate)
+
+
+@router.delete("/channel-library/{channel_id}/images/{filename}")
+def admin_delete_channel_library_image(channel_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    from src.config import STORAGE_PATH
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image introuvable.")
+    candidate.unlink()
+    image_style = dict(channel.image_style or {})
+    new_count = max(0, int(image_style.get("library_image_count") or 0) - 1)
+    image_style["library_image_count"] = new_count
+    channel.image_style = image_style
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if folder:
+        folder.image_count = new_count
+    db.commit()
+    return {"deleted": True, "image_count": new_count}
+
+
+class AdminForceSharePayload(BaseModel):
+    status: str = "approved"  # what to set the folder's curation status to
+
+
+@router.post("/channel-library/{channel_id}/force-share")
+def admin_force_share_channel_library(
+    channel_id: str,
+    payload: AdminForceSharePayload,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin override: puts this channel's library into the community
+    curation table regardless of the owner's own share_with_community
+    setting — the admin has final say on what feeds a niche's shared pool,
+    the creator's toggle is just the default/starting point, not a hard
+    block. Does NOT flip the channel's own flag (so the creator's Studio UI
+    keeps showing their real preference); this only affects what shows up
+    in the niche's merged library."""
+    if payload.status not in ("pending", "approved", "flagged"):
+        raise HTTPException(status_code=400, detail="Statut invalide.")
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    count = int((channel.image_style or {}).get("library_image_count") or 0)
+    existing = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if existing:
+        existing.status = payload.status
+        existing.image_count = count
+        existing.niche = channel.niche
+        folder = existing
+    else:
+        folder = CommunityLibraryFolder(
+            channel_id=channel.id, user_id=channel.user_id, niche=channel.niche,
+            image_count=count, status=payload.status,
+        )
+        db.add(folder)
+    db.commit()
+    db.refresh(folder)
+    return folder.to_dict()
+
+
+@router.post("/channel-library/{channel_id}/unshare")
+def admin_unshare_channel_library(channel_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Reverses force-share — removes this channel from the community
+    curation table entirely (back to "non partagé" in the admin view)."""
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if folder:
+        db.delete(folder)
+        db.commit()
+    return {"unshared": True}
+
+
 # --- Hugging Face free-tier image generation accounts ------------------------
 # Admin-managed pool of accounts for the free FLUX.1-schnell path (see
 # src/pipeline/images.py) — lets new accounts keep being added over time
