@@ -363,6 +363,34 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
     cached_path = ensure_sd_variant(source_path)
     return FileResponse(cached_path, media_type="video/mp4", filename=_download_filename(video, "sd"))
 
+
+@router.get("/{video_id}/thumbnail/download")
+def download_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
+    """Serves this video's thumbnail.jpg as a real download (Content-Disposition:
+    attachment) — separate from the plain <img src> path the app itself uses to
+    display it, since that one gets served inline and a browser can't reliably
+    "Save As" a cross-origin <img> in one click. Meant for a creator who wants
+    the exact same thumbnail KappGen generated to manually post alongside a
+    video they publish outside the app. Intentionally unauthenticated, same
+    reasoning as /download above (opaque video_id, no custom header needed)."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or not video.output_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # output_path is a full R2 URL for videos stored there, not a local
+    # STORAGE_PATH-relative path — thumbnail.jpg always stays local
+    # regardless (see _finalize_output_storage), sitting next to wherever
+    # this video's other local render artifacts live.
+    if video.storage_backend == "r2":
+        thumbnail_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+    else:
+        thumbnail_path = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
+    if not thumbnail_path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    return FileResponse(thumbnail_path, media_type="image/jpeg", filename=_download_filename(video, "thumbnail").replace(".mp4", ".jpg"))
+
+
 @router.get("/{video_id}/audio")
 def download_video_audio(video_id: str, db: Session = Depends(get_db)):
     """Extracts and returns this video's soundtrack, for the 'reuse audio' flow.
