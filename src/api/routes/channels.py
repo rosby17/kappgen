@@ -628,7 +628,23 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     if payload.music_preference is not None:
         channel.music_preference = payload.music_preference.model_dump()
     if payload.image_style is not None:
-        channel.image_style = payload.image_style.model_dump()
+        image_style = payload.image_style.model_dump()
+        # Permanent guard against a retired hardcoded default ("stoic
+        # sculpture style, dark moody atmosphere") leaking onto a channel it
+        # was never meant for. The style itself is legitimate — it's the
+        # deliberate look for genuine Stoïcisme/Philosophie channels — the
+        # bug was every NEW channel silently inheriting it regardless of
+        # niche. The frontend no longer sends this itself, but a stale
+        # cached page (an old browser tab that never reloaded the fixed
+        # bundle) still could. So: only strip it when the channel's own
+        # niche has nothing to do with philosophy/stoicism — a real
+        # Stoïcisme channel deliberately keeping this style is untouched.
+        niche_for_check = (payload.niche if payload.niche is not None else channel.niche) or ""
+        style_prompt_lower = (image_style.get("style_prompt") or "").lower()
+        niche_matches_stoic = bool(re.search(r"stoïc|stoic|philosophi", niche_for_check, re.IGNORECASE))
+        if "stoic sculpture style" in style_prompt_lower and not niche_matches_stoic:
+            image_style["style_prompt"] = ""
+        channel.image_style = image_style
     if payload.effects_config is not None:
         channel.effects_config = payload.effects_config.model_dump()
     if payload.automation_mode is not None:
