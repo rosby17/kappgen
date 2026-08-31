@@ -1011,8 +1011,17 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({exc})")
         return None
 
+    # Bug history: this used to fall back to the script's own opening
+    # sentence when building the "titles already used" list fed to the next
+    # topic-pick prompt — every script here opens with the same narrative
+    # hook formula ("Il y a ce moment..."), so the model was shown a whole
+    # list of those as if they were the channel's real titles and started
+    # imitating that shape for its own "titles", producing long run-on
+    # sentences instead of short punchy ones. Now uses the real title,
+    # falling back to the script's first line only for legacy videos that
+    # somehow have neither (should be rare-to-never going forward).
     recent_titles = [
-        (v.script_text or "").split("\n")[0][:120]
+        v.title or (v.script_text or "").split("\n")[0][:120]
         for v in (
             db.query(Video)
             .filter(Video.channel_id == channel.id)
@@ -1199,7 +1208,7 @@ def retry_auto_video_script_background(video_id: str):
             return
 
         recent_titles = [
-            (v.script_text or "").split("\n")[0][:120]
+            v.title or (v.script_text or "").split("\n")[0][:120]
             for v in (
                 db.query(Video)
                 .filter(Video.channel_id == channel.id, Video.id != video.id)

@@ -157,7 +157,7 @@ Titles of videos already published on this channel (never repeat these topics or
 {avoid_list}
 
 Invent ONE brand-new, specific video topic that fits this niche and hasn't been covered yet{" — matching the style and specificity of the examples above" if examples_block else ""}. Respond in {language} with ONLY this JSON object, no other text:
-{{"title": "short punchy video title"}}"""
+{{"title": "short punchy video title, a complete well-formed phrase (roughly 40-100 characters), never a long run-on sentence, never cut off or trailing with an ellipsis — even if the examples above look truncated, that's just clipping from wherever they were copied, don't imitate it"}}"""
     try:
         # 300 was too tight for a channel with a long "don't repeat these
         # past titles" list (recent_titles up to 20 entries) — seen in
