@@ -730,6 +730,55 @@ def admin_move_channel_library(
     }
 
 
+class AdminMergeFolderPayload(BaseModel):
+    niche: str
+
+
+@router.put("/channel-library/{channel_id}/merge")
+def admin_merge_channel_library(
+    channel_id: str,
+    payload: AdminMergeFolderPayload,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """One-click "fusionner ce dossier avec..." — moves this channel's ENTIRE
+    library into the target niche's pool, same mechanism as the per-image
+    move above (a CommunityLibraryImagePlacement per file) but without the
+    client having to enumerate filenames first (that endpoint's own preview
+    list caps at 24, nowhere near enough for a folder of hundreds). No files
+    are copied or relocated — this channel's images still live in its own
+    folder, just now counted under the target niche alongside whatever
+    other channel(s) already feed it, which is exactly what "merging into
+    one niche pool" means in this design (see the module docstring above)."""
+    target_niche = payload.niche.strip()
+    if target_niche not in KNOWN_NICHES:
+        raise HTTPException(status_code=400, detail="Niche de destination invalide.")
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+
+    from src.config import STORAGE_PATH
+    from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
+    library_dir = STORAGE_PATH / "channels" / channel_id / "library"
+    if not library_dir.is_dir():
+        return {"merged": True, "channel_id": channel.id, "niche": target_niche, "image_count": 0}
+    filenames = [f.name for f in library_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS]
+
+    existing_placements = {
+        p.filename: p for p in db.query(CommunityLibraryImagePlacement).filter(
+            CommunityLibraryImagePlacement.channel_id == channel_id
+        ).all()
+    }
+    for filename in filenames:
+        placement = existing_placements.get(filename)
+        if placement:
+            placement.niche = target_niche
+        else:
+            db.add(CommunityLibraryImagePlacement(channel_id=channel_id, filename=filename, niche=target_niche))
+    db.commit()
+    return {"merged": True, "channel_id": channel.id, "channel_name": channel.name, "niche": target_niche, "image_count": len(filenames)}
+
+
 @router.post("/channel-library/{channel_id}/force-share")
 def admin_force_share_channel_library(
     channel_id: str,
