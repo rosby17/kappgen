@@ -130,6 +130,23 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 # the actual format support (bad bytes still get rejected the same way).
 IMAGE_UPLOAD_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".jpe", ".png", ".webp", ".gif", ".avif", ".bmp", ".tif", ".tiff"}
 
+# .heic/.heif (the default photo format on iPhone since iOS 11) needs the
+# pillow-heif plugin registered before Pillow can open one at all — without
+# it, every photo folder imported straight off an iPhone had its HEIC files
+# silently rejected. They're not a format anything downstream (ffmpeg
+# included) reliably reads either way, so they're converted to JPEG on
+# upload rather than just accepted as-is — see save_valid_library_images.
+# Only added to the allowlist if the plugin actually loaded: accepting the
+# extension without being able to decode it would just turn a clean
+# rejection into a silently-broken library image.
+HEIC_EXTENSIONS = {".heic", ".heif"}
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    IMAGE_UPLOAD_EXTENSIONS |= HEIC_EXTENSIONS
+except ImportError:
+    HEIC_EXTENSIONS = set()
+
 # Storage & DB Config
 STORAGE_PATH = Path(os.getenv("STORAGE_PATH", BASE_DIR / "storage")).resolve()
 ASSETS_PATH = Path(os.getenv("ASSETS_PATH", BASE_DIR / "assets")).resolve()

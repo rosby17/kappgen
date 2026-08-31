@@ -13,7 +13,7 @@ import httpx
 from src.db.session import get_db
 from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS
 from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
@@ -365,6 +365,22 @@ def generate_voice_preview(voice_id: str, current_user: User = Depends(get_curre
             raise HTTPException(status_code=502, detail="Impossible de générer l'aperçu pour cette voix.")
     return {"preview_url": f"/channels/voice/{voice_id}/preview"}
 
+def _write_library_image(dest_path: Path, ext: str, contents: bytes) -> None:
+    """Writes an uploaded image's bytes to disk, converting HEIC/HEIF (the
+    default photo format on iPhone since iOS 11) to JPEG first — nothing
+    downstream (ffmpeg included) reliably reads raw HEIC, so accepting the
+    extension without converting would just turn a clean rejection into a
+    silently-broken library image at render time."""
+    if ext in HEIC_EXTENSIONS:
+        from PIL import Image
+        import io
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        dest_path = dest_path.with_suffix(".jpg")
+        image.save(dest_path, "JPEG", quality=92)
+    else:
+        dest_path.write_bytes(contents)
+
+
 async def save_valid_library_images(files: List[UploadFile], target_dir: Path, append: bool = False):
     """append=True writes straight into target_dir (creating it if needed)
     alongside whatever's already there — used when the frontend splits a
@@ -387,7 +403,11 @@ async def save_valid_library_images(files: List[UploadFile], target_dir: Path, a
             if not contents:
                 rejected += 1
                 continue
-            (target_dir / f"img_{start_index + saved:04d}_{uuid.uuid4().hex[:8]}{ext}").write_bytes(contents)
+            try:
+                _write_library_image(target_dir / f"img_{start_index + saved:04d}_{uuid.uuid4().hex[:8]}{ext}", ext, contents)
+            except Exception:
+                rejected += 1
+                continue
             saved += 1
         return saved, rejected
 
@@ -412,7 +432,11 @@ async def save_valid_library_images(files: List[UploadFile], target_dir: Path, a
             if not contents:
                 rejected += 1
                 continue
-            (incoming_dir / f"img_{saved:04d}{ext}").write_bytes(contents)
+            try:
+                _write_library_image(incoming_dir / f"img_{saved:04d}{ext}", ext, contents)
+            except Exception:
+                rejected += 1
+                continue
             saved += 1
 
         if saved == 0:
