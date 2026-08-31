@@ -118,6 +118,18 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
+# Every raster image extension a creator's uploaded library / overlay is
+# accepted under — one shared set instead of four separately hand-maintained
+# ones (channels.py, videos.py, admin.py, image_pool.py/images.py) that had
+# quietly drifted out of sync with each other. .jfif specifically (JPEG File
+# Interchange Format — real JPEG bytes, just a different extension, common
+# from images saved off the web/Bing/WhatsApp) was missing from all of them,
+# rejecting an otherwise perfectly valid image outright before it ever
+# reached PIL's own format sniffing. PIL/Pillow can already decode every
+# format listed here — this only ever widens the extension allowlist, never
+# the actual format support (bad bytes still get rejected the same way).
+IMAGE_UPLOAD_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".jpe", ".png", ".webp", ".gif", ".avif", ".bmp", ".tif", ".tiff"}
+
 # Storage & DB Config
 STORAGE_PATH = Path(os.getenv("STORAGE_PATH", BASE_DIR / "storage")).resolve()
 ASSETS_PATH = Path(os.getenv("ASSETS_PATH", BASE_DIR / "assets")).resolve()

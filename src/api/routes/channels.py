@@ -13,7 +13,7 @@ import httpx
 from src.db.session import get_db
 from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS
 from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
@@ -27,7 +27,7 @@ from src.utils.logger import logger
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
-ALLOWED_LIBRARY_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+ALLOWED_LIBRARY_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
 # <script> tags and inline event-handler attributes (onload=, onclick=, ...) —

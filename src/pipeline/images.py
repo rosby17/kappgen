@@ -6,7 +6,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_image_cost
 from src.pipeline.image_pool import get_image_pool
@@ -45,7 +45,7 @@ def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
             ).all()
         } if channel_ids else {}
         files: List[Path] = []
-        extensions = {".jpg", ".jpeg", ".png", ".webp"}
+        extensions = IMAGE_UPLOAD_EXTENSIONS
         for folder in folders:
             library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
             if not library_dir.is_dir():

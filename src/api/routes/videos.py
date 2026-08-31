@@ -12,7 +12,7 @@ from src.db.session import get_db
 from src.db.models import Channel, Video, User, CommunityLibraryFolder, CommunityLibraryImagePlacement
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
-from src.config import STORAGE_PATH
+from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
@@ -24,7 +24,7 @@ from src.utils.rate_limit import rate_limit
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 _limit_submit = rate_limit("video_submit", max_attempts=30, window_seconds=3600)
 
-LIBRARY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+LIBRARY_IMAGE_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 
 # At the capped ~4.2Mbps render bitrate a 60min video lands around ~2GB —
 # generous for long-form content while stopping runaway renders (and the

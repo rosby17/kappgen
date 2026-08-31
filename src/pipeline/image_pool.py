@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from src.utils.logger import logger
-from src.config import ASSETS_PATH, STORAGE_PATH
+from src.config import ASSETS_PATH, STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
 
 def generate_fallback_image(path: Path, index: int, label: str = "KappGen Scene"):
     """
@@ -124,7 +124,11 @@ def get_image_pool(
     shared assets library. If none have images, generates artistic fallback
     images. Returns a shuffled list of images matching required_count.
     """
-    image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+    # Was a narrower, separately hand-maintained set than the upload
+    # validators (channels.py/videos.py) — missing .gif/.avif/.jfif/etc.
+    # meant an image could be accepted at upload time yet silently never
+    # picked up here at render time. Now the same shared allowlist everywhere.
+    image_extensions = IMAGE_UPLOAD_EXTENSIONS
     existing_images = []
 
     # Client-uploaded image library (highest priority — this is "their own" library).
