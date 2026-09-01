@@ -573,8 +573,7 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
         user_bucket["total_images"] += count
         user_bucket["folders"].append({
             "channel_id": channel.id,
-            "channel_name": channel.library_admin_label or channel.name,
-            "real_channel_name": channel.name,
+            "channel_name": channel.name,
             "image_count": count,
             "community_folder_id": shared.id if shared else None,
             "share_status": shared.status if shared else "not_shared",
@@ -786,7 +785,7 @@ class AdminMoveChannelLibraryPayload(BaseModel):
 
 
 class AdminLibraryLabelPayload(BaseModel):
-    label: Optional[str] = None
+    label: str
 
 
 @router.put("/channel-library/{channel_id}/label")
@@ -796,16 +795,18 @@ def admin_rename_channel_library(
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    """Sets the admin-only display label for this channel's library folder,
-    used only in the library browser — never touches the channel's real
-    name, which the creator still sees unchanged everywhere else."""
+    """Renames the channel itself from the library browser — the folder
+    label IS the channel name (single source of truth), so this is a plain
+    channel rename, visible to the creator everywhere else too."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    label = (payload.label or "").strip()
-    channel.library_admin_label = label or None
+    name = payload.label.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Le nom ne peut pas être vide.")
+    channel.name = name
     db.commit()
-    return {"channel_id": channel.id, "channel_name": channel.library_admin_label or channel.name}
+    return {"channel_id": channel.id, "channel_name": channel.name}
 
 
 @router.put("/channel-library/{channel_id}/niche")

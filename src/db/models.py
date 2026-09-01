@@ -101,13 +101,6 @@ class Channel(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     name = Column(String(255), nullable=False)
-    # Admin-only override of the folder label shown in the admin image
-    # library browser — creators name channels for their own purposes, which
-    # often don't describe the niche/content (e.g. a channel kept its old
-    # name after being repurposed). Purely cosmetic for that admin screen;
-    # never shown to the creator and never used anywhere else (auto-
-    # generation, YouTube publishing, billing, etc. all still use `name`).
-    library_admin_label = Column(String(255), nullable=True)
     # Creator-provided (or YouTube-synced) summary of what the channel is about —
     # feeds automatic niche detection and gives the auto-generation agent context
     # beyond just the name/niche label.
@@ -781,7 +774,7 @@ class CommunityLibraryFolder(Base):
         return {
             "id": self.id,
             "channel_id": self.channel_id,
-            "channel_name": (self.channel.library_admin_label or self.channel.name) if self.channel else None,
+            "channel_name": self.channel.name if self.channel else None,
             "user_id": self.user_id,
             "user_email": self.user.email if self.user else None,
             "niche": self.niche,
