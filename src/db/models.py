@@ -268,8 +268,13 @@ class Channel(Base):
         image_style = self.image_style or {}
         from src.pipeline.images import resolve_enabled_image_sources
         enabled_sources = resolve_enabled_image_sources(image_style)
+        # style_prompt is optional for AI generation (images.py just skips
+        # appending it if blank — never required to actually generate) —
+        # requiring it here left plenty of real, working, AI-only channels
+        # permanently stuck at "50% configured" even though they were
+        # rendering real videos successfully the whole time.
         visuals_ready = bool(
-            ("ai_generated" in enabled_sources and image_style.get("style_prompt"))
+            "ai_generated" in enabled_sources
             or ("library" in enabled_sources and (image_style.get("library_image_count") or 0) > 0)
             # "community" borrows another channel's already-approved library —
             # nothing of its own to check here; validate_channel_visual_source
