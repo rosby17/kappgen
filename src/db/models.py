@@ -406,6 +406,12 @@ class Video(Base):
     # instead of the full pipeline. JSON: {"type": "image"|"subtitle_text"|"audio",
     # "scene_index": int, "text": str|null}. Cleared once the worker picks it up.
     pending_edit = Column(JSON, nullable=True)
+    # Stack of reversible Studio edits (most recent last), capped at 20:
+    # [{"type": "image"|"subtitle_text"|"logo", ...}]. Popped and applied in
+    # reverse by POST /videos/{id}/undo. Deliberately doesn't cover
+    # "audio" (voice regen) edits — those re-time the whole video and aren't
+    # cheaply reversible the way a local file swap or a branding value is.
+    edit_history = Column(JSON, nullable=True)
     # Set once the worker successfully auto-publishes this video to the
     # channel's connected YouTube account (auto-mode channels only).
     youtube_video_id = Column(String(32), nullable=True)
@@ -473,6 +479,7 @@ class Video(Base):
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "downloaded_at": self.downloaded_at.isoformat() if self.downloaded_at else None,
+            "can_undo": bool(self.edit_history),
         }
 
 

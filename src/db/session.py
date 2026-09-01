@@ -59,6 +59,7 @@ def init_db():
             "extended_retention": "ALTER TABLE videos ADD COLUMN extended_retention BOOLEAN DEFAULT FALSE NOT NULL",
             "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
+            "edit_history": "ALTER TABLE videos ADD COLUMN edit_history JSON",
             "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",
             "youtube_video_id": "ALTER TABLE videos ADD COLUMN youtube_video_id VARCHAR(32)",
             "youtube_published_at": "ALTER TABLE videos ADD COLUMN youtube_published_at TIMESTAMP",

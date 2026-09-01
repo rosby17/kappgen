@@ -690,6 +690,16 @@ def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
     return json.loads(scenes_path.read_text(encoding="utf-8"))
 
 
+# Cap on video.edit_history — a bounded undo stack, not a full audit log.
+_EDIT_HISTORY_MAX = 20
+
+
+def _push_edit_history(video: Video, entry: Dict[str, Any]) -> None:
+    history = list(video.edit_history or [])
+    history.append(entry)
+    video.edit_history = history[-_EDIT_HISTORY_MAX:]
+
+
 @router.get("/{video_id}/scenes")
 def list_video_scenes(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
@@ -764,6 +774,18 @@ async def replace_scene_image(
 
     image_path = Path(scene["image_path"])
     image_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Back up the image being replaced before overwriting it, so /undo can
+    # restore it — only when one already exists (nothing to revert to on a
+    # scene's first-ever image).
+    if image_path.exists():
+        import time
+        history_dir = video_dir / "source" / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = history_dir / f"scene_{scene_index}_{int(time.time() * 1000)}{image_path.suffix}"
+        backup_path.write_bytes(image_path.read_bytes())
+        _push_edit_history(video, {"type": "image", "scene_index": scene_index, "backup_path": str(backup_path)})
+
     image_path.write_bytes(contents)
 
     channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
@@ -813,6 +835,10 @@ def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleU
         raise HTTPException(status_code=404, detail="Scene not found")
     if scene.get("word_start_idx") is None:
         raise HTTPException(status_code=409, detail="Cette scène n’a pas de sous-titres modifiables (vidéo antérieure à cette fonctionnalité).")
+
+    previous_text = scene.get("text", "")
+    if previous_text != text:
+        _push_edit_history(video, {"type": "subtitle_text", "scene_index": scene_index, "previous_text": previous_text})
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
@@ -888,6 +914,10 @@ def update_video_logo_position(video_id: str, payload: LogoPositionUpdate, curre
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="Aucune modification fournie.")
+
+    previous = {k: branding.get(k) for k in updates}
+    _push_edit_history(video, {"type": "logo", "previous": previous})
+
     branding.update(updates)
     channel.branding = branding
 
@@ -896,6 +926,83 @@ def update_video_logo_position(video_id: str, payload: LogoPositionUpdate, curre
     video.pending_edit = None
     video.error_message = None
     video.progress_stage = "En attente du repositionnement du logo"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
+@router.post("/{video_id}/undo")
+def undo_last_edit(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Pops the last reversible Studio edit (image swap, subtitle-text edit, or
+    logo reposition — see Video.edit_history) and reapplies its previous
+    state, then reassembles. Voice/audio regenerations aren't in the stack —
+    they re-time the whole video and aren't cheaply reversible."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
+
+    history = list(video.edit_history or [])
+    if not history:
+        raise HTTPException(status_code=409, detail="Rien à annuler.")
+    entry = history.pop()
+    video.edit_history = history
+
+    entry_type = entry.get("type")
+    if entry_type == "image":
+        import json
+        scene_index = entry["scene_index"]
+        backup_path = Path(entry["backup_path"])
+        if not backup_path.exists():
+            raise HTTPException(status_code=409, detail="L’image précédente n’est plus disponible (nettoyée entre-temps).")
+
+        video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+        scenes_path = video_dir / "source" / "scenes.json"
+        scenes = _load_scenes_manifest(video)
+        scene = next((s for s in scenes if s["index"] == scene_index), None)
+        if not scene:
+            raise HTTPException(status_code=404, detail="Scene not found")
+
+        image_path = Path(scene["image_path"])
+        image_path.write_bytes(backup_path.read_bytes())
+        backup_path.unlink(missing_ok=True)
+
+        channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+        if not channel:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        from src.pipeline.clip_builder import build_image_clip
+        effects = channel.effects_config or {}
+        build_image_clip(
+            image_path=image_path,
+            output_clip_path=Path(scene["clip_path"]),
+            duration=scene["duration"],
+            zoom_min_pct=effects.get("zoom_min_pct", 1.0),
+            zoom_max_pct=effects.get("zoom_max_pct", 1.12),
+        )
+        scenes_path.write_text(json.dumps(scenes, indent=2), encoding="utf-8")
+        video.pending_edit = None
+        video.progress_stage = "En attente de l’annulation (image)"
+
+    elif entry_type == "subtitle_text":
+        video.pending_edit = {"type": "subtitle_text", "scene_index": entry["scene_index"], "text": entry["previous_text"]}
+        video.progress_stage = "En attente de l’annulation (sous-titre)"
+
+    elif entry_type == "logo":
+        channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+        if not channel:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        branding = dict(channel.branding or {})
+        branding.update(entry.get("previous") or {})
+        channel.branding = branding
+        video.pending_edit = None
+        video.progress_stage = "En attente de l’annulation (logo)"
+
+    else:
+        raise HTTPException(status_code=409, detail=f"Type de modification inconnu : {entry_type}")
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = True
+    video.error_message = None
     video.progress_percent = 0
     db.commit()
     db.refresh(video)
