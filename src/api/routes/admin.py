@@ -757,6 +757,60 @@ def admin_channel_library_images(
     }
 
 
+@router.get("/community-library/niche/{niche}/images")
+def admin_niche_library_images(
+    niche: str,
+    offset: int = 0,
+    limit: int = 60,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Every image effectively belonging to this niche, across every
+    contributing channel — for browsing a whole niche's pool in one flat
+    grid instead of drilling into each user then each channel individually,
+    which gets unwieldy as more creators contribute. Same "effective niche"
+    rule as the render-time pool (_approved_community_library_files in
+    images.py) — a channel's own niche, unless a specific image was
+    reassigned elsewhere via CommunityLibraryImagePlacement — except this
+    includes every channel with images, not just admin-approved ones,
+    matching what the per-channel drill-down already shows."""
+    from src.config import STORAGE_PATH
+    from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
+
+    channels = db.query(Channel).filter(Channel.image_style.isnot(None)).all()
+    placements_by_channel = {}
+    for row in db.query(CommunityLibraryImagePlacement).filter(CommunityLibraryImagePlacement.niche == niche).all():
+        placements_by_channel.setdefault(row.channel_id, set()).add(row.filename)
+    reassigned_out = {}  # channel_id -> {filenames reassigned to a DIFFERENT niche}
+    for row in db.query(CommunityLibraryImagePlacement).filter(CommunityLibraryImagePlacement.niche != niche).all():
+        reassigned_out.setdefault(row.channel_id, set()).add(row.filename)
+
+    entries = []  # [{channel_id, channel_name, filename}]
+    for channel in channels:
+        library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+        if not library_dir.is_dir():
+            continue
+        placed_in = placements_by_channel.get(channel.id, set())
+        placed_out = reassigned_out.get(channel.id, set())
+        home_matches = (channel.niche or "Sans niche") == niche
+        for item in sorted(library_dir.iterdir(), key=lambda p: p.name):
+            if not (item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS):
+                continue
+            effectively_here = item.name in placed_in or (home_matches and item.name not in placed_out)
+            if effectively_here:
+                entries.append({"channel_id": channel.id, "channel_name": channel.name, "filename": item.name})
+
+    offset = max(0, offset)
+    limit = max(1, min(limit, 120))
+    page = entries[offset:offset + limit]
+    return {
+        "images": page,
+        "total": len(entries),
+        "offset": offset,
+        "has_more": offset + len(page) < len(entries),
+    }
+
+
 @router.get("/channel-library/{channel_id}/images/{filename}")
 def admin_channel_library_image_file(channel_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     from fastapi.responses import FileResponse
@@ -969,6 +1023,27 @@ def admin_unshare_channel_library(channel_id: str, admin: User = Depends(get_cur
         db.delete(folder)
         db.commit()
     return {"unshared": True}
+
+
+@router.delete("/channels/{channel_id}")
+def admin_delete_channel(channel_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Admin-side channel delete — for cleaning up a creator's own mistake
+    (e.g. a duplicate channel made by accident) directly from the library
+    curation view, without needing the creator's own session. Same cascade
+    as the creator-facing DELETE /channels/{id} (channels.py): Video cascades
+    via the ORM relationship, but ApiUsageLog/VoiceCloneJob/CommunityLibraryFolder
+    have a channel_id foreign key with no cascade defined, so they're cleared
+    explicitly first or this 500s on the FK violation instead of deleting."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    from src.db.models import VoiceCloneJob
+    db.query(ApiUsageLog).filter(ApiUsageLog.channel_id == channel_id).delete()
+    db.query(VoiceCloneJob).filter(VoiceCloneJob.channel_id == channel_id).delete()
+    db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).delete()
+    db.delete(channel)
+    db.commit()
+    return {"deleted": True}
 
 
 # --- Hugging Face free-tier image generation accounts ------------------------
