@@ -49,6 +49,16 @@ MAX_CONCURRENT_RENDERS = int(os.getenv("MAX_CONCURRENT_RENDERS", "3"))
 # even when more videos are rendering in parallel (the rest of each pipeline —
 # script, images, ffmpeg — isn't throttled by Izivoice at all).
 MAX_CONCURRENT_IZIVOICE_CALLS = int(os.getenv("MAX_CONCURRENT_IZIVOICE_CALLS", "3"))
+# Daily automation (run_daily_automation) used to sweep every eligible channel
+# and queue+kick off each one's video back-to-back with no pause between them,
+# so a sweep touching several channels could hand multiple heavy renders to
+# the queue within the same minute — fine when this ran on a whole shared
+# VPS, but the worker container now sits behind its own hard CPU cap
+# (see the izivoice/kappgen 50/50 split), so bursts like that pin it at its
+# ceiling for several minutes straight. Spacing launches out lets each
+# channel's script generation + render handoff land a bit apart instead of
+# piling up. Set to 0 to go back to the old back-to-back behavior.
+AUTOMATION_LAUNCH_SPACING_SECONDS = int(os.getenv("AUTOMATION_LAUNCH_SPACING_SECONDS", "90"))
 # Used to encrypt connected customers' Izivoice API keys at rest. In production
 # set a long, stable random value; changing it invalidates stored connections.
 CREDENTIAL_ENCRYPTION_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")

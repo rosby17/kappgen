@@ -22,7 +22,7 @@ from src.pipeline.orchestrator import (
 from src.pipeline.transcode import try_ensure_sd_variant
 from src.pipeline import youtube_publisher
 from src.pipeline import youtube_metadata
-from src.config import STORAGE_PATH, MAX_CONCURRENT_RENDERS
+from src.config import STORAGE_PATH, MAX_CONCURRENT_RENDERS, AUTOMATION_LAUNCH_SPACING_SECONDS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
 
@@ -1360,6 +1360,12 @@ def run_daily_automation():
             channel.auto_videos_generated_today = already + 1
             db.commit()
             logger.info(f"Daily automation: queued auto-generated video {already + 1}/{quota} for channel {channel.id} ('{channel.name}') — \"{video.title}\".")
+
+            # Only pace actual launches, not skipped channels — otherwise a
+            # sweep with many gated/ineligible channels would stall for no
+            # reason. See AUTOMATION_LAUNCH_SPACING_SECONDS in config.py.
+            if AUTOMATION_LAUNCH_SPACING_SECONDS > 0:
+                time.sleep(AUTOMATION_LAUNCH_SPACING_SECONDS)
     except Exception as e:
         logger.warning(f"Daily automation pass failed: {e}")
     finally:
