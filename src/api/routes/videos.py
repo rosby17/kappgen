@@ -859,6 +859,49 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
     return video.to_dict()
 
 
+class LogoPositionUpdate(BaseModel):
+    logo_enabled: Optional[bool] = None
+    logo_corner: Optional[str] = None
+    logo_shape: Optional[str] = None
+    logo_size_percent: Optional[float] = None
+    logo_x_percent: Optional[float] = None
+    logo_y_percent: Optional[float] = None
+
+
+@router.patch("/{video_id}/logo")
+def update_video_logo_position(video_id: str, payload: LogoPositionUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Repositions the channel logo from the Studio editor and reassembles this
+    video with it. There's no per-video logo override in the data model — the
+    logo is channel branding — so this writes straight to channel.branding,
+    same as the wizard's logo controls, then reassembles just this video.
+    Meaning: the new position previewed here also applies to every future
+    video from this channel (the Studio UI says so), not only this one."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="La vidéo est en cours de rendu ; réessayez une fois terminée.")
+
+    channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    branding = dict(channel.branding or {})
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Aucune modification fournie.")
+    branding.update(updates)
+    channel.branding = branding
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = True
+    video.pending_edit = None
+    video.error_message = None
+    video.progress_stage = "En attente du repositionnement du logo"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 @router.post("/{video_id}/close-edit")
 def close_video_edit(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Frees the heavy per-scene images/clips once the user leaves the editor,
