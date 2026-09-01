@@ -266,14 +266,16 @@ class Channel(Base):
         # soon as its visuals are, whether or not the creator ever opened
         # the Voix Off step.
         image_style = self.image_style or {}
+        from src.pipeline.images import resolve_enabled_image_sources
+        enabled_sources = resolve_enabled_image_sources(image_style)
         visuals_ready = bool(
-            (image_style.get("source") == "ai_generated" and image_style.get("style_prompt"))
-            or (image_style.get("source") in ("library", "hybrid") and (image_style.get("library_image_count") or 0) > 0)
+            ("ai_generated" in enabled_sources and image_style.get("style_prompt"))
+            or ("library" in enabled_sources and (image_style.get("library_image_count") or 0) > 0)
             # "community" borrows another channel's already-approved library —
             # nothing of its own to check here; validate_channel_visual_source
             # (videos.py) is the real gate confirming the niche actually has
             # an approved folder before a render is allowed to start.
-            or image_style.get("source") == "community"
+            or "community" in enabled_sources
         )
         completion_percent = 100 if visuals_ready else 50
         return {

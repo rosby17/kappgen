@@ -61,6 +61,40 @@ def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
         db.close()
 
 
+IMAGE_SOURCE_PRIORITY = ["ai_generated", "library", "community"]
+
+
+def resolve_enabled_image_sources(image_style: Optional[dict]) -> List[str]:
+    """Returns the visual sources a channel wants, in the fixed priority
+    order they're actually tried at render time: AI generation first (its
+    own identity, generated fresh), then the channel's own local library if
+    it has one, then the niche's community library last. A creator can now
+    enable any combination — no longer one exclusive mode — so a channel set
+    up for "AI + community" genuinely tries AI for every scene and only
+    drops to the shared niche pool on a real failure, never touching a local
+    library it doesn't have.
+
+    `image_style.sources` (a list) is the current shape; `image_style.source`
+    (a single string) is the old one, translated here for every channel
+    saved before this existed — "hybrid" becomes AI-with-library-fallback
+    (replacing the old fixed 50/50 split, which fought the same "AI is
+    unreliable sometimes, fall back gracefully" goal this whole priority
+    chain exists for), everything else maps to itself."""
+    if not image_style:
+        return ["library"]
+    sources = image_style.get("sources")
+    if isinstance(sources, list) and sources:
+        enabled = [s for s in IMAGE_SOURCE_PRIORITY if s in sources]
+        if enabled:
+            return enabled
+    legacy = image_style.get("source", "library")
+    if legacy == "hybrid":
+        return ["ai_generated", "library"]
+    if legacy in IMAGE_SOURCE_PRIORITY:
+        return [legacy]
+    return ["library"]
+
+
 def _persist_generated_images_to_channel_library(
     channel_id: Optional[str], user_id: Optional[str], niche: Optional[str], image_paths: List[Path],
 ) -> None:
@@ -418,12 +452,14 @@ def fetch_or_generate_images(
     channel_id: Optional[str] = None,
 ) -> List[Path]:
     """
-    Fetches images for each scene: either generated via the ai33.pro AI image API
-    ("ai_generated") or picked from a local image folder / library ("library" —
-    default, uses image_style.library_path if the client provided their own asset folder).
+    Fetches images for each scene, trying every source the channel has
+    enabled in a fixed priority order — AI generation, then its own local
+    library, then the niche's community library (see
+    resolve_enabled_image_sources) — falling through to the next one only
+    on an actual failure/shortage, not splitting work between them.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    source_type = image_style.get("source", "library") if image_style else "library"
+    enabled = resolve_enabled_image_sources(image_style)
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
 
@@ -487,16 +523,16 @@ def fetch_or_generate_images(
                 # Paid fallback (Izivoice) intentionally disabled — free tier
                 # only, permanently: never spend a credit just because the
                 # free generator had a bad moment. Falls back through the
-                # channel's own library first, then — new — every other
-                # creator's approved library in the same niche (real,
-                # relevant photos beat generic synthetic art), and only then
+                # channel's own library first (only if the creator actually
+                # enabled it — see `enabled` above), then the niche's
+                # community library (same condition), and only then
                 # get_image_pool's own last-resort synthetic gradient
-                # artwork if truly nothing else exists anywhere for this niche.
+                # artwork if truly nothing else is enabled/available.
                 logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, falling back to library images: {e}")
                 fallback = get_image_pool(
                     output_dir, 1,
-                    custom_library_path=library_path,
-                    additional_library_files=_approved_community_library_files(niche),
+                    custom_library_path=library_path if "library" in enabled else None,
+                    additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
                 )
                 return (fallback[0] if fallback else None), False
 
@@ -521,12 +557,14 @@ def fetch_or_generate_images(
             _persist_generated_images_to_channel_library(channel_id, user_id, niche, fresh_paths)
         return generated_paths
 
-    if source_type == "ai_generated":
+    if "ai_generated" in enabled:
         # Generate an original visual pool only for the opening window (10 min
         # by default, calculated by the orchestrator), then reuse that video's
         # own pool in a fresh random order. This caps image credits for a 1-hour
         # video at the same cost as a 10-minute one while keeping each video's
-        # visual identity original.
+        # visual identity original. Any image this fails to generate falls
+        # through per-image to library/community/synthetic inside fetch_one
+        # above, according to the same `enabled` priority.
         generation_count = min(len(prompts), unique_generation_count or len(prompts))
         originals = generate_images(prompts[:generation_count])
         sequence = expand_randomly(originals, len(prompts))
@@ -537,48 +575,22 @@ def fetch_or_generate_images(
         )
         return sequence
 
-    if source_type == "hybrid":
-        local_count = (len(prompts) + 1) // 2
-        local_images = get_image_pool(
-            output_dir,
-            local_count,
-            custom_library_path=library_path,
-            require_custom_library=True,
-        )
-        ai_images = generate_images(prompts[local_count:], prefix="hybrid_ai")
-        combined = []
-        for index in range(max(len(local_images), len(ai_images))):
-            if index < len(local_images):
-                combined.append(local_images[index])
-            if index < len(ai_images):
-                combined.append(ai_images[index])
-        logger.info(f"Hybrid image mode prepared {len(local_images)} library and {len(ai_images)} AI images.")
-        return combined[:len(prompts)]
-
-    if source_type == "community":
-        # No library of its own — borrows the union of every other channel's
-        # approved, opted-in library in the same niche (CommunityLibraryFolder),
-        # read live off disk rather than copied. validate_channel_visual_source
-        # (videos.py) already confirmed at least one approved folder exists for
-        # this niche before the render was ever queued.
-        community_files = _approved_community_library_files(niche)
-        logger.info(f"Using community library for niche '{niche}': {len(community_files)} image(s).")
-        return get_image_pool(
-            output_dir,
-            len(prompts),
-            additional_library_files=community_files,
-            require_custom_library=True,
-        )
-
-    if source_type != "library":
-        raise ValueError(f"Mode d’images inconnu: {source_type}")
-
-    # Library mode: use the client-provided local image folder if configured, else the
-    # shared assets library / synthetic fallback artwork.
-    logger.info(f"Using local image library for {len(prompts)} segments (library_path={library_path or 'none'}).")
+    # No AI: pull straight from whichever of library/community are enabled,
+    # in that priority order — get_image_pool already tries custom_library_path
+    # before additional_library_files, then finally its own synthetic
+    # fallback art if genuinely nothing is available from either (never a
+    # hard failure; validate_channel_visual_source in videos.py is the real
+    # pre-flight gate that stops a channel with nothing at all configured
+    # from ever reaching this point).
+    community_files = _approved_community_library_files(niche) if "community" in enabled else []
+    logger.info(
+        f"No AI generation enabled — using {'library' if 'library' in enabled else ''}"
+        f"{' + ' if 'library' in enabled and 'community' in enabled else ''}"
+        f"{f'community ({len(community_files)} image(s))' if 'community' in enabled else ''} for {len(prompts)} segment(s)."
+    )
     return get_image_pool(
         output_dir,
         len(prompts),
-        custom_library_path=library_path,
-        require_custom_library=True,
+        custom_library_path=library_path if "library" in enabled else None,
+        additional_library_files=community_files,
     )

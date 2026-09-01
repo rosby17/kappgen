@@ -35,24 +35,34 @@ LIBRARY_IMAGE_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 MAX_VIDEO_DURATION_SECONDS = 12 * 60 * 60
 
 def validate_channel_visual_source(channel: Channel, db: Session) -> None:
-    """Fail before TTS/queueing when the selected visual source cannot work."""
+    """Fail before TTS/queueing only when the channel's enabled visual
+    sources (see resolve_enabled_image_sources — a creator can now combine
+    any of AI generation, their own library, and the niche's community
+    library, tried in that priority order at render time) would have
+    nothing real to draw from at all.
+
+    AI generation, once enabled and allowed by the account's tier, is
+    trusted without a pre-check here: it runs through free-tier Hugging
+    Face and already falls through gracefully per-image to whichever other
+    sources are enabled (and finally to generic synthetic art) on its own
+    failure — see fetch_or_generate_images — so there's nothing further to
+    validate upfront. Without AI enabled, at least one of library/community
+    must actually have real images now, or queuing is blocked with a clear
+    message instead of silently rendering placeholder-only art."""
+    from src.pipeline.images import resolve_enabled_image_sources
     image_style = channel.image_style or {}
-    source = image_style.get("source", "library")
-    if source in {"ai_generated", "hybrid"}:
+    enabled = resolve_enabled_image_sources(image_style)
+
+    if "ai_generated" in enabled:
         # Scene images (unlike thumbnails, which can use a paid
         # reference-image-conditioned provider) are generated exclusively
         # through Hugging Face's free-tier FLUX.1-schnell, with a non-billed
         # local-library fallback if that fails (see images.py's
         # fetch_or_generate_images / _generate_with_huggingface_flux —
         # `log_usage(..., 0.0, ...)`, Izivoice's paid image path is never
-        # called for this). The IZIVOICE_API_KEY-configured and
-        # credit-balance checks that used to live here predate that switch
-        # to free-tier generation and were blocking real renders with a
-        # false "needs credits" 402 for creators with an empty balance, even
-        # though this step was never going to touch their balance at all —
-        # seen in production for multiple auto-mode channels in a row.
-        # user_ai_images_enabled stays: unlike the two removed checks, it's
-        # a deliberate tier gate (product decision), not a cost-recovery one.
+        # called for this). user_ai_images_enabled is a deliberate tier gate
+        # (product decision), not a cost-recovery one — the only real check
+        # AI generation needs before queuing.
         from src.utils.billing import user_ai_images_enabled
         owner = channel.user
         if owner and not user_ai_images_enabled(db, owner):
@@ -60,25 +70,20 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
                 status_code=403,
                 detail="Les fonctionnalités IA ne sont pas incluses dans ton abonnement actuel. Passe à un palier supérieur pour les débloquer, ou choisis une bibliothèque d’images à la place.",
             )
-    if source in {"library", "hybrid"}:
+        return
+
+    has_real_source = False
+    if "library" in enabled:
         library_path = str(image_style.get("library_path") or "")
         expected_prefix = f"channels/{channel.id}/library"
         library_dir = (STORAGE_PATH / library_path).resolve() if library_path else None
         storage_root = STORAGE_PATH.resolve()
         safe = library_dir is not None and (library_dir == storage_root or storage_root in library_dir.parents)
-        has_images = safe and library_path == expected_prefix and library_dir.is_dir() and any(
+        has_real_source = has_real_source or (safe and library_path == expected_prefix and library_dir.is_dir() and any(
             item.is_file() and item.suffix.lower() in LIBRARY_IMAGE_EXTENSIONS
             for item in library_dir.iterdir()
-        )
-        if not has_images:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"La bibliothèque d’images de la chaîne « {channel.name} » n’est pas enregistrée sur le serveur. "
-                    "Modifiez cette chaîne et réimportez son dossier d’images avant de lancer la vidéo."
-                ),
-            )
-    if source == "community":
+        ))
+    if "community" in enabled:
         has_approved_folder = db.query(CommunityLibraryFolder).filter(
             CommunityLibraryFolder.status == "approved",
             CommunityLibraryFolder.niche.ilike(channel.niche or ""),
@@ -91,14 +96,15 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
                 CommunityLibraryFolder.status == "approved",
                 CommunityLibraryImagePlacement.niche.ilike(channel.niche or ""),
             ).first() is not None
-        if not has_approved_folder:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Aucune bibliothèque collaborative disponible pour la niche « {channel.niche} » pour l’instant — "
-                    "choisis une autre source visuelle, ou reviens plus tard."
-                ),
-            )
+        has_real_source = has_real_source or has_approved_folder
+    if not has_real_source:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Aucune des sources visuelles activées pour « {channel.name} » n’a d’images disponibles pour l’instant. "
+                "Importe une bibliothèque d’images, active la génération IA, ou attends qu’une bibliothèque collaborative existe pour cette niche."
+            ),
+        )
 
 def clean_filename_title(filename: str) -> str:
     """Extracts clean video title from filename."""
@@ -253,6 +259,8 @@ async def submit_video_subject(
 
         estimated_cost = estimate_video_cost_credits(
             script_char_count=len(script_text),
+            estimated_duration_seconds=estimated_duration,
+            transcribe_audio=transcribe_audio,
             image_style=channel.image_style,
             music_preference=channel.music_preference,
         )
@@ -584,6 +592,17 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
     video = _get_owned_video(db, video_id, current_user)
     channel = video.channel
 
+    estimated_cost = estimate_video_cost_credits(
+        script_char_count=len((video.script_text or "").strip()) if video.input_type == "text" else 0,
+        estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0,
+        transcribe_audio=bool(video.transcribe_audio),
+        image_style=channel.image_style if channel else None,
+        music_preference=channel.music_preference if channel else None,
+    )
+    can_render, reason = user_can_render(db, current_user, estimated_cost)
+    if not can_render:
+        raise HTTPException(status_code=402, detail=reason)
+
     # A failed automation attempt that never got a script at all (created by
     # _record_automation_failure, script_text left "") can't just be
     # re-queued for rendering as-is — that renders "successfully" on empty
@@ -821,6 +840,9 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Le texte ne peut pas être vide.")
+    can_render, reason = user_can_render(db, current_user, len(text))
+    if not can_render:
+        raise HTTPException(status_code=402, detail=reason)
 
     scenes = _load_scenes_manifest(video)
     scene = next((s for s in scenes if s["index"] == scene_index), None)

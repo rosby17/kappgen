@@ -143,11 +143,13 @@ def run_video_pipeline(
     else:
         ai_original_window_seconds = 10 * 60
         ai_unique_scene_count = sum(1 for segment in segments if segment["start"] < ai_original_window_seconds)
-    if image_style_cfg.get("source") in ("ai_generated", "hybrid"):
-        prompt_source = prompts[:ai_unique_scene_count] if image_style_cfg.get("source") == "ai_generated" else prompts
+    from src.pipeline.images import resolve_enabled_image_sources
+    enabled_sources = resolve_enabled_image_sources(image_style_cfg)
+    ai_enabled = "ai_generated" in enabled_sources
+    if ai_enabled:
         directed_prompts = build_scene_prompts(
             script_text=script_text or "",
-            segment_texts=prompt_source,
+            segment_texts=prompts[:ai_unique_scene_count],
             style_prompt=image_style_cfg.get("style_prompt", ""),
             niche=channel_config.get("niche", ""),
         )
@@ -158,7 +160,7 @@ def run_video_pipeline(
         prompts,
         images_dir,
         image_style_cfg,
-        unique_generation_count=ai_unique_scene_count if image_style_cfg.get("source") == "ai_generated" else None,
+        unique_generation_count=ai_unique_scene_count if ai_enabled else None,
         user_id=channel_config.get("user_id"),
         niche=channel_config.get("niche"),
         channel_id=channel_config.get("id"),
