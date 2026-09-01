@@ -376,7 +376,7 @@ def estimate_video_cost_credits(
     # instead, priced per second of that recording.
     if script_char_count:
         total += script_char_count * IZIVOICE_TTS_CREDITS_PER_CHAR
-    elif transcribe_audio and estimated_duration_seconds:
+    if transcribe_audio and estimated_duration_seconds:
         total += estimated_duration_seconds * IZIVOICE_STT_CREDITS_PER_SEC
 
     source = image_style.get("source", "library")
@@ -420,10 +420,15 @@ def user_can_render(db: Session, user: User, estimated_cost_credits: int = 0) ->
     "has any credit at all" — a render that's guaranteed to run out of
     balance partway through wastes the portion that did complete for
     nothing, so it's better rejected upfront with a clear reason."""
-    if user.free_videos_used < user.free_video_quota_granted:
-        return True, ""
+    # The legacy flat "N free videos" quota (free_video_quota_granted) used to
+    # bypass the credit check entirely regardless of actual balance — a
+    # real free-render loophole, not the intended policy. The only free
+    # allowance is now the one-time WELCOME_CREDIT_AMOUNT grant at signup,
+    # which flows through the ordinary credit-balance check below like any
+    # other credits. New signups already get free_video_quota_granted=0
+    # (see auth.py); this field is otherwise unused/legacy now.
     sub = get_active_subscription(db, user)
-    if sub:
+    if sub and (sub.plan is None or sub.plan.credits is None):
         quota, used = user_video_quota_status(db, user)
         if quota is None or used < quota:
             return True, ""
@@ -478,7 +483,7 @@ def debit_credits(db: Session, user: User, amount: int, description: str, video_
         CreditPot.user_id == user.id,
         CreditPot.amount > 0,
         CreditPot.expires_at > datetime.utcnow(),
-    ).order_by(CreditPot.expires_at.asc()).all()
+    ).order_by(CreditPot.expires_at.asc()).with_for_update().all()
     if sum(p.amount for p in pots) < amount:
         return False
     remaining = amount
@@ -497,26 +502,26 @@ def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, opera
     """Self-contained version of debit_izivoice_usage, opening its own
     short-lived session — for deep pipeline call sites (image generation,
     per-scene TTS/STT) that only have a user_id, not a live db session/User
-    object, threaded down to them. Same shape as cost_tracking.log_usage()
-    for the same reason: a metering failure must never be able to fail the
-    actual generation it's metering. Swallows its own errors and treats them
-    as "allow" (fails open) — a metering bug shouldn't block a paying
-    creator's render; the balance check at submission time is the real gate."""
+    object, threaded down to them. Billing failures fail closed: returning
+    True without a verified user/debit allowed paid provider work to proceed
+    without payment."""
     if not user_id:
-        return True
+        return False
     try:
         from src.db.session import SessionLocal
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.id == user_id).first()
             if not user:
-                return True
+                return False
             has_own_key = bool(user.izivoice_api_key_encrypted)
             return debit_izivoice_usage(db, user, izivoice_credits, operation, has_own_key)
         finally:
             db.close()
-    except Exception:
-        return True
+    except Exception as exc:
+        from src.utils.logger import logger
+        logger.error(f"Credit debit failed closed for user {user_id}, operation {operation}: {exc}")
+        return False
 
 
 def estimate_script_generation_cost(total_words: int, num_parts: int) -> dict:
