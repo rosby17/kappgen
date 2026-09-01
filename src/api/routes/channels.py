@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from typing import List, Dict, Any, Optional
 import random
 import re
@@ -523,6 +524,16 @@ def list_channels(current_user: User = Depends(get_current_user), db: Session = 
         data["rendering_count"] = db.query(Video).filter(Video.channel_id == c.id, Video.status == VideoStatus.RENDERING.value).count()
         data["done_count"] = db.query(Video).filter(Video.channel_id == c.id, Video.status == VideoStatus.DONE.value).count()
         data["failed_count"] = db.query(Video).filter(Video.channel_id == c.id, Video.status == VideoStatus.FAILED.value).count()
+        # "Published" treats a manual download as equivalent to a real YouTube
+        # publish (the creator's own framing: both mean "this video has left
+        # the queue and is out in the world") — either timestamp counts.
+        published_filter = (
+            Video.channel_id == c.id, Video.status == VideoStatus.DONE.value,
+            or_(Video.youtube_published_at.isnot(None), Video.downloaded_at.isnot(None)),
+        )
+        data["published_count"] = db.query(Video).filter(*published_filter).count()
+        data["unpublished_count"] = data["done_count"] - data["published_count"]
+        data["total_count"] = db.query(Video).filter(Video.channel_id == c.id).count()
         result.append(data)
     return result
 
@@ -604,6 +615,12 @@ def get_channel(channel_id: str, current_user: User = Depends(get_current_user),
     data["queued_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.QUEUED.value).count()
     data["rendering_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.RENDERING.value).count()
     data["done_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.DONE.value).count()
+    data["published_count"] = db.query(Video).filter(
+        Video.channel_id == channel.id, Video.status == VideoStatus.DONE.value,
+        or_(Video.youtube_published_at.isnot(None), Video.downloaded_at.isnot(None)),
+    ).count()
+    data["unpublished_count"] = data["done_count"] - data["published_count"]
+    data["total_count"] = db.query(Video).filter(Video.channel_id == channel.id).count()
     return data
 
 @router.get("/{channel_id}/library-preview")
