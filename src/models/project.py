@@ -27,8 +27,12 @@ class SubtitleStyle(BaseModel):
     karaoke: bool = True                # legacy flag, kept for old channels — superseded by highlight_mode
     highlight_mode: str = "word"        # "word" (per-word), "line" (whole chunk), "none"
     words_per_line: int = 6
+    subtitle_mode: str = "dynamic"      # "dynamic" pronunciation sync | "paragraph" long persistent blocks
+    paragraph_duration_seconds: int = 45
+    paragraph_max_words: int = 90
+    paragraph_words_per_line: int = 10
     text_case: str = "none"             # "none", "upper", "lower", "capitalize"
-    bold: bool = False
+    bold: bool = True
     italic: bool = False
     letter_spacing: int = 0
     opacity: float = 100                # 0-100
@@ -117,6 +121,7 @@ class EffectsConfig(BaseModel):
     color_grade: str = "warm"           # "warm", "vintage", "dramatic", "none"
     grain_intensity: int = 50           # 0-100, scales the noise/grain amount
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
+    particle_intensity: int = 50        # 0-100, shared strength for atmospheric/particle effects
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
     watermark_enabled: bool = True       # large centered official logo at low opacity — free-tier default

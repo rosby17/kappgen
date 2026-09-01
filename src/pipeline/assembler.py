@@ -186,6 +186,7 @@ def assemble_final_video(
 
     grain_frac = max(0, min(100, effects.get("grain_intensity", 50))) / 100
     vignette_frac = max(0, min(100, effects.get("vignette_intensity", 50))) / 100
+    particle_frac = max(0, min(100, effects.get("particle_intensity", 50))) / 100
 
     # alls ranges chosen so 50% lands near the old fixed defaults (8 / 22)
     grain_alls = round(2 + grain_frac * 28)
@@ -221,6 +222,35 @@ def assemble_final_video(
     if "sharpen" in overlay_effects:
         # Crisper "HD clarity" look — the opposite end of the texture spectrum from grain.
         video_filters.append("unsharp=5:5:0.8:5:5:0.0")
+
+    # Atmospheric and genre effects. These use native FFmpeg filters only, so
+    # they remain available on every renderer without downloading overlay
+    # footage. Strength follows the shared particle/atmosphere slider.
+    particle_noise = round(3 + particle_frac * 25)
+    if "black_noise" in overlay_effects:
+        video_filters.append(f"noise=alls={round(5 + particle_frac * 35)}:allf=t+u,eq=brightness={-(0.015 + particle_frac * 0.045):.3f}")
+    if "stars" in overlay_effects:
+        video_filters.append(f"noise=alls={max(5, particle_noise // 2)}:allf=t+u,eq=brightness=0.015:contrast=1.04")
+    if "dust" in overlay_effects:
+        video_filters.append(f"noise=alls={max(4, particle_noise // 3)}:allf=t,eq=saturation=0.92:brightness=0.01")
+    if "snow" in overlay_effects:
+        video_filters.append(f"noise=alls={round(12 + particle_frac * 38)}:allf=t+u,eq=brightness=0.025")
+    if "rain" in overlay_effects:
+        video_filters.append(f"noise=alls={max(5, particle_noise // 2)}:allf=t,tmix=frames=2:weights='1 1',eq=brightness=-0.015:saturation=0.9")
+    if "fog" in overlay_effects:
+        video_filters.append(f"gblur=sigma={0.4 + particle_frac * 1.2:.2f},eq=brightness={0.025 + particle_frac * 0.045:.3f}:contrast={1.0 - particle_frac * 0.12:.3f}:saturation=0.88")
+    if "sparks" in overlay_effects:
+        video_filters.append(f"noise=alls={max(5, particle_noise // 2)}:allf=t+u,colorbalance=rh=0.12:gh=0.04,eq=contrast=1.05")
+    if "light_leak" in overlay_effects:
+        video_filters.append(f"colorbalance=rh={0.05 + particle_frac * 0.18:.3f}:gh={0.02 + particle_frac * 0.06:.3f}:bs=-0.04,eq=brightness={particle_frac * 0.025:.3f}:saturation=1.08")
+    if "dream_glow" in overlay_effects:
+        video_filters.append(f"gblur=sigma={0.6 + particle_frac * 1.8:.2f},eq=brightness={0.015 + particle_frac * 0.035:.3f}:saturation=1.05")
+    if "horror" in overlay_effects:
+        video_filters.append("colorbalance=rs=0.10:gs=-0.10:bs=-0.08,eq=contrast=1.22:brightness=-0.06:saturation=0.72,vignette=0.32")
+    if "vhs_glitch" in overlay_effects:
+        video_filters.append(f"rgbashift=rh={round(2 + particle_frac * 5)}:bh=-{round(2 + particle_frac * 5)},noise=alls={max(6, particle_noise // 2)}:allf=t+u,eq=contrast=1.08:saturation=0.9")
+    if "film_scratches" in overlay_effects:
+        video_filters.append(f"noise=alls={round(10 + particle_frac * 22)}:allf=t,eq=saturation=0.65:contrast=1.08")
 
     # Check if FFmpeg build has libass 'subtitles' filter, and whether the client
     # wants subtitles burned in at all (subtitle_style.enabled, default True).

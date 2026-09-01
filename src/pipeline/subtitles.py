@@ -79,6 +79,30 @@ def apply_text_case(text: str, case_mode: str) -> str:
     return text
 
 
+def _paragraph_chunks(words: List[Dict[str, Any]], max_seconds: int, max_words: int) -> List[List[Dict[str, Any]]]:
+    """Group timed words into persistent blocks, respecting both user limits."""
+    chunks = []
+    current = []
+    for word in words:
+        if current and (
+            len(current) >= max_words
+            or float(word.get("end", 0)) - float(current[0].get("start", 0)) > max_seconds
+        ):
+            chunks.append(current)
+            current = []
+        current.append(word)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _wrap_paragraph(words: List[str], words_per_line: int) -> str:
+    return r"\N".join(
+        " ".join(words[i:i + words_per_line])
+        for i in range(0, len(words), words_per_line)
+    )
+
+
 def generate_ass_subtitles(
     transcript_info: Dict[str, Any],
     style_config: Dict[str, Any],
@@ -120,6 +144,7 @@ def generate_ass_subtitles(
     shadow_color_hex = style_config.get("shadow_color") or "#000000"
     shadow_distance = style_config.get("shadow_distance", 3) if has_shadow else 0
 
+    subtitle_mode = style_config.get("subtitle_mode", "dynamic")
     highlight_mode = style_config.get("highlight_mode")
     if highlight_mode not in ("word", "line", "none"):
         highlight_mode = "word" if style_config.get("karaoke", True) else "line"
@@ -142,7 +167,9 @@ def generate_ass_subtitles(
     row = {"bottom": 0, "center": 3, "top": 6}.get(position, 0)
     col = {"left": 1, "center": 2, "right": 3}.get(align_h, 2)
     alignment = row + col
-    margin_v = 50 if position != "center" else 0
+    # Keep lower subtitles inside YouTube's safe area so player controls do
+    # not cover them. Top subtitles also retain a comfortable screen margin.
+    margin_v = 150 if position == "bottom" else (80 if position == "top" else 0)
 
     if has_box:
         border_style = 3
@@ -173,7 +200,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     pos_tag = ""
     if x_offset or y_offset:
         px = 960 + (col - 2) * 860 + x_offset
-        py = {0: 1030, 4: 540, 6: 50}[row] + y_offset
+        py = {0: 900, 3: 540, 6: 100}[row] + y_offset
         pos_tag = f"\\pos({px},{py})"
     rotate_tag = f"\\frz{rotation}" if rotation else ""
     prefix_tags = pos_tag + rotate_tag
@@ -181,7 +208,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     words = transcript_info.get("words", [])
     events = []
 
-    if words:
+    if words and subtitle_mode == "paragraph":
+        max_seconds = max(5, min(120, int(style_config.get("paragraph_duration_seconds") or 45)))
+        max_words = max(10, min(250, int(style_config.get("paragraph_max_words") or 90)))
+        line_words = max(3, min(20, int(style_config.get("paragraph_words_per_line") or 10)))
+        for chunk in _paragraph_chunks(words, max_seconds, max_words):
+            cleaned = [apply_text_case(w["word"].replace("{", "").replace("}", ""), text_case) for w in chunk]
+            paragraph_text = _wrap_paragraph(cleaned, line_words)
+            start_str = format_ass_time(chunk[0]["start"])
+            end_str = format_ass_time(chunk[-1]["end"])
+            events.append(
+                f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,"
+                f"{{{prefix_tags}\\c{base_color}}}{paragraph_text}"
+            )
+    elif words:
         chunk_size = max(1, int(style_config.get("words_per_line") or 6))
         for i in range(0, len(words), chunk_size):
             chunk = words[i:i + chunk_size]
