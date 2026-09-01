@@ -77,7 +77,15 @@ class MusicPreference(BaseModel):
     volume: float = 0.10                # Background volume level (0.0 - 1.0)
 
 class ImageStyle(BaseModel):
-    source: str = "library"             # "library" | "ai_generated" | "hybrid" | "community"
+    source: str = "library"             # legacy single-choice mirror of sources[0], kept for old channels/back-compat
+    # Any combination of "ai_generated" | "library" | "community" — a
+    # creator can now check all three at once (own upload + AI generation +
+    # the niche's shared pool, tried in that priority order — see
+    # IMAGE_SOURCE_PRIORITY/resolve_enabled_image_sources in images.py).
+    # Pydantic silently drops any field not declared here on every save, so
+    # this list existing only on the frontend meant every real save reset a
+    # 2-3-way combination straight back down to whatever `source` alone held.
+    sources: List[str] = Field(default_factory=lambda: ["library"])
     style_prompt: str = "cinematic, dramatic lighting, high detail, masterpiece"
     library_path: Optional[str] = None
     library_image_count: int = 0
@@ -85,6 +93,11 @@ class ImageStyle(BaseModel):
     # eligible for admin curation into its niche's shared community library
     # (see CommunityLibraryFolder). Never shared without this being true.
     share_with_community: bool = False
+    # How many distinct AI images to generate per video before recycling —
+    # "auto" (max_unique_images=None) lets the pipeline pick a sensible count
+    # from the video's own length; "manual" pins it to a specific number.
+    image_count_mode: Optional[str] = None
+    max_unique_images: Optional[int] = None
 
 class EffectsConfig(BaseModel):
     enabled: bool = True                # master on/off for color grade + overlay effects together
