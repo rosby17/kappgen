@@ -49,6 +49,19 @@ MAX_CONCURRENT_RENDERS = int(os.getenv("MAX_CONCURRENT_RENDERS", "3"))
 # even when more videos are rendering in parallel (the rest of each pipeline —
 # script, images, ffmpeg — isn't throttled by Izivoice at all).
 MAX_CONCURRENT_IZIVOICE_CALLS = int(os.getenv("MAX_CONCURRENT_IZIVOICE_CALLS", "3"))
+# Per-video clip-rendering concurrency (see orchestrator.py Step 5/7 and the
+# per-scene audio trim right after it): building each scene's ffmpeg clip
+# sequentially left CPU cores idle, so this was parallelized and bounded by
+# os.cpu_count() -- but that reads the HOST's full core count (unaffected by
+# a cgroup CPU quota), not what this container is actually capped to. On a
+# worker hard-limited to 2.5 CPU (izivoice/kappgen split), that meant up to
+# 4 concurrent ffmpeg clip processes fighting over 2.5 cores' worth of real
+# throughput -- pinning the container at/above its own ceiling for the
+# whole clip-rendering phase of every video, independent of
+# MAX_CONCURRENT_RENDERS (this happens *inside* a single render). Default
+# of 2 leaves headroom for the main process + concurrent TTS/HTTP calls;
+# raise via env var if the container's CPU allocation grows.
+MAX_CLIP_RENDER_WORKERS = int(os.getenv("MAX_CLIP_RENDER_WORKERS", "2"))
 # Daily automation (run_daily_automation) used to sweep every eligible channel
 # and queue+kick off each one's video back-to-back with no pause between them,
 # so a sweep touching several channels could hand multiple heavy renders to

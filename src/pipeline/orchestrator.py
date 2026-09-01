@@ -203,10 +203,12 @@ def run_video_pipeline(
     # Each scene's clip is independent (its own ffmpeg subprocess), so building
     # them one at a time was leaving CPU cores idle for no reason — this was the
     # single biggest sequential bottleneck for long videos (dozens of clips).
-    # Bounded by CPU count so a small VPS doesn't get more concurrent ffmpeg
-    # processes than it has cores to actually run them on.
+    # Bounded by MAX_CLIP_RENDER_WORKERS (see config.py) rather than
+    # os.cpu_count() — the latter reports the host's full core count, not
+    # what this container is actually capped to.
     clip_paths = [clips_dir / f"clip_{i+1:03d}.mp4" for i in range(len(segments))]
-    max_clip_workers = max(1, min(os.cpu_count() or 2, 4))
+    from src.config import MAX_CLIP_RENDER_WORKERS
+    max_clip_workers = max(1, MAX_CLIP_RENDER_WORKERS)
     with ThreadPoolExecutor(max_workers=max_clip_workers) as pool:
         futures = [
             pool.submit(
