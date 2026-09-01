@@ -260,7 +260,7 @@ def lookup_voice_by_id(voice_id: str, current_user: User = Depends(get_current_u
 
 
 @router.post("/{channel_id}/voice/clone")
-async def clone_channel_voice(channel_id: str, name: str = Form(...), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def clone_channel_voice(channel_id: str, name: str = Form(...), gender: str = Form("neutral"), audio: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
@@ -282,6 +282,7 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), audio: Upl
         channel_id=channel_id,
         user_id=current_user.id,
         name=name.strip(),
+        gender=gender if gender in ("male", "female") else "neutral",
         audio_path=audio_rel_path,
         status="pending",
     ))
@@ -320,7 +321,7 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
         if job.voice_id in seen:
             continue
         seen.add(job.voice_id)
-        voices.append({"id": job.voice_id, "name": job.name, "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None})
+        voices.append({"id": job.voice_id, "name": job.name, "gender": job.gender, "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None})
     return {"voices": voices}
 
 

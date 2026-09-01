@@ -50,6 +50,19 @@ def apply_overlay_shape_mask(source_path: Path, shape: str, temp_dir: Path, cach
 
 WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 
+# Looping particle overlay clips (see scripts/generate_particle_assets.py).
+# Rendered once on a black background; composited with blend=all_mode=screen
+# in _apply_particles_step, which is a no-op on black so only the bright
+# particle pixels show through onto the real video underneath.
+PARTICLES_DIR = ASSETS_PATH / "particles"
+PARTICLE_ASSETS = {
+    "stars": PARTICLES_DIR / "stars.mp4",
+    "dust": PARTICLES_DIR / "dust.mp4",
+    "snow": PARTICLES_DIR / "snow.mp4",
+    "rain": PARTICLES_DIR / "rain.mp4",
+    "sparks": PARTICLES_DIR / "sparks.mp4",
+}
+
 # Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
 # a gimmick" rather than a smooth blend between scenes.
 XFADE_TRANSITIONS = ["fade", "fadeblack", "dissolve"]
@@ -187,6 +200,7 @@ def assemble_final_video(
     grain_frac = max(0, min(100, effects.get("grain_intensity", 50))) / 100
     vignette_frac = max(0, min(100, effects.get("vignette_intensity", 50))) / 100
     particle_frac = max(0, min(100, effects.get("particle_intensity", 50))) / 100
+    active_particles = [pid for pid in ("stars", "dust", "snow", "rain", "sparks") if pid in overlay_effects and PARTICLE_ASSETS[pid].exists()]
 
     # alls ranges chosen so 50% lands near the old fixed defaults (8 / 22)
     grain_alls = round(2 + grain_frac * 28)
@@ -229,18 +243,15 @@ def assemble_final_video(
     particle_noise = round(3 + particle_frac * 25)
     if "black_noise" in overlay_effects:
         video_filters.append(f"noise=alls={round(5 + particle_frac * 35)}:allf=t+u,eq=brightness={-(0.015 + particle_frac * 0.045):.3f}")
-    if "stars" in overlay_effects:
-        video_filters.append(f"noise=alls={max(5, particle_noise // 2)}:allf=t+u,eq=brightness=0.015:contrast=1.04")
-    if "dust" in overlay_effects:
-        video_filters.append(f"noise=alls={max(4, particle_noise // 3)}:allf=t,eq=saturation=0.92:brightness=0.01")
-    if "snow" in overlay_effects:
-        video_filters.append(f"noise=alls={round(12 + particle_frac * 38)}:allf=t+u,eq=brightness=0.025")
-    if "rain" in overlay_effects:
-        video_filters.append(f"noise=alls={max(5, particle_noise // 2)}:allf=t,tmix=frames=2:weights='1 1',eq=brightness=-0.015:saturation=0.9")
+    # stars/dust/snow/rain/sparks used to be abstract noise+brightness tweaks
+    # here — they never actually looked like their name, just a vague film
+    # grain. They're now real animated overlay clips (assets/particles/*.mp4,
+    # see generate_particle_assets.py) composited in _apply_particles_step
+    # below with a screen blend, same trick the wizard's CSS preview already
+    # uses. fog stays a pure blur/brightness filter — a haze genuinely is a
+    # blur, not discrete particles, so the old approach already suited it.
     if "fog" in overlay_effects:
         video_filters.append(f"gblur=sigma={0.4 + particle_frac * 1.2:.2f},eq=brightness={0.025 + particle_frac * 0.045:.3f}:contrast={1.0 - particle_frac * 0.12:.3f}:saturation=0.88")
-    if "sparks" in overlay_effects:
-        video_filters.append(f"noise=alls={max(5, particle_noise // 2)}:allf=t+u,colorbalance=rh=0.12:gh=0.04,eq=contrast=1.05")
     if "light_leak" in overlay_effects:
         video_filters.append(f"colorbalance=rh={0.05 + particle_frac * 0.18:.3f}:gh={0.02 + particle_frac * 0.06:.3f}:bs=-0.04,eq=brightness={particle_frac * 0.025:.3f}:saturation=1.08")
     if "dream_glow" in overlay_effects:
@@ -380,22 +391,35 @@ def assemble_final_video(
 
     for ov in image_overlays:
         cmd.extend(["-i", str(ov["path"].resolve())])
+    for pid in active_particles:
+        # -stream_loop -1 repeats the (few-second) clip indefinitely; -shortest
+        # on the final output mux is what actually stops it once the real
+        # video/audio end, so it never has to be trimmed to an exact duration.
+        cmd.extend(["-stream_loop", "-1", "-i", str(PARTICLE_ASSETS[pid].resolve())])
     if has_watermark:
         cmd.extend(["-i", str(WATERMARK_PATH.resolve())])
 
     cmd.extend(["-i", str(audio_path.resolve())])
-    audio_input_index = (len(clip_paths) if use_xfade else 1) + len(image_overlays) + (1 if has_watermark else 0)
+    audio_input_index = (len(clip_paths) if use_xfade else 1) + len(image_overlays) + len(active_particles) + (1 if has_watermark else 0)
 
     filter_parts = [video_chain] if use_xfade else []
     base_label = "v_joined" if use_xfade else "0:v"
     overlay_base_index = len(clip_paths) if use_xfade else 1
-    watermark_index = overlay_base_index + len(image_overlays)
+    particles_base_index = overlay_base_index + len(image_overlays)
+    watermark_index = particles_base_index + len(active_particles)
 
     def _apply_effects_step():
         nonlocal base_label
         if effects_vf_string:
             filter_parts.append(f"[{base_label}]{effects_vf_string}[v_eff]")
             base_label = "v_eff"
+        for i, pid in enumerate(active_particles):
+            idx = particles_base_index + i
+            scaled_label = f"part{i}"
+            filter_parts.append(f"[{idx}:v]scale=1920:1080[{scaled_label}]")
+            out_label = f"v_part{i}"
+            filter_parts.append(f"[{base_label}][{scaled_label}]blend=all_mode=screen:all_opacity={particle_frac:.3f}[{out_label}]")
+            base_label = out_label
 
     def _apply_subtitles_step():
         nonlocal base_label
