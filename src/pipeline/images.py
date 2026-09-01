@@ -452,11 +452,14 @@ def fetch_or_generate_images(
     channel_id: Optional[str] = None,
 ) -> List[Path]:
     """
-    Fetches images for each scene, trying every source the channel has
-    enabled in a fixed priority order — AI generation, then its own local
-    library, then the niche's community library (see
-    resolve_enabled_image_sources) — falling through to the next one only
-    on an actual failure/shortage, not splitting work between them.
+    Fetches images for each scene. With exactly one visual source enabled,
+    that source is used directly, falling through to the next in priority
+    order (see resolve_enabled_image_sources) only on an actual
+    failure/shortage. With two or more enabled, each scene is randomly
+    assigned one of them (roughly evenly split, reshuffled) instead of
+    treating the others as pure emergency fallback — a real mix of AI,
+    local, and community imagery throughout the video, not "AI unless it
+    breaks."
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     enabled = resolve_enabled_image_sources(image_style)
@@ -556,6 +559,54 @@ def fetch_or_generate_images(
         if fresh_paths:
             _persist_generated_images_to_channel_library(channel_id, user_id, niche, fresh_paths)
         return generated_paths
+
+    if len(enabled) > 1:
+        # Two or more sources enabled — genuinely mix them instead of
+        # treating everything past the first as pure emergency fallback.
+        # Each scene is randomly assigned one enabled source, reshuffled
+        # every "round" so the split stays roughly even across the whole
+        # video (e.g. 3 sources, 30 scenes -> ~10 scenes each, in random
+        # order, never the same source three times running by design of
+        # the shuffle-per-round below... though a run of the same source
+        # can still happen by chance, same as shuffling any deck).
+        assignment: List[str] = []
+        while len(assignment) < len(prompts):
+            round_sources = list(enabled)
+            random.shuffle(round_sources)
+            assignment.extend(round_sources)
+        assignment = assignment[:len(prompts)]
+        logger.info(f"Mixing visual sources ({', '.join(enabled)}) across {len(prompts)} scene(s): " + ", ".join(f"{assignment.count(s)}× {s}" for s in enabled))
+
+        results: List[Optional[Path]] = [None] * len(prompts)
+
+        if "ai_generated" in enabled:
+            ai_indices = [i for i, s in enumerate(assignment) if s == "ai_generated"]
+            if ai_indices:
+                ai_prompts = [prompts[i] for i in ai_indices]
+                generation_count = min(len(ai_prompts), unique_generation_count or len(ai_prompts))
+                ai_originals = generate_images(ai_prompts[:generation_count])
+                ai_sequence = expand_randomly(ai_originals, len(ai_indices))
+                for pos, i in enumerate(ai_indices):
+                    if pos < len(ai_sequence):
+                        results[i] = ai_sequence[pos]
+
+        # Everything not filled by AI (library/community-assigned scenes,
+        # plus any scene where AI generation itself failed) is drawn from
+        # one combined pool of whichever of library/community are enabled —
+        # get_image_pool already merges and shuffles both together, with
+        # synthetic art as the final safety net if truly nothing is available.
+        still_needed = sum(1 for r in results if r is None)
+        if still_needed:
+            pool = iter(get_image_pool(
+                output_dir, still_needed,
+                custom_library_path=library_path if "library" in enabled else None,
+                additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
+            ))
+            for i, r in enumerate(results):
+                if r is None:
+                    results[i] = next(pool, None)
+
+        return [r for r in results if r is not None]
 
     if "ai_generated" in enabled:
         # Generate an original visual pool only for the opening window (10 min
