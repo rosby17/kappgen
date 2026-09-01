@@ -553,14 +553,29 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
         .all()
     )
     for channel in channels_with_library:
-        count = int((channel.image_style or {}).get("library_image_count") or 0)
+        shared = shared_by_channel.get(channel.id)
+        # image_style.library_image_count only reflects a manual upload
+        # (POST .../library-images) — it's never touched by images
+        # auto-accumulating into the channel's library from AI generation
+        # (see _persist_generated_images_to_channel_library in images.py),
+        # which instead keeps CommunityLibraryFolder.image_count current.
+        # A manually-uploaded-but-never-shared channel has no
+        # CommunityLibraryFolder row at all (deleted/never created by
+        # _sync_community_library_folder when share_with_community is
+        # false), so neither field alone is reliable — take whichever is
+        # higher. Without this, a channel that only ever grew its library
+        # automatically (never manually uploaded) was invisible here
+        # entirely, niche included, however many images it actually had.
+        count = max(
+            int((channel.image_style or {}).get("library_image_count") or 0),
+            shared.image_count if shared else 0,
+        )
         if count <= 0:
             continue
         grand_total += count
         home_niche = channel.niche or "Sans niche"
 
         owner = channel.user
-        shared = shared_by_channel.get(channel.id)
         bucket = niches.setdefault(home_niche, {"niche": home_niche, "total_images": 0, "users": {}})
         bucket["total_images"] += count
         user_key = channel.user_id or "unknown"
@@ -578,10 +593,17 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
             "community_folder_id": shared.id if shared else None,
             "share_status": shared.status if shared else "not_shared",
         })
+        # Newest contributing channel's created_at, as a stand-in for "most
+        # recently active niche" — lets the admin sort by recency instead of
+        # only by image count or alphabetically.
+        channel_created = channel.created_at.isoformat() if channel.created_at else None
+        if channel_created and (bucket.get("latest_activity") is None or channel_created > bucket["latest_activity"]):
+            bucket["latest_activity"] = channel_created
 
     niche_list = []
     for bucket in niches.values():
         bucket["users"] = sorted(bucket["users"].values(), key=lambda u: u["total_images"], reverse=True)
+        bucket.setdefault("latest_activity", None)
         niche_list.append(bucket)
     niche_list.sort(key=lambda n: (-n["total_images"], n["niche"]))
 
