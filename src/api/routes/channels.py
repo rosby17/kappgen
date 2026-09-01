@@ -1350,7 +1350,12 @@ def propose_channel_thumbnail_concept(channel_id: str, payload: dict = None, cur
     class _PreviewChannel:
         pass
     preview_channel = _PreviewChannel()
-    preview_channel.thumbnail_style = {"style_prompt": concept["style_prompt"]}
+    preview_channel.thumbnail_style = {
+        "style_prompt": concept["style_prompt"],
+        "font_family": concept.get("font_family"),
+        "accent_hex": concept.get("accent_hex"),
+        "text_position": concept.get("text_position"),
+    }
     preview_channel.image_style = channel.image_style
     preview_channel.niche = channel.niche
     preview_channel.user_id = channel.user_id
@@ -1403,6 +1408,9 @@ def approve_channel_thumbnail_concept(channel_id: str, payload: dict, current_us
     existing["style_prompt"] = style_prompt
     existing["concept_name"] = (payload or {}).get("concept_name")
     existing["text_style"] = (payload or {}).get("text_style")
+    existing["font_family"] = (payload or {}).get("font_family")
+    existing["accent_hex"] = (payload or {}).get("accent_hex")
+    existing["text_position"] = (payload or {}).get("text_position")
     channel.thumbnail_style = existing
     db.commit()
     db.refresh(channel)

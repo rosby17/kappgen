@@ -8,24 +8,54 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, STORAGE_PATH, ASSETS_PATH
 from src.pipeline.ai_text import generate_text
+from src.pipeline.subtitles import _resolve_font_file
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
 
-# Anton (bundled in assets/fonts) is the condensed, ultra-bold display font
-# real "faceless channel" YouTube thumbnails use (the reference style
-# creators pointed us at) — DejaVu Sans/Serif Bold read as generic document
-# fonts by comparison, not a poster headline. Kept as a list (one entry) so
-# _pick_thumbnail_variant's hash-based selection code doesn't need special
-# casing if a second display font is added later.
-_THUMBNAIL_FONT_FILES = [
-    str(ASSETS_PATH / "fonts" / "Anton-Regular.ttf"),
+# Anton (bundled in assets/fonts, guaranteed present regardless of container
+# font packages) is the always-available fallback. Every video used to get
+# this exact font — the literal "police figée" a creator flagged: no matter
+# the niche, the headline always looked the same. Real family names below
+# resolve through fontconfig (_resolve_font_file, same mechanism the subtitle
+# burn-in already relies on) so this reuses fonts already verified present in
+# the container instead of guessing file paths — this list is a curated
+# subset of frontend App.jsx's SUBTITLE_FONTS "Display/Impact", "Rond, doux"
+# and "Ludique" groups: bold enough to read as a poster headline, with
+# genuinely different moods so a niche's thumbnail concept can actually pick
+# one that fits, instead of every channel converging on the same look again.
+_THUMBNAIL_FALLBACK_FONT = str(ASSETS_PATH / "fonts" / "Anton-Regular.ttf")
+THUMBNAIL_FONT_FAMILIES = [
+    "Anton",             # ultra-bold condensed impact — the previous universal default
+    "Bebas Neue",        # tall condensed classic, documentary/factual
+    "League Spartan",    # bold geometric, business/tech/finance
+    "Yanone Kaffeesatz",  # punchy condensed alternative
+    "Comfortaa",         # soft rounded, wellness/self-help/parenting
+    "Dosis",             # soft rounded, gentle spirituality/mindfulness
+    "Lobster Two",       # warm expressive, lifestyle/personal story
+    "Kaushan Script",    # handwritten script, emotional/faith/poetry
+    "Roboto Slab",       # authoritative serif-slab, true crime/history/documentary
+    "Sora",               # clean geometric, tech/startup/finance
 ]
-# Gold/yellow is the one color virtually every high-CTR thumbnail in this
-# style uses for its "punch" line — swapped from the previous multi-hue
-# palette (cyan/pink/green read as generic app-UI accents, not a thumbnail
-# highlight color). Kept as a list of near-gold shades so regenerating still
-# varies slightly between videos without ever picking an off-brand hue.
+
+
+def _thumbnail_font_path(font_family: str) -> str:
+    """Resolves a THUMBNAIL_FONT_FAMILIES entry to a real font file via
+    fontconfig — falls back to the bundled Anton if the family is unset,
+    not in the curated list, or fontconfig can't resolve it (e.g. a stale
+    thumbnail_style saved before this font list existed/changed)."""
+    if font_family not in THUMBNAIL_FONT_FAMILIES:
+        return _THUMBNAIL_FALLBACK_FONT
+    resolved = _resolve_font_file(font_family)
+    return resolved if Path(resolved).exists() else _THUMBNAIL_FALLBACK_FONT
+
+
+# Gold/yellow is still the safe default — the one color virtually every
+# high-CTR thumbnail in this style uses for its "punch" line — but a
+# concept's own accent_hex (from propose_thumbnail_concept) now takes
+# priority when the channel actually has one, instead of every channel
+# converging on the same near-gold hue regardless of niche/mood.
 _THUMBNAIL_ACCENT_COLORS = ["#ffd400", "#f7c600", "#ffcc33"]
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def _fallback_metadata(video, channel) -> dict:
@@ -106,13 +136,38 @@ def _font(size: int, font_file: str = None):
     return ImageFont.load_default()
 
 
-def _pick_thumbnail_variant(seed: str):
-    """Deterministic pick from the font/color palettes above, based on a hash
-    of `seed` — same video always looks the same, different videos vary."""
+# Script/rounded-soft families are drawn and kerned for mixed case — forcing
+# ALL CAPS on "Kaushan Script" or "Lobster Two" reads as broken, not bold,
+# unlike the condensed/geometric "impact" families this used to hardcode to
+# (Anton) which are explicitly designed as all-caps display faces.
+_THUMBNAIL_MIXED_CASE_FAMILIES = {"Comfortaa", "Dosis", "Lobster Two", "Kaushan Script"}
+
+
+def _pick_thumbnail_variant(seed: str, thumbnail_style: dict = None):
+    """Resolves the font/accent/text-position for one thumbnail render.
+    thumbnail_style (from propose_thumbnail_concept, saved on the channel)
+    takes priority when present — a niche-specific choice beats a random one.
+    Falls back to a deterministic hash of `seed` (so the same video still
+    looks the same across re-renders, and different videos on a channel with
+    no concept yet still vary a little) rather than always the same font."""
+    thumbnail_style = thumbnail_style or {}
     digest = hashlib.sha256((seed or "").encode("utf-8")).hexdigest()
-    font_file = _THUMBNAIL_FONT_FILES[int(digest[:8], 16) % len(_THUMBNAIL_FONT_FILES)]
-    accent_color = _THUMBNAIL_ACCENT_COLORS[int(digest[8:16], 16) % len(_THUMBNAIL_ACCENT_COLORS)]
-    return font_file, accent_color
+
+    font_family = thumbnail_style.get("font_family")
+    if font_family not in THUMBNAIL_FONT_FAMILIES:
+        font_family = THUMBNAIL_FONT_FAMILIES[int(digest[:8], 16) % len(THUMBNAIL_FONT_FAMILIES)]
+    font_file = _thumbnail_font_path(font_family)
+
+    accent_hex = thumbnail_style.get("accent_hex")
+    accent_color = accent_hex if accent_hex and _HEX_COLOR_RE.match(accent_hex) else (
+        _THUMBNAIL_ACCENT_COLORS[int(digest[8:16], 16) % len(_THUMBNAIL_ACCENT_COLORS)]
+    )
+
+    text_position = thumbnail_style.get("text_position")
+    if text_position not in ("top", "center", "bottom"):
+        text_position = "center"
+
+    return font_file, font_family, accent_color, text_position
 
 
 THUMBNAIL_CONCEPT_INSTRUCTION = """You are a YouTube thumbnail art director. A creator is starting a new "{niche}" channel and needs a distinctive, reusable visual identity for their thumbnails — not a single one-off image, but a locked-in STYLE that every future video's thumbnail will follow, the same way real successful channels in this niche have one instantly-recognizable look (e.g. a senior-health channel using a warm flat-illustration mascot instead of stock medical photos; a true-crime channel using a dark grainy photo-collage look; a finance channel using bold chart-and-cash iconography).
@@ -122,12 +177,17 @@ Study what actually works for "{niche}" specifically on YouTube today, then inve
 Recent/example video titles from this channel, for context on tone and subject matter:
 {titles}
 
+The headline text must be one of these exact font families (a real font installed on the render server — pick the one whose mood actually matches this concept, don't default to the first one): {font_choices}.
+
 Respond with ONLY this JSON object, no other text:
 {{
   "concept_name": "a short 3-5 word label for this style, e.g. 'Mascot flat-illustration, warm muted palette'",
   "rationale": "1-2 sentences on why this concept fits the niche and will read well as a recognizable, repeatable thumbnail identity",
-  "style_prompt": "a single dense, comma-separated image-generation prompt (no full sentences) describing the reusable visual identity: illustration/photo style, recurring subject or character (if any) and its exact look, color palette (2-3 named colors), mood, composition rules. This will be fed into an image generator for EVERY future thumbnail on this channel alongside that specific video's own topic, so describe the character/style/palette/layout as fixed, but explicitly state that the character's pose, gesture, and action must change each time to match that video's specific topic (give 3-4 concrete example actions spanning different topics in this niche) — never lock in one single frozen pose/action/prop as if it were part of the identity, or every thumbnail will look like the same photo with different text pasted on.",
-  "text_style": "one short phrase on how the bold headline text should look/behave to match this concept, e.g. 'thick rounded sans-serif in cream and terracotta banners' or 'condensed red/white slab caps like a news chyron'"
+  "style_prompt": "a single dense, comma-separated image-generation prompt (no full sentences) describing the reusable visual identity: illustration/photo style, recurring subject or character (if any) and its exact look, color palette (2-3 named colors), mood, composition rules, and a concrete framing/composition instruction (e.g. tight close-up filling the frame, subject off-center with negative space for text, dramatic low angle) — avoid generic filler like 'cinematic, high detail, dramatic lighting'; be as specific as a real thumbnail designer's brief. This will be fed into an image generator for EVERY future thumbnail on this channel alongside that specific video's own topic, so describe the character/style/palette/layout/composition as fixed, but explicitly state that the character's pose, gesture, and action must change each time to match that video's specific topic (give 3-4 concrete example actions spanning different topics in this niche) — never lock in one single frozen pose/action/prop as if it were part of the identity, or every thumbnail will look like the same photo with different text pasted on.",
+  "text_style": "one short phrase on how the bold headline text should look/behave to match this concept, e.g. 'thick rounded sans-serif in cream and terracotta banners' or 'condensed red/white slab caps like a news chyron'",
+  "font_family": "exactly one of the font families listed above",
+  "accent_hex": "a single #RRGGBB hex color for the headline's highlighted punch-word — must actually fit this concept's palette, not always gold/yellow",
+  "text_position": "one of: top, center, bottom — wherever the headline reads best against this concept's composition"
 }}"""
 
 
@@ -148,7 +208,8 @@ def propose_thumbnail_concept(niche: str, sample_titles: list, rejected_concepts
             f"different in approach (not just a different color palette on the same idea):\n{listed}\n"
         )
     titles_block = "\n".join(f"- {t}" for t in (sample_titles or [])) or "(no videos yet — infer from the niche alone)"
-    instruction = THUMBNAIL_CONCEPT_INSTRUCTION.format(niche=niche or "general", avoid_clause=avoid_clause, titles=titles_block)
+    font_choices = ", ".join(THUMBNAIL_FONT_FAMILIES)
+    instruction = THUMBNAIL_CONCEPT_INSTRUCTION.format(niche=niche or "general", avoid_clause=avoid_clause, titles=titles_block, font_choices=font_choices)
     raw = generate_text(instruction, max_tokens=800, model="claude-sonnet-5", operation="thumbnail_concept")
     text = raw.strip()
     if text.startswith("```"):
@@ -158,6 +219,16 @@ def propose_thumbnail_concept(niche: str, sample_titles: list, rejected_concepts
     for key in ("concept_name", "rationale", "style_prompt", "text_style"):
         if not data.get(key):
             raise ValueError(f"Thumbnail concept response missing '{key}'")
+    # font_family/accent_hex/text_position are new, best-effort — an
+    # unrecognized font or malformed hex just falls back to the existing
+    # hash-based variation in _pick_thumbnail_variant rather than failing the
+    # whole concept generation over one bad enum value.
+    if data.get("font_family") not in THUMBNAIL_FONT_FAMILIES:
+        data["font_family"] = None
+    if not (isinstance(data.get("accent_hex"), str) and _HEX_COLOR_RE.match(data["accent_hex"])):
+        data["accent_hex"] = None
+    if data.get("text_position") not in ("top", "center", "bottom"):
+        data["text_position"] = None
     return data
 
 
@@ -183,9 +254,19 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     # tends to render actual lettering on the page) — our own headline text
     # then gets drawn on top of that, producing a visibly duplicated title.
     # Repeating and escalating the instruction cuts this down noticeably.
+    #
+    # The old suffix here ("cinematic, high detail, dramatic lighting,
+    # eye-catching") was generic boilerplate stacked on top of an already
+    # detailed style_prompt (see propose_thumbnail_concept) — those buzzwords
+    # are exactly what makes different niches' AI backgrounds converge on the
+    # same generic look. When a real concept exists, its own composition
+    # instruction (now part of style_prompt) is trusted instead; the
+    # boilerplate only kicks in as a bare-minimum floor for channels that
+    # never generated one (style_prompt empty/legacy).
+    composition_floor = "" if thumbnail_style_prompt else "high detail, striking composition, "
     prompt = (
         f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, "
-        f"cinematic, high detail, dramatic lighting, eye-catching, 16:9. "
+        f"{composition_floor}16:9. "
         f"Absolutely no text, no letters, no words, no titles, no captions, no typography, "
         f"no writing of any kind anywhere in the image, no watermark — pure photographic/artistic scene only."
     )
@@ -259,8 +340,10 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    font_file, accent_color = _pick_thumbnail_variant(text)
+    thumbnail_style = (channel.thumbnail_style or {}) if channel is not None else {}
+    font_file, font_family, accent_color, text_position = _pick_thumbnail_variant(text, thumbnail_style)
     accent_rgb = tuple(int(accent_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    use_upper = font_family not in _THUMBNAIL_MIXED_CASE_FAMILIES
 
     # Reference-quality "faceless channel" thumbnails (the style creators
     # pointed us at) wrap by actual rendered pixel width, not a fixed
@@ -283,7 +366,7 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
             lines.append(current)
         return lines
 
-    words = text.upper().split()
+    words = (text.upper() if use_upper else text).split()
     for size in (140, 122, 104, 88, 74):
         font = _font(size, font_file)
         lines = _wrap(words, font)
@@ -313,7 +396,12 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
         highlight_indices.add(shortest_idx)
 
     text_block_height = line_height * len(lines)
-    top = max(40, (720 - text_block_height) // 2 - 20)
+    if text_position == "top":
+        top = 50
+    elif text_position == "bottom":
+        top = max(40, 720 - text_block_height - 70)
+    else:
+        top = max(40, (720 - text_block_height) // 2 - 20)
 
     # A soft, shallow gradient strictly behind the text block only (not the
     # whole frame) — thick black stroke on the text itself already carries
