@@ -533,11 +533,16 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
     community sharing (CommunityLibraryFolder only covers those). Every known
     niche always appears, even empty, so the admin can browse/organize before
     a single image has landed in it. Existing CommunityLibraryFolder rows
-    (if any) are joined in to surface each folder's sharing status."""
+    (if any) are joined in to surface each folder's sharing status.
+
+    A folder always lives under its channel's own niche here, regardless of
+    how individual images inside it have been reassigned to other niches'
+    pools via "Déplacer vers…"/"Fusionner avec…" — those only change which
+    niche's community pool an image feeds during generation
+    (CommunityLibraryImagePlacement), not where the folder itself is found
+    when browsing. Moving every image out of a folder must never make that
+    folder disappear from its own niche."""
     shared_by_channel = {f.channel_id: f for f in db.query(CommunityLibraryFolder).all()}
-    placements_by_channel: dict[str, list[CommunityLibraryImagePlacement]] = {}
-    for placement in db.query(CommunityLibraryImagePlacement).all():
-        placements_by_channel.setdefault(placement.channel_id, []).append(placement)
 
     niches: dict = {n: {"niche": n, "total_images": 0, "users": {}} for n in KNOWN_NICHES}
     grand_total = 0
@@ -552,36 +557,28 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
         if count <= 0:
             continue
         grand_total += count
-        default_niche = channel.niche or "Sans niche"
-        niche_counts: dict[str, int] = {}
-        placements = placements_by_channel.get(channel.id, [])
-        for placement in placements:
-            niche_counts[placement.niche] = niche_counts.get(placement.niche, 0) + 1
-        default_count = max(0, count - len(placements))
-        if default_count:
-            niche_counts[default_niche] = niche_counts.get(default_niche, 0) + default_count
+        home_niche = channel.niche or "Sans niche"
 
         owner = channel.user
         shared = shared_by_channel.get(channel.id)
-        for niche, niche_count in niche_counts.items():
-            bucket = niches.setdefault(niche, {"niche": niche, "total_images": 0, "users": {}})
-            bucket["total_images"] += niche_count
-            user_key = channel.user_id or "unknown"
-            user_bucket = bucket["users"].setdefault(user_key, {
-                "user_id": channel.user_id,
-                "user_email": owner.email if owner else "Utilisateur supprimé",
-                "total_images": 0,
-                "folders": [],
-            })
-            user_bucket["total_images"] += niche_count
-            user_bucket["folders"].append({
-                "channel_id": channel.id,
-                "channel_name": channel.library_admin_label or channel.name,
-                "real_channel_name": channel.name,
-                "image_count": niche_count,
-                "community_folder_id": shared.id if shared else None,
-                "share_status": shared.status if shared else "not_shared",
-            })
+        bucket = niches.setdefault(home_niche, {"niche": home_niche, "total_images": 0, "users": {}})
+        bucket["total_images"] += count
+        user_key = channel.user_id or "unknown"
+        user_bucket = bucket["users"].setdefault(user_key, {
+            "user_id": channel.user_id,
+            "user_email": owner.email if owner else "Utilisateur supprimé",
+            "total_images": 0,
+            "folders": [],
+        })
+        user_bucket["total_images"] += count
+        user_bucket["folders"].append({
+            "channel_id": channel.id,
+            "channel_name": channel.library_admin_label or channel.name,
+            "real_channel_name": channel.name,
+            "image_count": count,
+            "community_folder_id": shared.id if shared else None,
+            "share_status": shared.status if shared else "not_shared",
+        })
 
     niche_list = []
     for bucket in niches.values():
