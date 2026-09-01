@@ -576,7 +576,8 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
             user_bucket["total_images"] += niche_count
             user_bucket["folders"].append({
                 "channel_id": channel.id,
-                "channel_name": channel.name,
+                "channel_name": channel.library_admin_label or channel.name,
+                "real_channel_name": channel.name,
                 "image_count": niche_count,
                 "community_folder_id": shared.id if shared else None,
                 "share_status": shared.status if shared else "not_shared",
@@ -785,6 +786,29 @@ class AdminForceSharePayload(BaseModel):
 class AdminMoveChannelLibraryPayload(BaseModel):
     niche: str
     filenames: list[str]
+
+
+class AdminLibraryLabelPayload(BaseModel):
+    label: Optional[str] = None
+
+
+@router.put("/channel-library/{channel_id}/label")
+def admin_rename_channel_library(
+    channel_id: str,
+    payload: AdminLibraryLabelPayload,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Sets the admin-only display label for this channel's library folder,
+    used only in the library browser — never touches the channel's real
+    name, which the creator still sees unchanged everywhere else."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    label = (payload.label or "").strip()
+    channel.library_admin_label = label or None
+    db.commit()
+    return {"channel_id": channel.id, "channel_name": channel.library_admin_label or channel.name}
 
 
 @router.put("/channel-library/{channel_id}/niche")
