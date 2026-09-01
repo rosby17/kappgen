@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
 from pathlib import Path
 import sys
 
@@ -37,15 +38,36 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def security_headers(request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    return response
+# Plain ASGI middleware, not @app.middleware("http") (Starlette's
+# BaseHTTPMiddleware) — that variant buffers/rewraps the whole response body,
+# which silently strips Range/206 support from the /storage StaticFiles mount
+# and forced every video preview to download sequentially instead of seeking.
+# Confirmed live: a Range request against output.mp4 came back 200 with no
+# Accept-Ranges header. This version only touches the response-start message,
+# so body streaming (and Range handling) passes through untouched.
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["X-Frame-Options"] = "DENY"
+                headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+                headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+                headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Mount static storage directory for output video streaming and downloads
 app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
