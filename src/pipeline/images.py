@@ -8,6 +8,23 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS
 from src.utils.logger import logger
+
+# Image models often invent misspelled copy when a scene mentions a concept,
+# a book, a sign, a storefront, or a brand. Keep this constraint centralized
+# so it is applied even when the scene-director step fails and raw narration is
+# sent straight to a provider.
+TEXT_FREE_IMAGE_RULE = (
+    "pure visual scene only, absolutely no text, no words, no letters, no numbers, "
+    "no captions, no titles, no slogans, no labels, no signs, no posters, no banners, "
+    "no book or document writing, no interface text, no typography, no logos, "
+    "no signatures, no watermarks, no writing of any kind anywhere in the image"
+)
+
+
+def text_free_image_prompt(prompt: str) -> str:
+    """Append the non-negotiable no-writing rule without exceeding API limits."""
+    suffix = f", {TEXT_FREE_IMAGE_RULE}"
+    return f"{(prompt or '').strip()[:4000 - len(suffix)]}{suffix}"
 from src.utils.cost_tracking import log_usage, estimate_image_cost
 from src.pipeline.image_pool import get_image_pool
 
@@ -200,7 +217,7 @@ def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: flo
 def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> dict:
     model_parameters = json.dumps({"aspect_ratio": "16:9", "resolution": "2K"})
     fields = {
-        "prompt": (None, prompt[:4000]),
+        "prompt": (None, text_free_image_prompt(prompt)),
         "model_id": (None, IZIVOICE_IMAGE_MODEL_ID),
         "generations_count": (None, "1"),
         "model_parameters": (None, model_parameters),
@@ -281,10 +298,10 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
                 continue
             media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
             image_urls.append(f"data:{media_type};base64,{base64.standard_b64encode(path.read_bytes()).decode('utf-8')}")
-        payload = {"prompt": prompt[:4000], "image_urls": image_urls, "image_size": "landscape_16_9"}
+        payload = {"prompt": text_free_image_prompt(prompt), "image_urls": image_urls, "image_size": "landscape_16_9"}
     else:
         endpoint = "openai/gpt-image-2"
-        payload = {"prompt": prompt[:4000], "image_size": "landscape_16_9"}
+        payload = {"prompt": text_free_image_prompt(prompt), "image_size": "landscape_16_9"}
 
     resp = client.post(
         f"https://fal.run/{endpoint}",
@@ -375,7 +392,7 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
             resp = client.post(
                 "https://router.huggingface.co/nscale/v1/images/generations",
                 headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
-                json={"prompt": prompt[:4000], "model": "black-forest-labs/FLUX.1-schnell", "size": size},
+                json={"prompt": text_free_image_prompt(prompt), "model": "black-forest-labs/FLUX.1-schnell", "size": size},
                 timeout=90.0,
             )
             resp.raise_for_status()

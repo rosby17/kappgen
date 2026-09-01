@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from math import ceil
 from typing import Optional
 from sqlalchemy.orm import Session
-from src.db.models import User, Subscription, CreditPot, CreditTransaction, Order, Plan
+from src.db.models import User, Subscription, CreditPot, CreditTransaction, Order, Plan, AppSetting
 
 # Izivoice-billed calls (voice, images, transcription, music) are metered at
 # cost (x1) rather than marked up — the operator owns Izivoice too, so that
@@ -352,6 +352,40 @@ def grant_welcome_credits(db: Session, user: User) -> None:
     credit_user(db, user, WELCOME_CREDIT_AMOUNT, WELCOME_CREDIT_VALID_DAYS, "Crédits de bienvenue à l'inscription", transaction_type="welcome_bonus")
 
 
+def migrate_legacy_accounts_to_welcome_credits(db: Session) -> int:
+    """Retire legacy free-video quotas and grants missing welcome pots once."""
+    migration_key = "legacy_free_videos_to_10000_credits_v1"
+    # API and worker can start simultaneously in production. Serialize this
+    # migration on PostgreSQL so two processes cannot grant the same bonus.
+    if db.bind and db.bind.dialect.name == "postgresql":
+        from sqlalchemy import text
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": migration_key})
+    if db.query(AppSetting).filter(AppSetting.key == migration_key).first():
+        return 0
+
+    db.query(User).filter(User.free_video_quota_granted != 0).update(
+        {User.free_video_quota_granted: 0}, synchronize_session=False
+    )
+    already_granted = db.query(CreditTransaction.user_id).filter(
+        CreditTransaction.transaction_type == "welcome_bonus"
+    )
+    users = db.query(User).filter(~User.id.in_(already_granted)).all()
+    expires_at = datetime.utcnow() + timedelta(days=WELCOME_CREDIT_VALID_DAYS)
+    for user in users:
+        db.add(CreditPot(
+            user_id=user.id, amount=WELCOME_CREDIT_AMOUNT,
+            original_amount=WELCOME_CREDIT_AMOUNT, expires_at=expires_at,
+        ))
+        db.add(CreditTransaction(
+            user_id=user.id, amount=WELCOME_CREDIT_AMOUNT,
+            transaction_type="welcome_bonus",
+            description="Migration vers les 10 000 crédits de bienvenue",
+        ))
+    db.add(AppSetting(key=migration_key, value="complete"))
+    db.commit()
+    return len(users)
+
+
 def estimate_video_cost_credits(
     script_char_count: int = 0,
     estimated_duration_seconds: float = 0.0,
@@ -440,7 +474,7 @@ def user_can_render(db: Session, user: User, estimated_cost_credits: int = 0) ->
         return True, ""
     if estimated_cost_credits > 0:
         return False, f"Solde de crédits insuffisant pour cette vidéo (environ {estimated_cost_credits} crédits nécessaires, {balance} disponibles) — recharge des crédits."
-    return False, "Quota gratuit épuisé — recharge des crédits pour générer d'autres vidéos."
+    return False, "Solde de crédits insuffisant — recharge des crédits pour générer cette vidéo."
 
 
 def get_credit_balance(db: Session, user: User) -> int:

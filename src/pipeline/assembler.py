@@ -1,6 +1,5 @@
 import math
 import os
-import random
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -118,6 +117,8 @@ def assemble_final_video(
     branding_config: Optional[Dict[str, Any]] = None,
     clip_durations: Optional[List[float]] = None,
     subtitle_style: Optional[Dict[str, Any]] = None,
+    scene_energy: Optional[List[float]] = None,
+    editing_profile: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Joins motion clips (crossfading between them when durations are known so
@@ -323,13 +324,21 @@ def assemble_final_video(
         cumulative = clip_durations[0]
         prev_label = "0:v"
         for i in range(1, n):
-            transition = random.choice(XFADE_TRANSITIONS)
-            offset = cumulative - XFADE_DURATION
+            # Calm narration gets an unhurried dissolve; energetic passages
+            # receive a tighter fade that lands closer to the spoken accent.
+            from src.pipeline.editing_direction import transition_for_energy
+            energy = scene_energy[i] if scene_energy and i < len(scene_energy) else 0.5
+            profile = editing_profile or {
+                "transition_min": 0.55, "transition_max": 1.25,
+                "transitions": ("dissolve", "fade"),
+            }
+            transition, transition_duration = transition_for_energy(profile, energy)
+            offset = cumulative - transition_duration
             out_label = f"vx{i}" if i < n - 1 else "v_joined"
             chain.append(
-                f"[{prev_label}][{i}:v]xfade=transition={transition}:duration={XFADE_DURATION}:offset={offset:.3f}[{out_label}]"
+                f"[{prev_label}][{i}:v]xfade=transition={transition}:duration={transition_duration:.3f}:offset={offset:.3f}[{out_label}]"
             )
-            cumulative += clip_durations[i] - XFADE_DURATION
+            cumulative += clip_durations[i] - transition_duration
             prev_label = out_label
         video_chain = ";".join(chain)
     else:

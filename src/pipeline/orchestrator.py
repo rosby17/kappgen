@@ -9,11 +9,12 @@ from src.utils.ffmpeg_runner import get_audio_duration
 from src.pipeline.pacing import calculate_pacing_segments
 from src.pipeline.images import fetch_or_generate_images
 from src.pipeline.scene_director import build_scene_prompts
-from src.pipeline.clip_builder import build_image_clip
+from src.pipeline.clip_builder import analyze_scene_audio_energy, build_image_clip
 from src.pipeline.subtitles import generate_ass_subtitles, overlay_subtitles_on_image
 from src.pipeline.music import get_background_music_track
 from src.pipeline.audio_mixer import mix_audio_tracks
 from src.pipeline.assembler import assemble_final_video, check_ffmpeg_filter
+from src.pipeline.editing_direction import resolve_editing_profile
 
 def run_video_pipeline(
     channel_config: Dict[str, Any],
@@ -201,6 +202,10 @@ def run_video_pipeline(
     progress("Animation des scènes", 65)
     zoom_min = channel_config.get("effects_config", {}).get("zoom_min_pct", 1.0)
     zoom_max = channel_config.get("effects_config", {}).get("zoom_max_pct", 1.12)
+    editing_profile = resolve_editing_profile(channel_config.get("niche", ""))
+    logger.info(f"Niche-aware editing direction: {editing_profile['name']} ({channel_config.get('niche') or 'general'})")
+
+    scene_energy = analyze_scene_audio_energy(raw_vo_path, segments)
 
     # Each scene's clip is independent (its own ffmpeg subprocess), so building
     # them one at a time was leaving CPU cores idle for no reason — this was the
@@ -220,6 +225,9 @@ def run_video_pipeline(
                 duration=seg["duration"],
                 zoom_min_pct=zoom_min,
                 zoom_max_pct=zoom_max,
+                energy=scene_energy[i],
+                scene_index=i,
+                editing_profile=editing_profile,
             )
             for i, (seg, img_path) in enumerate(zip(segments, subtitled_image_paths))
         ]
@@ -291,7 +299,8 @@ def run_video_pipeline(
             voiceover_path=raw_vo_path,
             music_path=music_track,
             output_audio_path=mixed_audio_path,
-            music_volume=music_pref.get("volume", 0.15)
+            music_volume=music_pref.get("volume", 0.15),
+            processing=music_pref,
         )
     else:
         mixed_audio_path = raw_vo_path
@@ -309,6 +318,8 @@ def run_video_pipeline(
         branding_config=channel_config.get("branding"),
         clip_durations=[seg["duration"] for seg in segments],
         subtitle_style=channel_config.get("subtitle_style"),
+        scene_energy=scene_energy,
+        editing_profile=editing_profile,
     )
     
     logger.info(f"Pipeline successfully rendered video to {final_output_path}")
@@ -589,6 +600,7 @@ def regenerate_scene_audio(
             music_path=music_track,
             output_audio_path=mixed_audio_path,
             music_volume=music_pref.get("volume", 0.15),
+            processing=music_pref,
         )
     else:
         mixed_audio_path = raw_vo_path

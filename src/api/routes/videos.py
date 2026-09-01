@@ -223,6 +223,7 @@ async def submit_video_subject(
 
             video = Video(
                 channel_id=channel.id,
+                title=auto_title,
                 script_text=auto_title,
                 input_type="audio",
                 audio_input_path=str(dest_file),
@@ -233,8 +234,6 @@ async def submit_video_subject(
             )
             db.add(video)
             created_videos.append(video)
-            if current_user.free_videos_used < current_user.free_video_quota_granted:
-                current_user.free_videos_used += 1
 
         db.commit()
         for v in created_videos:
@@ -279,8 +278,6 @@ async def submit_video_subject(
             voice_id=voice_id.strip() if voice_id else channel.voice_id,
         )
         db.add(video)
-        if current_user.free_videos_used < current_user.free_video_quota_granted:
-            current_user.free_videos_used += 1
         db.commit()
         db.refresh(video)
 

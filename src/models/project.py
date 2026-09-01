@@ -75,6 +75,16 @@ class MusicPreference(BaseModel):
     tracks: List[str] = Field(default_factory=list)  # storage-relative paths to uploaded tracks; one is picked at random per render
     ai_prompt: Optional[str] = None     # optional override prompt for AI generation; defaults to the channel niche
     volume: float = 0.10                # Background volume level (0.0 - 1.0)
+    auto_ducking: bool = True
+    ducking_amount: float = 0.70
+    fade_in_seconds: float = 2.0
+    fade_out_seconds: float = 3.0
+    soundgoodizer_enabled: bool = False
+    soundgoodizer_amount: float = 0.35
+    reverb_enabled: bool = False
+    reverb_amount: float = 0.15
+    maximus_enabled: bool = True
+    maximus_amount: float = 0.40
 
 class ImageStyle(BaseModel):
     source: str = "library"             # legacy single-choice mirror of sources[0], kept for old channels/back-compat

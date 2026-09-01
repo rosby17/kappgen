@@ -7,9 +7,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from src.db.session import SessionLocal, init_db
-from src.db.models import Video, Channel, User, VoiceCloneJob
+from src.db.models import Video, Channel, User, VoiceCloneJob, Subscription, Plan
 from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
 from src.config import FRONTEND_BASE_URL
 from src.models.project import VideoStatus
@@ -22,7 +22,7 @@ from src.pipeline.orchestrator import (
 from src.pipeline.transcode import try_ensure_sd_variant
 from src.pipeline import youtube_publisher
 from src.pipeline import youtube_metadata
-from src.config import STORAGE_PATH, MAX_CONCURRENT_RENDERS, AUTOMATION_LAUNCH_SPACING_SECONDS
+from src.config import STORAGE_PATH, AUTOMATION_LAUNCH_SPACING_SECONDS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration
 
@@ -111,15 +111,26 @@ def process_single_queued_video() -> bool:
     db = SessionLocal()
     video = None
     try:
-        # Among everything currently waiting, shortest estimated video first —
-        # a long render in progress is never interrupted, but once the worker
-        # is free again it picks the shortest queued job so quick requests
-        # don't sit behind someone else's hour-long video. Ties (or unknown
-        # estimates) fall back to arrival order.
+        # Paid-tier priority first, FIFO within the same tier. The highest
+        # currently-active plan price wins; welcome-credit/free users have a
+        # priority value of zero and therefore wait behind every paid tier.
+        active_plan_price = (
+            db.query(func.coalesce(func.max(Plan.price_fcfa), 0))
+            .select_from(Subscription)
+            .join(Plan, Subscription.plan_id == Plan.id)
+            .filter(
+                Subscription.user_id == Channel.user_id,
+                Subscription.status == "active",
+                Subscription.expires_at > datetime.utcnow(),
+            )
+            .correlate(Channel)
+            .scalar_subquery()
+        )
         video = (
             db.query(Video)
+            .join(Channel, Video.channel_id == Channel.id)
             .filter(Video.status == VideoStatus.QUEUED.value)
-            .order_by(Video.estimated_duration_seconds.asc().nullslast(), Video.created_at.asc())
+            .order_by(active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
             .with_for_update(skip_locked=True)
             .first()
         )
@@ -226,6 +237,7 @@ def process_single_queued_video() -> bool:
                 output_dir=video_dir,
                 progress_callback=update_progress,
                 watermark_enabled=watermark_enabled,
+                user_id=channel.user_id,
             )
 
             try:
@@ -241,16 +253,6 @@ def process_single_queued_video() -> bool:
             video.progress_percent = 100
             db.commit()
             logger.info(f"Worker successfully finished rendering music video ID: {video.id}")
-
-            # Single flat charge for the whole video, only once it's actually
-            # ready — not per intermediate step (per-track, per-image), as
-            # requested when this product was scoped.
-            try:
-                if channel.user_id:
-                    from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
-                    debit_izivoice_usage_by_user_id(channel.user_id, IZIVOICE_MUSIC_CREDITS * tracks_generated, "music_video_generation")
-            except Exception as e:
-                logger.warning(f"Music video billing failed for video {video.id}: {e}")
 
             try:
                 youtube_metadata.generate_thumbnail(
@@ -993,14 +995,33 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     "auto" who explicitly asks for a video right now should get exactly this,
     not the manual script/voice form."""
     from src.pipeline.script_writer import generate_daily_script
-    from src.utils.billing import user_can_render
+    from src.utils.billing import (
+        user_can_render,
+        estimate_script_generation_cost,
+        estimate_video_cost_credits,
+        debit_script_generation_cost,
+    )
+    from src.pipeline.script_writer import DEFAULT_SCRIPT_STRUCTURE
     from src.api.routes.videos import validate_channel_visual_source, MAX_VIDEO_DURATION_SECONDS
 
     owner = channel.user
     if not owner:
         logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no owner; skipping.")
         return None
-    can_render, reason = user_can_render(db, owner)
+    structure = channel.script_structure or DEFAULT_SCRIPT_STRUCTURE
+    parts = structure.get("parts") or DEFAULT_SCRIPT_STRUCTURE["parts"]
+    planned_words = sum(max(0, int(part.get("word_count", 0) or 0)) for part in parts)
+    planned_parts = max(1, len(parts))
+    planned_duration = max(3.0, planned_words / 2.5)
+    estimated_cost = estimate_script_generation_cost(planned_words, planned_parts)["credits"]
+    estimated_cost += estimate_video_cost_credits(
+        script_char_count=max(1, planned_words * 6),
+        estimated_duration_seconds=planned_duration,
+        transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
+        image_style=channel.image_style,
+        music_preference=channel.music_preference,
+    )
+    can_render, reason = user_can_render(db, owner, estimated_cost)
     if not can_render:
         logger.info(f"Daily automation: channel {channel.id} ('{channel.name}') skipped — {reason}")
         _record_automation_failure(db, channel, message=CREDIT_INSUFFICIENT_MESSAGE)
@@ -1096,19 +1117,32 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         db.commit()
         return None
 
+    actual_script_cost = debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
+    remaining_render_cost = estimate_video_cost_credits(
+        script_char_count=len(result["script_text"]),
+        estimated_duration_seconds=estimated_duration,
+        transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
+        image_style=channel.image_style,
+        music_preference=channel.music_preference,
+    )
+    can_render_after_script, post_script_reason = user_can_render(db, owner, remaining_render_cost)
+    if not actual_script_cost or not can_render_after_script:
+        video.status = VideoStatus.FAILED.value
+        video.error_message = post_script_reason or CREDIT_INSUFFICIENT_MESSAGE
+        video.progress_stage = "Échec"
+        video.progress_percent = 0
+        db.commit()
+        return None
+
     video.title = result["title"]
     video.script_text = result["script_text"]
     video.status = VideoStatus.QUEUED.value
     video.progress_stage = None
     video.progress_percent = 0
     video.estimated_duration_seconds = estimated_duration
-    if owner.free_videos_used < owner.free_video_quota_granted:
-        owner.free_videos_used += 1
     db.commit()
     db.refresh(video)
 
-    from src.utils.billing import debit_script_generation_cost
-    debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
     return video
 
 
@@ -1120,17 +1154,12 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
     (Phase 5), same relationship generate_and_queue_auto_video has with its
     own on-demand trigger."""
     from src.pipeline.music_video import pick_music_video_title
-    from src.utils.billing import user_can_render
+    from src.utils.billing import user_can_render, IZIVOICE_MUSIC_CREDITS
 
     owner = channel.user
     if not owner:
         logger.warning(f"Music video: channel {channel.id} ('{channel.name}') has no owner; skipping.")
         return None
-    can_render, reason = user_can_render(db, owner)
-    if not can_render:
-        logger.info(f"Music video: channel {channel.id} ('{channel.name}') skipped — {reason}")
-        return None
-
     music_config = channel.music_channel_config or {}
     style_prompt = (music_config.get("style_prompt") or "").strip()
     if not style_prompt:
@@ -1149,6 +1178,12 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
     ]
     title = pick_music_video_title(style_prompt, music_config.get("title_examples"), recent_titles)
     target_duration_minutes = float(music_config.get("target_duration_minutes") or 10)
+    # The generator may create at most 20 tracks. Pre-authorize that maximum
+    # so a long music render can never exceed the creator's available balance.
+    can_render, reason = user_can_render(db, owner, IZIVOICE_MUSIC_CREDITS * 20)
+    if not can_render:
+        logger.info(f"Music video: channel {channel.id} ('{channel.name}') skipped — {reason}")
+        return None
 
     video = Video(
         channel_id=channel.id,
@@ -1159,8 +1194,6 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
         estimated_duration_seconds=target_duration_minutes * 60.0,
     )
     db.add(video)
-    if owner.free_videos_used < owner.free_video_quota_granted:
-        owner.free_videos_used += 1
     db.commit()
     db.refresh(video)
     return video
@@ -1452,11 +1485,8 @@ def _handle_shutdown_signal(signum, frame):
 
 def _render_worker_loop(worker_name: str, poll_interval_seconds: float):
     """
-    One render lane: repeatedly claims and renders the next queued video,
-    independently of every other lane. `process_single_queued_video()` claims
-    its row with `SELECT ... FOR UPDATE SKIP LOCKED`, so any number of these
-    loops can run concurrently (across threads, even across processes) without
-    two lanes ever picking up the same video.
+    The single render lane repeatedly claims the highest paid tier's oldest
+    queued video. Keeping one lane makes the priority order deterministic.
     """
     while not _shutdown_requested:
         try:
@@ -1473,11 +1503,10 @@ def _render_worker_loop(worker_name: str, poll_interval_seconds: float):
 
 def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False, max_concurrent_renders: Optional[int] = None):
     """
-    Starts MAX_CONCURRENT_RENDERS render lanes so multiple videos (and thus
-    multiple users' TTS/audio jobs) render at the same time instead of the old
-    strictly-sequential one-video-at-a-time queue, plus one periodic-maintenance
-    loop (purge, automation, scheduled publish, YouTube sync) that only ever
-    runs once regardless of render concurrency.
+    Starts one strictly sequential priority render lane, plus the independent
+    voice-clone and periodic-maintenance loops. max_concurrent_renders remains
+    in the signature for backward-compatible callers but is intentionally
+    ignored: product policy is one video render at a time.
     """
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     from src.utils.error_tracking import init_error_tracking
@@ -1485,7 +1514,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     init_db()
     requeue_orphaned_videos()
     requeue_orphaned_voice_clone_jobs()
-    concurrency = max_concurrent_renders or MAX_CONCURRENT_RENDERS
+    concurrency = 1
 
     if single_run:
         # Used for one-shot/manual invocations — render exactly one video and

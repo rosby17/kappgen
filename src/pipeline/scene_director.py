@@ -56,6 +56,7 @@ Task:
 1. Write a short "visual bible" (2-3 sentences): recurring subject/character appearance if any, setting/era, color palette, lighting mood, art style. This keeps every scene visually consistent with the others.
 {f"2. Honor this creator-specified style direction: {style_prompt}" if style_prompt else ""}
 3. For EACH of the {len(segment_texts)} scenes, write one dense, comma-separated image-generation prompt (no full sentences, no preamble) that: visually represents what's being narrated in that scene, and applies the visual bible's style/palette/lighting so all scenes look like they belong to the same video. Vary the composition/camera angle across scenes so it doesn't feel repetitive.
+4. Every scene must be a text-free visual. Never request or depict words, letters, numbers, captions, titles, slogans, labels, signs, posters, banners, written pages, interfaces, typography, logos, signatures, or watermarks. If the narration mentions written material or a named concept, represent its meaning visually instead of placing its name in the image.
 
 Respond with ONLY this JSON object, no other text:
 {{"visual_bible": "...", "scene_prompts": ["prompt for scene 1", "prompt for scene 2", ...]}}

@@ -20,8 +20,8 @@ _limit_checkout = rate_limit("checkout", max_attempts=20, window_seconds=3600)
 
 @router.get("/plans")
 def list_plans(db: Session = Depends(get_db)):
-    plans = db.query(Plan).filter(Plan.is_active == True).order_by(Plan.price_fcfa.asc()).all()  # noqa: E712
-    return [p.to_dict() for p in plans]
+    from src.utils.plan_catalog import ensure_sales_catalog
+    return [p.to_dict() for p in ensure_sales_catalog(db)]
 
 
 @router.get("/subscription")
@@ -67,19 +67,16 @@ class CheckoutPayload(BaseModel):
 def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db), _rl=Depends(_limit_checkout)):
     if not current_user.email_verified:
         raise HTTPException(status_code=403, detail="Confirme ton adresse email avant de souscrire à une offre.")
+    from src.utils.plan_catalog import ensure_sales_catalog
+    ensure_sales_catalog(db)
     plan = db.query(Plan).filter(Plan.id == payload.plan_id, Plan.is_active == True).first()  # noqa: E712
     if not plan:
         raise HTTPException(status_code=404, detail="Offre introuvable.")
     if payload.provider not in ("maketou", "tarapay"):
         raise HTTPException(status_code=400, detail="Fournisseur de paiement inconnu.")
 
-    # Credits never expire — there's no "pay more for longer validity" tier
-    # any more, every credit-pack purchase grants a permanent balance at the
-    # plan's plain listed price. billing_cycle stays on the Order only for
-    # historical/reporting reasons (see _activate_subscription below); it no
-    # longer affects price or credit expiry. Legacy subscription-style plans
-    # (plan.credits is None) are unaffected either way.
-    billing_cycle = "lifetime"
+    # Every catalog offer is a 30-day pack at its fixed displayed price.
+    billing_cycle = "monthly"
     amount_fcfa = plan.price_fcfa
 
     order = Order(
@@ -124,7 +121,7 @@ def _activate_subscription(db: Session, order: Order):
     plan = order.plan
     from src.utils.billing import activate_credit_subscription, credit_user, grant_subscription_cycle_credits, CREDIT_CYCLE_DAYS, CREDIT_CYCLE_LABELS_FR
     if plan.credits:
-        valid_days = CREDIT_CYCLE_DAYS.get(order.billing_cycle, plan.duration_days)
+        valid_days = plan.duration_days
         cycle_label = CREDIT_CYCLE_LABELS_FR.get(order.billing_cycle, "Mensuel")
         credit_user(
             db, order.user,

@@ -1,6 +1,50 @@
 from pathlib import Path
-import random
+from array import array
+import math
+import subprocess
+from typing import List, Dict, Any, Optional
 from src.utils.ffmpeg_runner import run_ffmpeg, logger
+
+
+def analyze_scene_audio_energy(audio_path: Path, segments: List[Dict[str, float]], sample_rate: int = 2000) -> List[float]:
+    """Return a robust 0..1 energy score for each scene from the narration.
+
+    Decoding once to low-rate mono PCM is cheap even for long videos and is
+    much more faithful than guessing intensity from word count. Scores are
+    normalized within the video, so a softly narrated meditation still gets
+    useful relative dynamics without being edited like an action trailer.
+    """
+    if not segments:
+        return []
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(audio_path), "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"],
+            capture_output=True,
+            check=True,
+        )
+        samples = array("h")
+        samples.frombytes(proc.stdout)
+        raw = []
+        for seg in segments:
+            start = max(0, int(seg["start"] * sample_rate))
+            end = min(len(samples), max(start + 1, int(seg["end"] * sample_rate)))
+            chunk = samples[start:end]
+            if not chunk:
+                raw.append(0.0)
+                continue
+            # RMS expresses sustained intensity; peak adds a small accent for
+            # emphatic words without letting a single click dominate the cut.
+            rms = math.sqrt(sum(float(v) * v for v in chunk) / len(chunk))
+            peak = max(abs(v) for v in chunk)
+            raw.append(rms * 0.85 + peak * 0.15)
+        ordered = sorted(raw)
+        low = ordered[max(0, round((len(ordered) - 1) * 0.1))]
+        high = ordered[max(0, round((len(ordered) - 1) * 0.9))]
+        span = max(high - low, 1.0)
+        return [max(0.0, min(1.0, (value - low) / span)) for value in raw]
+    except Exception as exc:
+        logger.warning(f"Audio energy analysis failed; using neutral cinematic pacing: {exc}")
+        return [0.5] * len(segments)
 
 def build_image_clip(
     image_path: Path,
@@ -8,7 +52,10 @@ def build_image_clip(
     duration: float,
     zoom_min_pct: float = 1.0,
     zoom_max_pct: float = 1.12,
-    fps: int = 30
+    fps: int = 30,
+    energy: float = 0.5,
+    scene_index: int = 0,
+    editing_profile: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """
     Creates a 1920x1080 video clip from a static image applying a Ken Burns (zoompan) motion effect.
@@ -18,18 +65,25 @@ def build_image_clip(
     if total_frames < 1:
         total_frames = 1
         
-    # Randomized Ken Burns motion: pure zoom, pure pan, and diagonal zoom+pan
-    # combos, so consecutive scenes rarely feel like the same move repeated.
-    motion_types = [
+    # Movement follows the narration: restrained on calm passages and fuller
+    # on energetic ones. Direction follows a stable cinematic sequence rather
+    # than random choices that can accidentally repeat or fight the soundtrack.
+    default_motion_types = [
         "zoom_in", "zoom_out", "pan_right", "pan_left",
         "zoom_in_pan_right", "zoom_in_pan_left",
         "zoom_out_pan_right", "zoom_out_pan_left",
     ]
-    motion = random.choice(motion_types)
-    zoom_delta = zoom_max_pct - zoom_min_pct
+    energy = max(0.0, min(1.0, energy))
+    profile = editing_profile or {}
+    motion_types = profile.get("motions") or default_motion_types
+    motion = motion_types[scene_index % len(motion_types)]
+    configured_delta = max(0.0, zoom_max_pct - zoom_min_pct)
+    motion_scale = max(0.25, min(1.0, float(profile.get("motion_scale", 1.0))))
+    zoom_delta = configured_delta * motion_scale * (0.35 + 0.65 * energy)
+    dynamic_zoom_max = zoom_min_pct + zoom_delta
 
-    zoom_in_expr = f"min(pzoom+{zoom_delta/total_frames:.6f},{zoom_max_pct})"
-    zoom_out_expr = f"max({zoom_max_pct}-(on/{total_frames})*{zoom_delta:.6f},{zoom_min_pct})"
+    zoom_in_expr = f"min(pzoom+{zoom_delta/total_frames:.6f},{dynamic_zoom_max})"
+    zoom_out_expr = f"max({dynamic_zoom_max}-(on/{total_frames})*{zoom_delta:.6f},{zoom_min_pct})"
     pan_right_expr = "(on/{0})*(iw-iw/zoom)".format(total_frames)
     pan_left_expr = "(1-(on/{0}))*(iw-iw/zoom)".format(total_frames)
     center_x = "iw/2-(iw/zoom/2)"
@@ -40,9 +94,9 @@ def build_image_clip(
     elif motion == "zoom_out":
         zoom_expr, x_expr, y_expr = zoom_out_expr, center_x, center_y
     elif motion == "pan_right":
-        zoom_expr, x_expr, y_expr = f"{zoom_max_pct}", pan_right_expr, center_y
+        zoom_expr, x_expr, y_expr = f"{dynamic_zoom_max}", pan_right_expr, center_y
     elif motion == "pan_left":
-        zoom_expr, x_expr, y_expr = f"{zoom_max_pct}", pan_left_expr, center_y
+        zoom_expr, x_expr, y_expr = f"{dynamic_zoom_max}", pan_left_expr, center_y
     elif motion == "zoom_in_pan_right":
         zoom_expr, x_expr, y_expr = zoom_in_expr, pan_right_expr, center_y
     elif motion == "zoom_in_pan_left":

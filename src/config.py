@@ -37,13 +37,11 @@ R2_FREE_TIER_CAP_BYTES = int(os.getenv("R2_FREE_TIER_CAP_BYTES", str(9_500_000_0
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
-# How many videos the worker renders at once (each with its own TTS/STT calls),
-# instead of the old strictly-sequential one-at-a-time queue. Kept modest by
-# default (3) because the actual video assembly (ffmpeg) is CPU-bound and this
-# runs on a shared 4-vCPU VPS alongside Supabase/Coolify/other apps — going
-# much higher would just make every concurrent render slower via CPU
-# contention instead of finishing faster. Raise via env var on beefier hardware.
-MAX_CONCURRENT_RENDERS = int(os.getenv("MAX_CONCURRENT_RENDERS", "3"))
+# Product policy: video renders are plan-priority ordered and sequential. Kept as a
+# compatibility constant for older deployment configuration, but the worker
+# clamps the video lane count to one even if a stale environment variable is
+# still set higher.
+MAX_CONCURRENT_RENDERS = 1
 # Separate, tighter cap on simultaneous Izivoice TTS/STT calls specifically —
 # Izivoice rate-limits aggressively, so this stays below MAX_CONCURRENT_RENDERS
 # even when more videos are rendering in parallel (the rest of each pipeline —

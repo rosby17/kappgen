@@ -25,12 +25,9 @@ class User(Base):
     email_verified = Column(Boolean, nullable=False, default=False)
     email_verify_token = Column(String(64), nullable=True)
     email_verify_sent_at = Column(DateTime, nullable=True)
-    # Free-tier quota: set once at registration (see register_user), never
-    # recomputed later — the first 20 accounts ever created get a bigger
-    # trial (10), every account after that gets 3. free_videos_used only
-    # increments while under quota; once a paid Subscription exists it's
-    # irrelevant (see src/utils/billing.py: user_can_render).
-    free_video_quota_granted = Column(Integer, nullable=False, default=3)
+    # Legacy columns retained for schema compatibility only. Free access is
+    # exclusively the one-time 10,000-credit welcome pot.
+    free_video_quota_granted = Column(Integer, nullable=False, default=0)
     free_videos_used = Column(Integer, nullable=False, default=0)
 
     # Relationships

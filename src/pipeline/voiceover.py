@@ -17,12 +17,9 @@ STT_CHUNK_SECONDS = 300  # 5 min/chunk — smaller chunks are less likely to tri
 
 _cached_voice_id: Optional[str] = None
 
-# Videos now render concurrently (see queue_runner.MAX_CONCURRENT_RENDERS), but
-# Izivoice itself still throttles hard when too many TTS/STT calls land at
-# once. This semaphore caps how many *Izivoice* calls are in flight across all
-# concurrently-rendering videos at any moment — independent of, and tighter
-# than, the render concurrency itself — so the API doesn't just push the same
-# bottleneck into 429 retries instead of removing it.
+# Video rendering is sequential, while other features such as previews can
+# still call Izivoice concurrently from API processes. This semaphore keeps
+# those calls below the provider's rate limit.
 _izivoice_semaphore = threading.Semaphore(MAX_CONCURRENT_IZIVOICE_CALLS)
 
 
@@ -291,6 +288,10 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     word-level timing back together with per-chunk offsets.
     """
     total_duration = get_audio_duration(audio_path)
+    if user_id:
+        from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
+        if not debit_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt"):
+            raise RuntimeError("Solde de crédits KappGen insuffisant pour la transcription.")
     chunk_dir = audio_path.parent / f"{audio_path.stem}_stt_chunks"
     chunks = _split_audio_for_stt(audio_path, chunk_dir)
 
@@ -366,10 +367,6 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
         all_words = synthetic_word_timings(full_text, total_duration)
 
     log_usage("izivoice_stt", "transcription", total_duration, "seconds", estimate_izivoice_stt_cost(total_duration), user_id=user_id)
-    if user_id:
-        from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
-        debit_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt")
-
     return {"text": full_text, "duration": total_duration, "words": all_words}
 
 
@@ -428,6 +425,12 @@ def generate_voiceover(
         with httpx.Client() as client:
             voice_id = voice_id or _get_default_voice_id(client, effective_key)
 
+            char_count = len(script_text)
+            if user_id:
+                from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
+                if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts"):
+                    raise RuntimeError("Solde de crédits KappGen insuffisant pour la synthèse vocale.")
+
             logger.info("Requesting voiceover from Izivoice /text-to-speech...")
             with _izivoice_semaphore:
                 resp = _post_with_retry(
@@ -463,15 +466,10 @@ def generate_voiceover(
             audio_resp.raise_for_status()
             output_audio_path.write_bytes(audio_resp.content)
 
-        char_count = len(script_text)
         log_usage(
             "izivoice_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
             user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id},
         )
-        if user_id:
-            from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
-            debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts")
-
         if transcribe:
             transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id)
         else:

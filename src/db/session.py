@@ -86,7 +86,7 @@ def init_db():
             "izivoice_key_prefix": "ALTER TABLE users ADD COLUMN izivoice_key_prefix VARCHAR(20)",
             "izivoice_connected_at": "ALTER TABLE users ADD COLUMN izivoice_connected_at TIMESTAMP",
             "is_admin": "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE NOT NULL",
-            "free_video_quota_granted": "ALTER TABLE users ADD COLUMN free_video_quota_granted INTEGER DEFAULT 3 NOT NULL",
+            "free_video_quota_granted": "ALTER TABLE users ADD COLUMN free_video_quota_granted INTEGER DEFAULT 0 NOT NULL",
             "free_videos_used": "ALTER TABLE users ADD COLUMN free_videos_used INTEGER DEFAULT 0 NOT NULL",
             "locale": "ALTER TABLE users ADD COLUMN locale VARCHAR(5) DEFAULT 'fr' NOT NULL",
             "email_verified": "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT FALSE NOT NULL",
@@ -210,3 +210,14 @@ def init_db():
                 if col_name not in existing_ct_columns:
                     logger.info(f"Migrating credit_transactions table: adding {col_name} column.")
                     conn.execute(text(ddl))
+
+    # One-time, idempotent product migration: old flat free-video quotas are
+    # retired and every pre-existing creator receives the same 10,000-credit
+    # welcome pot as a newly registered creator. Purchased/admin credits are
+    # separate pots and remain untouched.
+    from src.utils.billing import migrate_legacy_accounts_to_welcome_credits
+    db = SessionLocal()
+    try:
+        migrate_legacy_accounts_to_welcome_credits(db)
+    finally:
+        db.close()
