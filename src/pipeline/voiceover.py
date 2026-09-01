@@ -466,6 +466,28 @@ def generate_voiceover(
             audio_resp.raise_for_status()
             output_audio_path.write_bytes(audio_resp.content)
 
+        # Izivoice's /text-to-speech has been observed returning a 200 with a
+        # genuinely truncated audio file for very long scripts — no error, just
+        # noticeably less audio than the script implies. Nothing downstream
+        # would catch this: the video pipeline entirely on
+        # transcript_info["duration"] to pace scenes, so a silently-truncated
+        # voiceover just produces a short, "successfully" finished video with
+        # no error anywhere. 20 chars/sec is a deliberately generous ceiling —
+        # even fast, dense narration rarely exceeds ~15 chars/sec — so this
+        # only fires on a real, substantial truncation, not natural pacing
+        # variance. Below 300 chars the duration signal is too noisy (leading
+        # silence, a short sting) to say anything meaningful.
+        raw_duration = get_audio_duration(output_audio_path)
+        if char_count > 300:
+            max_plausible_chars_per_sec = 20.0
+            expected_min_duration = char_count / max_plausible_chars_per_sec
+            if raw_duration < expected_min_duration * 0.5:
+                raise RuntimeError(
+                    f"La voix off générée ({raw_duration:.1f}s) est bien trop courte pour un script de "
+                    f"{char_count} caractères (attendu : au moins {expected_min_duration * 0.5:.1f}s) — "
+                    "Izivoice a probablement tronqué le texte silencieusement. Relance le rendu."
+                )
+
         log_usage(
             "izivoice_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
             user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id},
@@ -473,11 +495,10 @@ def generate_voiceover(
         if transcribe:
             transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id)
         else:
-            duration = get_audio_duration(output_audio_path)
             transcript_info = {
                 "text": script_text,
-                "duration": duration,
-                "words": synthetic_word_timings(script_text, duration),
+                "duration": raw_duration,
+                "words": synthetic_word_timings(script_text, raw_duration),
             }
         return output_audio_path, transcript_info
 
