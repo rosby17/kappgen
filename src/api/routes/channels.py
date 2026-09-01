@@ -1072,6 +1072,44 @@ async def preview_music_video_track(
     return FileResponse(tmp_path, media_type="audio/mpeg", filename="preview.mp3")
 
 
+MUSIC_STYLE_SUGGEST_INSTRUCTION = """You are a music supervisor helping someone with no music background set up a YouTube background-music channel. They need a "musical style" prompt that will drive an AI music generator for every future track on this channel.
+{context_clause}
+Respond with ONLY this JSON object, no other text:
+{{
+  "style_prompt": "a single dense, comma-separated music-generation prompt (no full sentences): genre, instrumentation, tempo/mood, and what kind of listening moment it fits (studying, sleeping, working, relaxing...) — concrete and specific, not vague adjectives alone",
+  "title_examples": "3 example YouTube video titles for this style, one per line, in French, that sound like real videos in this niche (e.g. 'Lofi pour réviser toute la nuit')"
+}}"""
+
+
+@router.post("/music-style/suggest")
+def suggest_music_style(payload: dict = None, current_user: User = Depends(get_current_user)):
+    """Turns a vague or empty idea into a real, usable style_prompt + example
+    titles for the Music Channel wizard — most creators setting one of these
+    up have no music vocabulary ("lofi", "BPM", "ambient" mean nothing to
+    them), so this is the same kind of guided assist as
+    propose_thumbnail_concept, just for the one field this wizard actually
+    can't function without."""
+    hint = ((payload or {}).get("hint") or "").strip()[:500]
+    if hint:
+        context_clause = f'\nThe creator\'s own rough idea (correct/expand it, don\'t ignore it): "{hint}"\n'
+    else:
+        context_clause = "\nThey have no idea at all what they want — invent one broadly appealing, popular background-music channel concept (e.g. lofi study beats, deep sleep ambient, cozy piano, focus/productivity, nature sounds) with real commercial appeal on YouTube.\n"
+    instruction = MUSIC_STYLE_SUGGEST_INSTRUCTION.format(context_clause=context_clause)
+    try:
+        from src.pipeline.ai_text import generate_text
+        raw = generate_text(instruction, max_tokens=500, model="claude-sonnet-5", operation="music_style_suggest")
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+            text = re.sub(r"```$", "", text).strip()
+        data = json.loads(text)
+        if not data.get("style_prompt"):
+            raise ValueError("missing style_prompt")
+        return {"style_prompt": data["style_prompt"], "title_examples": data.get("title_examples") or ""}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Suggestion impossible : {e}")
+
+
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 MAX_AUDIO_PREVIEW_BYTES = 30 * 1024 * 1024
 
