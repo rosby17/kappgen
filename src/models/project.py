@@ -118,7 +118,7 @@ class EffectsConfig(BaseModel):
     grain: bool = True                  # legacy flag, kept for old channels — superseded by overlay_effects
     overlay_effect: str = "grain"       # legacy single-choice field, kept for old channels — superseded by overlay_effects
     overlay_effects: List[str] = Field(default_factory=lambda: ["grain"])  # any combination of "grain", "white_noise", "vignette"
-    color_grade: str = "warm"           # "warm", "vintage", "dramatic", "none"
+    color_grade: str = "none"           # optional: "warm", "vintage", "dramatic", "none"
     grain_intensity: int = 50           # 0-100, scales the noise/grain amount
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
     particle_intensity: int = 50        # 0-100, shared strength for atmospheric/particle effects

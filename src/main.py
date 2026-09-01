@@ -51,7 +51,7 @@ def run_phase0_test(test_script: str = None):
         },
         "effects_config": {
             "grain": True,
-            "color_grade": "warm",
+            "color_grade": "none",
             "zoom_min_pct": 1.0,
             "zoom_max_pct": 1.12
         }

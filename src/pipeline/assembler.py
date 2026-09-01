@@ -144,7 +144,7 @@ def assemble_final_video(
     # Every grade below is a real, tested ffmpeg filter chain (eq/colorbalance/
     # colorchannelmixer/hue) — no placeholder options that don't actually change
     # the render.
-    color_mode = effects.get("color_grade", "warm") if effects_enabled else "none"
+    color_mode = effects.get("color_grade", "none") if effects_enabled else "none"
     if color_mode == "warm":
         video_filters.append("eq=gamma=1.05:saturation=1.15")
     elif color_mode == "vintage":
