@@ -1,14 +1,61 @@
 from datetime import datetime, timedelta
+from pathlib import Path
+import re
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
 from src.utils.auth import get_current_admin
-from src.utils.billing import activate_credit_subscription, user_has_active_subscription, get_credit_balance, credit_user, debit_credits
+from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _admin_video_title(video: Video) -> str:
+    """Best available title, including legacy audio uploads.
+
+    Audio submissions stored the cleaned original filename in script_text but
+    left Video.title empty until later metadata generation.  Surface that
+    value immediately so queued/failed audio jobs are identifiable too.
+    """
+    if (video.title or "").strip():
+        return video.title.strip()
+    if video.input_type == "audio":
+        if (video.script_text or "").strip():
+            return video.script_text.strip()
+        if video.audio_input_path:
+            stem = Path(video.audio_input_path).stem
+            stem = re.sub(r"^upload_[0-9a-f-]+$", "", stem, flags=re.IGNORECASE)
+            cleaned = re.sub(r"[-_]+", " ", stem).strip()
+            if cleaned:
+                return cleaned
+    return "(sans titre)"
+
+
+def _queued_video_positions(db: Session) -> tuple[dict[str, int], int]:
+    active_plan_price = (
+        db.query(func.coalesce(func.max(Plan.price_fcfa), 0))
+        .select_from(Subscription)
+        .join(Plan, Subscription.plan_id == Plan.id)
+        .filter(
+            Subscription.user_id == Channel.user_id,
+            Subscription.status == "active",
+            Subscription.expires_at > datetime.utcnow(),
+        )
+        .correlate(Channel)
+        .scalar_subquery()
+    )
+    queued_ids = [row[0] for row in (
+        db.query(Video.id)
+        .join(Channel, Video.channel_id == Channel.id)
+        .filter(Video.status == "queued")
+        .order_by(active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
+        .all()
+    )]
+    return {video_id: index + 1 for index, video_id in enumerate(queued_ids)}, len(queued_ids)
 
 
 @router.get("/users")
@@ -122,7 +169,12 @@ class CreditAdjustPayload(BaseModel):
 
 @router.post("/users/{user_id}/credits/grant")
 def grant_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Adds credits and activates unrestricted credit-backed access."""
+    """Adds a finite credit balance without granting unlimited access.
+
+    Subscription access is intentionally managed by the separate
+    grant-subscription endpoint. Combining the two made an admin credit
+    adjustment silently create a century-long unrestricted subscription.
+    """
     if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Le montant doit être positif.")
     user = db.query(User).filter(User.id == user_id).first()
@@ -130,17 +182,9 @@ def grant_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Depe
         raise HTTPException(status_code=404, detail="User not found")
     note = f"Crédit admin ({admin.email}){': ' + payload.note if payload.note else ''}"
     credit_user(db, user, payload.amount, 36500, note, transaction_type="admin_grant")
-    subscription = activate_credit_subscription(
-        db,
-        user,
-        valid_days=36500,
-        granted_by_admin_id=admin.id,
-        note=note,
-    )
     return {
         "credit_balance": get_credit_balance(db, user),
-        "has_active_subscription": True,
-        "subscription": subscription.to_dict(),
+        "has_active_subscription": user_has_active_subscription(db, user),
     }
 
 
@@ -166,7 +210,8 @@ def revoke_credits(user_id: str, payload: CreditAdjustPayload, admin: User = Dep
 
 @router.get("/plans")
 def admin_list_plans(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    return [p.to_dict() for p in db.query(Plan).order_by(Plan.price_fcfa.asc()).all()]
+    from src.utils.plan_catalog import ensure_sales_catalog
+    return [p.to_dict() for p in ensure_sales_catalog(db)]
 
 
 class PlanPayload(BaseModel):
@@ -193,33 +238,17 @@ class PlanPayload(BaseModel):
 
 @router.post("/plans")
 def create_plan(payload: PlanPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    plan = Plan(**payload.model_dump())
-    db.add(plan)
-    db.commit()
-    db.refresh(plan)
-    return plan.to_dict()
+    raise HTTPException(status_code=405, detail="Le catalogue des offres est géré par l'application.")
 
 
 @router.put("/plans/{plan_id}")
 def update_plan(plan_id: str, payload: PlanPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    plan = db.query(Plan).filter(Plan.id == plan_id).first()
-    if not plan:
-        raise HTTPException(status_code=404, detail="Plan not found")
-    for field, value in payload.model_dump().items():
-        setattr(plan, field, value)
-    db.commit()
-    db.refresh(plan)
-    return plan.to_dict()
+    raise HTTPException(status_code=405, detail="Le catalogue des offres est géré par l'application.")
 
 
 @router.delete("/plans/{plan_id}")
 def delete_plan(plan_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    plan = db.query(Plan).filter(Plan.id == plan_id).first()
-    if not plan:
-        raise HTTPException(status_code=404, detail="Plan not found")
-    plan.is_active = False  # soft-delete: existing Subscriptions/Orders still reference it
-    db.commit()
-    return {"message": "Plan deactivated"}
+    raise HTTPException(status_code=405, detail="Les offres permanentes ne peuvent pas être désactivées.")
 
 
 @router.get("/stats")
@@ -339,15 +368,27 @@ def admin_activity(days: int = 28, admin: User = Depends(get_current_admin), db:
 def admin_list_videos(q: Optional[str] = None, status_filter: Optional[str] = None, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     query = db.query(Video).join(Channel, Video.channel_id == Channel.id).join(User, Channel.user_id == User.id)
     if q:
-        query = query.filter((Video.title.ilike(f"%{q}%")) | (User.email.ilike(f"%{q}%")) | (Channel.name.ilike(f"%{q}%")))
+        query = query.filter(
+            (Video.title.ilike(f"%{q}%")) |
+            ((Video.input_type == "audio") & (Video.script_text.ilike(f"%{q}%"))) |
+            (User.email.ilike(f"%{q}%")) |
+            (Channel.name.ilike(f"%{q}%"))
+        )
     if status_filter:
         query = query.filter(Video.status == status_filter)
     videos = query.order_by(Video.created_at.desc()).limit(300).all()
     from src.api.routes.videos import _video_cost_transactions
+    queue_positions, queue_total = _queued_video_positions(db)
     result = []
     for v in videos:
         data = v.to_dict()
+        data["display_title"] = _admin_video_title(v)
+        data["queue_position"] = queue_positions.get(v.id)
+        data["queue_total"] = queue_total
         data["channel_name"] = v.channel.name if v.channel else None
+        data["youtube_connected"] = bool(v.channel and v.channel.youtube_refresh_token)
+        data["youtube_channel_handle"] = v.channel.youtube_channel_handle if v.channel else None
+        data["youtube_channel_id"] = v.channel.youtube_channel_id if v.channel else None
         owner = v.channel.user if v.channel else None
         data["owner_email"] = owner.email if owner else None
         data["total_credits"] = (
@@ -373,14 +414,73 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
     cost_items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
 
     data = video.to_dict()
+    data["display_title"] = _admin_video_title(video)
+    queue_positions, queue_total = _queued_video_positions(db)
+    data["queue_position"] = queue_positions.get(video.id)
+    data["queue_total"] = queue_total
     data["channel_name"] = channel.name if channel else None
     data["owner_email"] = owner.email if owner else None
+    # Whether/where this video's channel is actually published — an admin
+    # investigating a video (e.g. "is this really auto-generated or did the
+    # creator write it themselves?") also wants to know if it even has a
+    # real destination, not just how it was produced.
+    data["youtube_connected"] = bool(channel and channel.youtube_refresh_token)
+    data["youtube_channel_handle"] = channel.youtube_channel_handle if channel else None
+    data["youtube_channel_title"] = channel.youtube_channel_title if channel else None
+    data["youtube_channel_id"] = channel.youtube_channel_id if channel else None
     data["voice_name"] = channel.voice_name if channel and channel.voice_id == video.voice_id else None
     data["subtitle_style"] = channel.subtitle_style if channel else None
     data["music_preference"] = channel.music_preference if channel else None
     data["image_style"] = channel.image_style if channel else None
     data["total_credits"] = sum(item["credits"] for item in cost_items)
     data["cost_items"] = cost_items
+    return data
+
+
+@router.post("/videos/{video_id}/retry")
+def admin_retry_video(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Retry a creator's failed video while enforcing that creator's billing."""
+    from src.utils.billing import user_can_render, estimate_video_cost_credits
+    from src.models.project import VideoStatus
+
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status != VideoStatus.FAILED.value:
+        raise HTTPException(status_code=409, detail="Seules les vidéos en échec peuvent être relancées.")
+    channel = video.channel
+    owner = channel.user if channel else None
+    if not channel or not owner:
+        raise HTTPException(status_code=409, detail="La vidéo n'a plus de chaîne ou de propriétaire valide.")
+
+    estimated_cost = estimate_video_cost_credits(
+        script_char_count=len((video.script_text or "").strip()) if video.input_type == "text" else 0,
+        estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0,
+        transcribe_audio=bool(video.transcribe_audio),
+        image_style=channel.image_style,
+        music_preference=channel.music_preference,
+    )
+    can_render, reason = user_can_render(db, owner, estimated_cost)
+    if not can_render:
+        raise HTTPException(status_code=402, detail=f"Impossible de relancer pour {owner.email} : {reason}")
+
+    video.error_message = None
+    video.finished_at = None
+    video.progress_percent = 0
+    if not (video.script_text or "").strip() and channel.automation_mode == "auto" and channel.content_type != "music":
+        from threading import Thread
+        from src.worker.queue_runner import retry_auto_video_script_background
+        video.status = VideoStatus.RENDERING.value
+        video.progress_stage = "Régénération du script"
+        db.commit()
+        Thread(target=retry_auto_video_script_background, args=(video.id,), daemon=True).start()
+    else:
+        video.status = VideoStatus.QUEUED.value
+        video.progress_stage = "En attente du moteur de rendu"
+        db.commit()
+    db.refresh(video)
+    data = video.to_dict()
+    data["display_title"] = _admin_video_title(video)
     return data
 
 
