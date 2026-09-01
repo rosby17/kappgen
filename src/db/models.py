@@ -470,6 +470,7 @@ class Video(Base):
             "thumbnail_text": self.thumbnail_text,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
+            "downloaded_at": self.downloaded_at.isoformat() if self.downloaded_at else None,
         }
 
 
