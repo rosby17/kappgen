@@ -120,6 +120,7 @@ async def submit_video_subject(
     audio_files: Optional[List[UploadFile]] = File(None),
     transcribe_audio: bool = Form(True),
     voice_id: Optional[str] = Form(None),
+    title: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     _rl=Depends(_limit_submit),
@@ -136,6 +137,12 @@ async def submit_video_subject(
             status_code=409,
             detail="Les chaînes de vidéo musicale n'ont pas de formulaire par vidéo — utilise \"Générer une vidéo\" à la place.",
         )
+    # A creator-supplied title takes priority over both the filename-derived
+    # one (audio) and the AI-generated one (queue_runner only fills video.title
+    # when it's still empty) — set immediately at creation so a queued video
+    # never sits showing "(sans titre)" while it waits its turn, and the AI
+    # metadata step doesn't need to invent one.
+    explicit_title = title.strip()[:100] if title and title.strip() else None
     # Nothing downstream ever rejected a near-empty script for a text-input
     # video — it would render "successfully" on almost nothing (a couple
     # seconds of near-silent audio), with the post-render AI metadata step
@@ -194,7 +201,10 @@ async def submit_video_subject(
                 dest_file.unlink(missing_ok=True)
                 raise HTTPException(status_code=400, detail=f"{audio_file.filename}: {exc}")
             
-            auto_title = clean_filename_title(audio_file.filename)
+            # Only meaningful for a single-file upload — with several files at
+            # once every one would otherwise share the same explicit title,
+            # so it's reserved for the filename-derived fallback in that case.
+            auto_title = explicit_title if (explicit_title and len(audio_files) == 1) else clean_filename_title(audio_file.filename)
 
             try:
                 estimated_duration = get_audio_duration(dest_file)
@@ -269,6 +279,7 @@ async def submit_video_subject(
 
         video = Video(
             channel_id=channel.id,
+            title=explicit_title,
             script_text=script_text.strip(),
             input_type="text",
             audio_input_path=None,
