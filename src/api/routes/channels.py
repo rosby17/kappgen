@@ -1,11 +1,13 @@
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import List, Dict, Any, Optional
 import random
+import json
 import re
 import shutil
 import time
@@ -13,7 +15,7 @@ import uuid
 import httpx
 from src.db.session import get_db
 from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
-from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload
+from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS
 from fastapi.responses import RedirectResponse
 from datetime import datetime
@@ -1070,6 +1072,93 @@ async def preview_music_video_track(
 
 
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
+MAX_AUDIO_PREVIEW_BYTES = 30 * 1024 * 1024
+
+
+@router.post("/preview-audio-mix")
+async def preview_audio_mix(
+    voice_sample: UploadFile = File(...),
+    music_sample: Optional[UploadFile] = File(None),
+    settings_json: str = Form(...),
+    channel_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Render a short preview with the exact same chain as final videos."""
+    try:
+        settings = MusicPreference.model_validate(json.loads(settings_json)).model_dump()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Réglages audio invalides.") from exc
+
+    voice_ext = Path(voice_sample.filename or "").suffix.lower()
+    if voice_ext not in ALLOWED_MUSIC_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Extrait voix invalide (MP3, WAV, M4A ou OGG attendu).")
+    voice_bytes = await voice_sample.read()
+    if not voice_bytes or len(voice_bytes) > MAX_AUDIO_PREVIEW_BYTES:
+        raise HTTPException(status_code=400, detail="Extrait voix vide ou trop volumineux (30 Mo maximum).")
+
+    preview_dir = STORAGE_PATH / "tmp" / "studio-mix-previews" / uuid.uuid4().hex
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    voice_path = preview_dir / f"voice{voice_ext}"
+    voice_path.write_bytes(voice_bytes)
+    music_path = None
+
+    try:
+        if music_sample and music_sample.filename:
+            music_ext = Path(music_sample.filename).suffix.lower()
+            if music_ext not in ALLOWED_MUSIC_EXTENSIONS:
+                raise HTTPException(status_code=400, detail="Musique invalide (MP3, WAV, M4A ou OGG attendu).")
+            music_bytes = await music_sample.read()
+            if not music_bytes or len(music_bytes) > MAX_AUDIO_PREVIEW_BYTES:
+                raise HTTPException(status_code=400, detail="Musique vide ou trop volumineuse (30 Mo maximum).")
+            music_path = preview_dir / f"music{music_ext}"
+            music_path.write_bytes(music_bytes)
+        elif channel_id:
+            channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+            if not channel:
+                raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+            tracks = list((channel.music_preference or {}).get("tracks") or [])
+            if tracks:
+                candidate = (STORAGE_PATH / tracks[0]).resolve()
+                allowed_dir = (STORAGE_PATH / "channels" / channel.id / "music").resolve()
+                if candidate.exists() and candidate.is_relative_to(allowed_dir):
+                    music_path = candidate
+        if not music_path:
+            raise HTTPException(status_code=400, detail="Ajoutez ou sélectionnez d’abord une musique pour la préécoute.")
+
+        from src.pipeline.audio_mixer import mix_audio_tracks
+        from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
+        duration = get_audio_duration(voice_path)
+        if duration <= 0:
+            raise HTTPException(status_code=400, detail="L’extrait voix ne peut pas être lu.")
+        # Keep previews quick while preserving the real processing character.
+        if duration > 45:
+            trimmed = preview_dir / "voice_trimmed.mp3"
+            run_ffmpeg(["ffmpeg", "-y", "-i", str(voice_path), "-t", "45", "-c:a", "libmp3lame", "-b:a", "192k", str(trimmed)])
+            voice_path = trimmed
+
+        output_path = preview_dir / "studio-preview.mp3"
+        mix_audio_tracks(
+            voiceover_path=voice_path,
+            music_path=music_path,
+            output_audio_path=output_path,
+            music_volume=settings.get("volume", 0.10),
+            processing=settings,
+        )
+    except HTTPException:
+        shutil.rmtree(preview_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(preview_dir, ignore_errors=True)
+        logger.warning(f"Studio audio preview failed: {exc}")
+        raise HTTPException(status_code=502, detail="Impossible de produire l’aperçu audio.") from exc
+
+    return FileResponse(
+        output_path,
+        media_type="audio/mpeg",
+        filename="apercu-mixage-kappgen.mp3",
+        background=BackgroundTask(shutil.rmtree, preview_dir, ignore_errors=True),
+    )
 
 @router.post("/{channel_id}/music")
 async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
