@@ -19,7 +19,9 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
     fade_out = min(max(0.0, float(settings.get("fade_out_seconds", 3.0))), duration / 2)
     fade_out_start = max(0.0, duration - fade_out)
     parts = [
-        "[0:a]highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11,asplit=2[voice_mix][voice_sc]",
+        # The narration is normalized once and then kept at unity gain. One
+        # branch drives music ducking; the other receives voice-only effects.
+        "[0:a]highpass=f=70,loudnorm=I=-15:TP=-1.2:LRA=11,asplit=2[voice_fx][voice_sc]",
         f"[1:a]aloop=loop=-1:size=2e+09,atrim=duration={duration:.3f},asetpts=N/SR/TB,"
         f"afade=t=in:st=0:d={fade_in:.3f},afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}[music0]",
     ]
@@ -37,11 +39,9 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
         )
         music_current = "music_ducked"
 
-    # Build the voice/music balance first, then process the combined master.
-    # Previously these effects ran only on a 10%-volume, ducked music bed, so
-    # even 100% reverb was practically inaudible next to narration.
-    parts.append(f"[voice_mix][{music_current}]amix=inputs=2:duration=first:dropout_transition=2[mix0]")
-    current = "mix0"
+    # Studio effects belong to the narration, not to the background music.
+    # Keep the music clean and process the voice before the final mix.
+    current = "voice_fx"
 
     if settings.get("soundgoodizer_enabled", False):
         amount = _unit(settings.get("soundgoodizer_amount"), 0.35)
@@ -51,19 +51,9 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
             f"[{current}]equalizer=f=105:t=q:w=0.9:g={2.0 + amount * 4.5:.2f},"
             f"equalizer=f=7200:t=q:w=0.8:g={1.5 + amount * 5.0:.2f},"
             f"acompressor=threshold={0.18 - amount * 0.09:.3f}:ratio={ratio:.2f}:"
-            f"attack=8:release=160:makeup={makeup:.2f}[mix_good]"
+            f"attack=8:release=160:makeup={makeup:.2f}[voice_good]"
         )
-        current = "mix_good"
-
-    if settings.get("reverb_enabled", False):
-        amount = _unit(settings.get("reverb_amount"), 0.15)
-        # A true audible room tail on the master. The control spans a small
-        # studio room to a pronounced hall; final limiting prevents clipping.
-        parts.append(
-            f"[{current}]aecho=0.82:{0.22 + amount * 0.45:.3f}:55|125:"
-            f"{0.22 + amount * 0.48:.3f}|{0.12 + amount * 0.34:.3f}[mix_space]"
-        )
-        current = "mix_space"
+        current = "voice_good"
 
     if settings.get("maximus_enabled", True):
         amount = _unit(settings.get("maximus_amount"), 0.40)
@@ -73,9 +63,32 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
             f"[mlo0]lowpass=f=180,acompressor=threshold=0.13:ratio={ratio + 0.8:.2f}:attack=16:release=240[mlo]",
             f"[mmid0]highpass=f=180,lowpass=f=5000,acompressor=threshold=0.11:ratio={ratio:.2f}:attack=8:release=160[mmid]",
             f"[mhi0]highpass=f=5000,acompressor=threshold=0.09:ratio={max(1.5, ratio - 0.6):.2f}:attack=4:release=100[mhi]",
-            "[mlo][mmid][mhi]amix=inputs=3:normalize=0,alimiter=limit=0.90[mix_master]",
+            "[mlo][mmid][mhi]amix=inputs=3:normalize=0,volume=1.10,alimiter=limit=0.94[voice_master]",
         ])
-        current = "mix_master"
+        current = "voice_master"
+
+    if settings.get("reverb_enabled", False):
+        amount = _unit(settings.get("reverb_amount"), 0.15)
+        # Parallel reverb: the untouched narration remains at full level while
+        # a filtered, quieter echo tail sits behind it. This avoids the hollow,
+        # lower-volume sound caused by inserting reverb on the whole master.
+        wet_level = 0.06 + amount * 0.24
+        echo_gain_1 = 0.22 + amount * 0.30
+        echo_gain_2 = 0.10 + amount * 0.22
+        parts.extend([
+            f"[{current}]asplit=2[voice_dry][voice_reverb_in]",
+            f"[voice_reverb_in]highpass=f=180,lowpass=f=6500,"
+            f"aecho=0.72:0.42:85|175:{echo_gain_1:.3f}|{echo_gain_2:.3f},"
+            f"volume={wet_level:.3f}[voice_reverb_wet]",
+            "[voice_dry][voice_reverb_wet]amix=inputs=2:normalize=0:duration=first[voice_space]",
+        ])
+        current = "voice_space"
+
+    # normalize=0 is intentional: amix's default normalization halves the
+    # narration when a music input is present, which made processed voices
+    # noticeably quieter. Ducking and the music volume already control balance.
+    parts.append(f"[{current}][{music_current}]amix=inputs=2:normalize=0:duration=first:dropout_transition=2[mix0]")
+    current = "mix0"
 
     parts.append(f"[{current}]alimiter=limit=0.95[aout]")
     return ";".join(parts)
