@@ -1,5 +1,6 @@
 import uuid
 import re
+import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -768,13 +769,55 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
         raise HTTPException(status_code=502, detail=f"Échec de l'envoi de la miniature à YouTube : {str(exc)[:300]}")
     return {"status": "ok"}
 
+def _regenerate_thumbnail_background(video_id: str) -> None:
+    """Runs the actual (AI-backed) regeneration off the request thread — see
+    regenerate_video_thumbnail below for why."""
+    from src.db.session import SessionLocal
+    db = SessionLocal()
+    try:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if not video:
+            return
+        channel = video.channel
+        video_path = STORAGE_PATH / video.output_path if video.output_path else None
+        if not channel or not video_path or not video_path.exists():
+            return
+        current = video_path.with_name("thumbnail.jpg")
+        if current.exists():
+            history_dir = video_path.parent / "thumbnail_history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+            shutil.copy2(current, archive)
+        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
+    except Exception as e:
+        logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
+    finally:
+        try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if video:
+                video.thumbnail_regenerating = False
+                db.commit()
+        except Exception:
+            pass
+        db.close()
+
+
 @router.post("/{video_id}/thumbnail/regenerate")
 def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Regenerates this video's NicheCut card thumbnail (output_mp4's sibling
-    thumbnail.jpg) — for videos stuck with a near-black one from before the
-    fallback frame-grab was fixed to pick a representative frame instead of a
-    fixed timestamp. Independent of YouTube publishing (unlike the resync
-    route above), since this thumbnail is shown in the app regardless."""
+    """Kicks off regeneration of this video's NicheCut card thumbnail
+    (output_mp4's sibling thumbnail.jpg) — for videos stuck with a near-black
+    one from before the fallback frame-grab was fixed to pick a representative
+    frame instead of a fixed timestamp. Independent of YouTube publishing
+    (unlike the resync route above), since this thumbnail is shown in the app
+    regardless.
+
+    Only starts the job and returns immediately — the AI background-image
+    call this can trigger routinely takes well over a minute, longer than
+    Cloudflare's edge proxy will hold an HTTP request open, which used to
+    surface in the app as a bare "Failed to fetch" once the connection got
+    cut mid-request even though the backend was still working. The frontend
+    polls /{video_id}/thumbnail/regenerate/status instead of awaiting this
+    response."""
     video = _get_owned_video(db, video_id, current_user)
     channel = video.channel
     if not channel:
@@ -782,15 +825,19 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     video_path = STORAGE_PATH / video.output_path if video.output_path else None
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+    if video.thumbnail_regenerating:
+        raise HTTPException(status_code=409, detail="Une régénération est déjà en cours pour cette vidéo.")
 
-    current = video_path.with_name("thumbnail.jpg")
-    if current.exists():
-        history_dir = video_path.parent / "thumbnail_history"
-        history_dir.mkdir(parents=True, exist_ok=True)
-        archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-        shutil.copy2(current, archive)
-    generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
-    return {"status": "ok"}
+    video.thumbnail_regenerating = True
+    db.commit()
+    threading.Thread(target=_regenerate_thumbnail_background, args=(video_id,), daemon=True).start()
+    return {"status": "started"}
+
+
+@router.get("/{video_id}/thumbnail/regenerate/status")
+def get_thumbnail_regenerate_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    return {"regenerating": bool(video.thumbnail_regenerating)}
 
 
 @router.get("/{video_id}/thumbnail/history")

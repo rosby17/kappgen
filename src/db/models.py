@@ -462,6 +462,13 @@ class Video(Base):
     # separate from `title` (the full YouTube title) because the title is
     # often too long/verbose to render legibly on a 1280x720 thumbnail.
     thumbnail_text = Column(String(255), nullable=True)
+    # Set while a "Régénérer la miniature" request is running in the
+    # background (see /videos/{id}/thumbnail/regenerate) — the AI background
+    # generation call can take well over a minute, longer than Cloudflare's
+    # edge proxy will hold an HTTP request open, so the endpoint starts the
+    # job and returns immediately instead of blocking; the frontend polls
+    # this flag rather than awaiting one long response.
+    thumbnail_regenerating = Column(Boolean, nullable=False, default=False)
     # Set for recurring automatic/scheduled publication — the worker leaves
     # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)
@@ -521,6 +528,7 @@ class Video(Base):
             "youtube_publish_error": self.youtube_publish_error,
             "youtube_description": self.youtube_description,
             "thumbnail_text": self.thumbnail_text,
+            "thumbnail_regenerating": self.thumbnail_regenerating,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "youtube_compliance_report": self.youtube_compliance_report,
