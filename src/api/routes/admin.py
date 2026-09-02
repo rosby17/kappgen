@@ -1289,6 +1289,31 @@ def set_voiceover_provider_mode(payload: VoiceoverProviderOrderPayload, admin: U
     return {"order": cleaned}
 
 
+# --- Render concurrency (how many videos the worker renders at once) ---
+# Live-adjustable, no redeploy: each render lane re-reads this setting on
+# every poll cycle (a few seconds), so turning it up when demand/load allows
+# or back down to 1 when the server needs the headroom takes effect almost
+# immediately. Capped at MAX_CONCURRENT_RENDERS_CEILING — see app_settings.py
+# for why going higher stops helping.
+@router.get("/settings/render-concurrency")
+def get_render_concurrency(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import max_concurrent_renders, MAX_CONCURRENT_RENDERS_CEILING
+    return {"value": max_concurrent_renders(), "max": MAX_CONCURRENT_RENDERS_CEILING, "min": 1}
+
+
+class RenderConcurrencyPayload(BaseModel):
+    value: int
+
+
+@router.patch("/settings/render-concurrency")
+def set_render_concurrency(payload: RenderConcurrencyPayload, admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import set_max_concurrent_renders, max_concurrent_renders, MAX_CONCURRENT_RENDERS_CEILING
+    if payload.value < 1 or payload.value > MAX_CONCURRENT_RENDERS_CEILING:
+        raise HTTPException(status_code=400, detail=f"Valeur entre 1 et {MAX_CONCURRENT_RENDERS_CEILING}.")
+    set_max_concurrent_renders(payload.value)
+    return {"value": max_concurrent_renders()}
+
+
 # --- AI text-generation provider switch --------------------------------
 # Which of Anthropic/DeepSeek/fal.ai/OpenAI/Groq (see src/pipeline/ai_text.py)
 # is tried FIRST for every text-generation call (script writing, topic

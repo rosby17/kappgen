@@ -1,4 +1,3 @@
-import os
 import shutil
 import json
 import signal
@@ -1685,12 +1684,23 @@ def _handle_shutdown_signal(signum, frame):
     logger.warning("Worker received shutdown signal; finishing current render (if any) before exiting.")
     _shutdown_requested = True
 
-def _render_worker_loop(worker_name: str, poll_interval_seconds: float):
+def _render_worker_loop(worker_name: str, lane_index: int, poll_interval_seconds: float):
     """
-    The single render lane repeatedly claims the highest paid tier's oldest
-    queued video. Keeping one lane makes the priority order deterministic.
+    One render lane. lane_index is 1-based and fixed for this thread's whole
+    life; every poll it compares itself against the admin's current
+    max_concurrent_renders() setting (src/utils/app_settings.py, adjustable
+    live from the "Ressources" tab, no redeploy) and only claims a video when
+    lane_index is within that limit — otherwise it just idles. This is what
+    makes turning concurrency up or down from the admin UI take effect
+    within one poll interval: the pool of lane threads is fixed at startup
+    (RENDER_LANE_POOL_SIZE), only how many of them are *allowed* to work
+    changes.
     """
+    from src.utils.app_settings import max_concurrent_renders
     while not _shutdown_requested:
+        if lane_index > max_concurrent_renders():
+            time.sleep(poll_interval_seconds)
+            continue
         try:
             processed = process_single_queued_video()
         except Exception as e:
@@ -1705,25 +1715,35 @@ def _render_worker_loop(worker_name: str, poll_interval_seconds: float):
 
 def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False, max_concurrent_renders: Optional[int] = None):
     """
-    Starts N parallel render lanes (default 2), plus the independent
-    voice-clone and periodic-maintenance loops. Each lane claims its own video
-    via process_single_queued_video()'s `with_for_update(skip_locked=True)`
-    row lock, so lanes never race for the same video, and every render writes
-    to its own video_dir — nothing shared between two videos rendering at
-    once. The worker container itself is CPU-capped by Docker (2.5 cores at
-    time of writing), which is what actually bounds host impact: adding lanes
-    lets that budget be shared by more than one video instead of raising it,
-    so this is safe to bump without a host resource change. Override via
-    MAX_CONCURRENT_RENDERS if that cap is ever raised and more lanes make
-    sense, or dropped back to 1 to revert to strictly sequential rendering.
+    Starts a fixed pool of render lanes (RENDER_LANE_POOL_SIZE, matching
+    MAX_CONCURRENT_RENDERS_CEILING), plus the independent voice-clone and
+    periodic-maintenance loops. How many of those lanes are actually allowed
+    to claim a video at any moment is controlled live by the admin's
+    max_concurrent_renders() setting — see _render_worker_loop above — not by
+    how many threads exist, so the admin UI can move it between 1 and the
+    ceiling without a restart. Each lane claims its own video via
+    process_single_queued_video()'s `with_for_update(skip_locked=True)` row
+    lock, so lanes never race for the same video, and every render writes to
+    its own video_dir — nothing shared between two videos rendering at once.
+    The worker container itself is CPU-capped by Docker (2.5 cores at time of
+    writing), which is what actually bounds host impact: raising the admin
+    setting lets that budget be shared by more videos instead of raising it,
+    so this is safe to turn up without a host resource change — the ceiling
+    exists so the admin UI can't be pushed past the point where lanes start
+    fighting each other for that same CPU budget instead of finishing videos
+    faster. The max_concurrent_renders parameter is kept only for tests/
+    one-off callers that want a hard override instead of the live setting.
     """
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     from src.utils.error_tracking import init_error_tracking
+    from src.utils.app_settings import MAX_CONCURRENT_RENDERS_CEILING, set_max_concurrent_renders
     init_error_tracking("worker")
     init_db()
     requeue_orphaned_videos()
     requeue_orphaned_voice_clone_jobs()
-    concurrency = max_concurrent_renders or int(os.getenv("MAX_CONCURRENT_RENDERS", "2"))
+    if max_concurrent_renders is not None:
+        set_max_concurrent_renders(max_concurrent_renders)
+    pool_size = MAX_CONCURRENT_RENDERS_CEILING
 
     if single_run:
         # Used for one-shot/manual invocations — render exactly one video and
@@ -1731,10 +1751,10 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         process_single_queued_video()
         return
 
-    logger.info(f"Starting Nichecut Background Queue Worker ({concurrency} concurrent render lane(s))...")
+    logger.info(f"Starting Nichecut Background Queue Worker ({pool_size} render lane(s) available, admin-controlled active count)...")
     lanes = [
-        threading.Thread(target=_render_worker_loop, args=(f"lane-{i+1}", poll_interval_seconds), daemon=True)
-        for i in range(max(1, concurrency))
+        threading.Thread(target=_render_worker_loop, args=(f"lane-{i+1}", i + 1, poll_interval_seconds), daemon=True)
+        for i in range(pool_size)
     ]
     lanes.append(threading.Thread(target=_voice_clone_worker_loop, args=(poll_interval_seconds,), daemon=True))
     for lane in lanes:

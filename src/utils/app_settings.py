@@ -108,3 +108,31 @@ def voiceover_provider_order() -> List[str]:
 
 def set_voiceover_provider_order(order: List[str]) -> None:
     set_setting(VOICEOVER_PROVIDER_ORDER_KEY, json.dumps(order))
+
+
+# Admin-adjustable number of videos the worker renders at once. Read live by
+# each render lane on every poll (see src/worker/queue_runner.py) rather than
+# once at process boot, so turning this up or down from the admin UI takes
+# effect within a few seconds — no redeploy or restart needed. Ceiling of 4
+# matches the worker container's Docker CPU cap (2.5 cores at time of
+# writing): beyond that, lanes start fighting each other for CPU instead of
+# actually finishing videos faster, so the admin UI itself refuses more.
+MAX_CONCURRENT_RENDERS_KEY = "max_concurrent_renders"
+MAX_CONCURRENT_RENDERS_DEFAULT = 2
+MAX_CONCURRENT_RENDERS_CEILING = 4
+
+
+def max_concurrent_renders() -> int:
+    raw = get_setting(MAX_CONCURRENT_RENDERS_KEY, None)
+    if raw is None:
+        return MAX_CONCURRENT_RENDERS_DEFAULT
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        return MAX_CONCURRENT_RENDERS_DEFAULT
+    return max(1, min(MAX_CONCURRENT_RENDERS_CEILING, value))
+
+
+def set_max_concurrent_renders(value: int) -> None:
+    value = max(1, min(MAX_CONCURRENT_RENDERS_CEILING, int(value)))
+    set_setting(MAX_CONCURRENT_RENDERS_KEY, str(value))
