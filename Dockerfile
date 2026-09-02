@@ -44,12 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-linuxlibertine \
     fonts-lobstertwo \
     fonts-manrope \
-    fonts-montserrat \
-    fonts-cinzel \
-    fonts-playfair-display \
-    fonts-raleway \
     fonts-oxygen \
-    fonts-ubuntu \
     fonts-freefont-ttf \
     fonts-urw-base35 \
     fonts-texgyre \
@@ -66,8 +61,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-tuffy \
     fonts-vollkorn \
     fonts-yanone-kaffeesatz \
-    && fc-cache -f \
+    ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Montserrat, Cinzel, and Playfair Display aren't packaged for Debian
+# bookworm at all (confirmed: "Unable to locate package" — this silently
+# broke every deploy since these were added to the subtitle font picker,
+# since apt-get exits non-zero on a missing package and fails the whole
+# build). fonts-raleway and fonts-ubuntu were also missing but unused by
+# the actual font picker, so they're just dropped instead of replaced.
+# Pulled directly from Google Fonts' own repo instead of apt.
+RUN mkdir -p /usr/share/fonts/truetype/googlefonts-extra \
+    && curl -fsSL -o /usr/share/fonts/truetype/googlefonts-extra/Montserrat.ttf \
+        https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf \
+    && curl -fsSL -o /usr/share/fonts/truetype/googlefonts-extra/Cinzel.ttf \
+        https://raw.githubusercontent.com/google/fonts/main/ofl/cinzel/Cinzel%5Bwght%5D.ttf \
+    && curl -fsSL -o /usr/share/fonts/truetype/googlefonts-extra/PlayfairDisplay.ttf \
+        https://raw.githubusercontent.com/google/fonts/main/ofl/playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf \
+    && fc-cache -f
 
 WORKDIR /app
 
