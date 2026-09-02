@@ -4,7 +4,8 @@ short-lived session so this can be called from anywhere (a request handler
 with a `db` already in scope, or deep pipeline code that doesn't have one)
 without threading a session through every call site.
 """
-from typing import Optional
+import json
+from typing import List, Optional
 from src.db.session import SessionLocal
 from src.db.models import AppSetting
 
@@ -44,19 +45,26 @@ def thumbnail_provider_mode() -> str:
     return get_setting(THUMBNAIL_PROVIDER_MODE_KEY, THUMBNAIL_PROVIDER_MODE_DEFAULT)
 
 
-# Which text-generation provider (see src/pipeline/ai_text.py) is tried
-# FIRST — "anthropic" | "deepseek" | "groq" | "openai" | "fal". The rest of
-# the configured providers still follow as automatic fallback in their usual
-# order if the chosen one fails or isn't configured; this only controls which
-# one goes first, so an admin can move off Claude the moment its balance runs
-# low without a redeploy — just a button in the "Ressources" tab.
-AI_TEXT_PRIMARY_PROVIDER_KEY = "ai_text_primary_provider"
-AI_TEXT_PRIMARY_PROVIDER_DEFAULT = "anthropic"
+# Admin-defined priority order for text-generation providers (see
+# src/pipeline/ai_text.py) — "anthropic" | "deepseek" | "groq" | "openai" |
+# "fal", in the order they should be tried. Any configured provider left out
+# of this list is still appended after it (in the module's default order),
+# so nothing is ever unreachable — this only lets the admin push preferred
+# providers to the front, e.g. move off Claude the instant its balance runs
+# low, without a redeploy. Set from the "Ressources" tab.
+AI_TEXT_PROVIDER_ORDER_KEY = "ai_text_provider_order"
 
 
-def ai_text_primary_provider() -> str:
-    return get_setting(AI_TEXT_PRIMARY_PROVIDER_KEY, AI_TEXT_PRIMARY_PROVIDER_DEFAULT)
+def ai_text_provider_order() -> List[str]:
+    raw = get_setting(AI_TEXT_PROVIDER_ORDER_KEY, None)
+    if not raw:
+        return []
+    try:
+        order = json.loads(raw)
+        return [p for p in order if isinstance(p, str)] if isinstance(order, list) else []
+    except (ValueError, TypeError):
+        return []
 
 
-def set_ai_text_primary_provider(name: str) -> None:
-    set_setting(AI_TEXT_PRIMARY_PROVIDER_KEY, name)
+def set_ai_text_provider_order(order: List[str]) -> None:
+    set_setting(AI_TEXT_PROVIDER_ORDER_KEY, json.dumps(order))

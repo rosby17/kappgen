@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -1237,7 +1237,7 @@ AI_TEXT_PROVIDERS = ["anthropic", "deepseek", "fal", "openai", "groq"]
 
 @router.get("/settings/ai-text-provider")
 def get_ai_text_provider(admin: User = Depends(get_current_admin)):
-    from src.utils.app_settings import ai_text_primary_provider
+    from src.utils.app_settings import ai_text_provider_order
     from src.config import ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, FAL_API_KEY, OPENAI_API_KEY, GROQ_API_KEY
     configured = {
         "anthropic": bool(ANTHROPIC_API_KEY),
@@ -1246,17 +1246,25 @@ def get_ai_text_provider(admin: User = Depends(get_current_admin)):
         "openai": bool(OPENAI_API_KEY),
         "groq": bool(GROQ_API_KEY),
     }
-    return {"primary": ai_text_primary_provider(), "order": AI_TEXT_PROVIDERS, "configured": configured}
+    custom_order = [p for p in ai_text_provider_order() if p in AI_TEXT_PROVIDERS]
+    # Providers not explicitly ranked by the admin still trail behind, in the
+    # module's default order, so the "available" list always covers all five.
+    full_order = custom_order + [p for p in AI_TEXT_PROVIDERS if p not in custom_order]
+    return {"order": custom_order, "available": AI_TEXT_PROVIDERS, "effective_order": full_order, "configured": configured}
 
 
 class AiTextProviderPayload(BaseModel):
-    primary: str
+    order: List[str]
 
 
 @router.patch("/settings/ai-text-provider")
 def set_ai_text_provider(payload: AiTextProviderPayload, admin: User = Depends(get_current_admin)):
-    if payload.primary not in AI_TEXT_PROVIDERS:
-        raise HTTPException(status_code=400, detail="Fournisseur invalide.")
-    from src.utils.app_settings import set_ai_text_primary_provider
-    set_ai_text_primary_provider(payload.primary)
-    return {"primary": payload.primary}
+    cleaned = []
+    for p in payload.order:
+        if p not in AI_TEXT_PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
+        if p not in cleaned:
+            cleaned.append(p)
+    from src.utils.app_settings import set_ai_text_provider_order
+    set_ai_text_provider_order(cleaned)
+    return {"order": cleaned}

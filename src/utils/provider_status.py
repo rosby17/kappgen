@@ -8,20 +8,26 @@ these providers don't expose one via API:
 - OpenAI's real usage/billing API needs an org-level Admin key, which is a
   different credential than the completions key configured here — its check
   is also just a key-validity probe (GET /v1/models).
-- OpenRouter is the one exception: /api/v1/auth/key genuinely returns the
-  key's remaining credit ("limit" minus "usage"), so its status includes a
-  real balance.
 - fal.ai has no free "ping" endpoint we know of — every real fal.ai call
   costs money, and burning fal.ai credits just to check whether fal.ai
   credits are available would be absurd. Its status is therefore limited to
   "is a key configured", nothing more.
 - Izivoice: same situation as Anthropic — /voices with page_size=1 confirms
   the key works, but Izivoice doesn't return a balance either.
+- DeepSeek and Groq are both probed with a minimal 1-token completion (the
+  cheapest real signal for "is this key actually usable right now" — a
+  balance-less key still returns 401/402 on this, which is exactly the
+  distinction the admin panel needs).
+
+OpenRouter is intentionally not checked here: it's not part of the AI-text
+provider chain (quality was rejected for this product), so it isn't
+surfaced on the Ressources page at all.
 """
 import httpx
 from src.config import (
-    ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+    ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY,
     IZIVOICE_API_KEY, IZIVOICE_BASE_URL,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY,
 )
 
 PROBE_TIMEOUT = 15.0
@@ -54,23 +60,46 @@ def _check_openai():
         return {"configured": True, "status": "error", "detail": f"OpenAI injoignable : {exc}"}
 
 
-def _check_openrouter():
-    if not OPENROUTER_API_KEY:
+def _check_deepseek():
+    if not DEEPSEEK_API_KEY:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
     try:
-        resp = httpx.get("https://openrouter.ai/api/v1/auth/key", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"}, timeout=PROBE_TIMEOUT)
+        resp = httpx.post(
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "deepseek-v4-flash", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+            timeout=PROBE_TIMEOUT,
+        )
+        if resp.status_code == 402:
+            return {"configured": True, "status": "error", "detail": "Clé valide mais solde insuffisant sur le compte DeepSeek — à recharger sur platform.deepseek.com."}
+        if resp.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
         resp.raise_for_status()
-        data = (resp.json() or {}).get("data") or {}
-        limit = data.get("limit")
-        usage = data.get("usage")
-        if limit is None:
-            detail = f"Clé valide. Usage : ${usage:.2f} (illimité)." if usage is not None else "Clé valide."
-        else:
-            remaining = max(0, limit - (usage or 0))
-            detail = f"Crédit restant estimé : ${remaining:.2f} (limite ${limit:.2f})."
-        return {"configured": True, "status": "ok", "detail": detail, "balance_usd": (None if limit is None else round(max(0, limit - (usage or 0)), 2))}
+        return {"configured": True, "status": "ok", "detail": "Clé valide et compte crédité."}
+    except httpx.HTTPStatusError as exc:
+        return {"configured": True, "status": "error", "detail": f"Erreur DeepSeek ({exc.response.status_code})."}
     except Exception as exc:
-        return {"configured": True, "status": "error", "detail": f"OpenRouter injoignable ou clé invalide : {exc}"}
+        return {"configured": True, "status": "error", "detail": f"DeepSeek injoignable : {exc}"}
+
+
+def _check_groq():
+    if not GROQ_API_KEY:
+        return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
+    try:
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "openai/gpt-oss-120b", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+            timeout=PROBE_TIMEOUT,
+        )
+        if resp.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
+        resp.raise_for_status()
+        return {"configured": True, "status": "ok", "detail": "Clé valide. Gratuit."}
+    except httpx.HTTPStatusError as exc:
+        return {"configured": True, "status": "error", "detail": f"Erreur Groq ({exc.response.status_code})."}
+    except Exception as exc:
+        return {"configured": True, "status": "error", "detail": f"Groq injoignable : {exc}"}
 
 
 def _check_fal():
@@ -96,7 +125,8 @@ def check_all_providers() -> list:
     checks = [
         ("anthropic", "Anthropic (Claude)", _check_anthropic),
         ("openai", "OpenAI", _check_openai),
-        ("openrouter", "OpenRouter", _check_openrouter),
+        ("deepseek", "DeepSeek", _check_deepseek),
+        ("groq", "Groq (gratuit)", _check_groq),
         ("fal", "fal.ai", _check_fal),
         ("izivoice", "Izivoice", _check_izivoice),
     ]

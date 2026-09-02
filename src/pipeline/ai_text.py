@@ -237,11 +237,12 @@ def generate_text(
     to the next configured one on any failure. Raises only if every provider
     in the chain fails (or none are configured).
 
-    Which provider goes FIRST is admin-controlled at runtime (see the
-    "Ressources" tab / src/utils/app_settings.ai_text_primary_provider) — a
-    manual switch for exactly this situation: an exhausted Anthropic balance
-    with no time to redeploy. The rest of the chain still runs as fallback
-    behind whichever one is chosen, in the default order above.
+    The full priority order is admin-controlled at runtime (see the
+    "Ressources" tab / src/utils/app_settings.ai_text_provider_order) — pick
+    and reorder any subset of providers there for exactly this situation: an
+    exhausted Anthropic balance with no time to redeploy. Any configured
+    provider left out of that custom order is still appended after it (in
+    the default order above), so nothing is ever unreachable.
 
     OpenRouter's free-tier model is deliberately NOT in this chain — it's
     unreliable enough (leaks its own chain-of-thought in English into the
@@ -272,9 +273,9 @@ def generate_text(
         "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
     }
     default_order = ["anthropic", "deepseek", "fal", "openai", "groq"]
-    from src.utils.app_settings import ai_text_primary_provider
-    primary = ai_text_primary_provider()
-    order = [primary] + [p for p in default_order if p != primary] if primary in providers else default_order
+    from src.utils.app_settings import ai_text_provider_order
+    custom_order = [p for p in ai_text_provider_order() if p in providers]
+    order = custom_order + [p for p in default_order if p not in custom_order]
     last_exc = None
     for name in order:
         try:
