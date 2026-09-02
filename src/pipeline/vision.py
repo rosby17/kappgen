@@ -253,18 +253,45 @@ def _generate_music_prompt_with_openai(user_text: str) -> str:
     return text.strip()
 
 
+def _diagnose_provider_error(exc: Exception) -> str:
+    """Plain-language cause for a provider failure.
+
+    Raw provider errors mislead here: OpenAI answers an exhausted balance with
+    "429 Too Many Requests" (type insufficient_quota), which reads as
+    throttling and sends you looking for a rate-limit problem that doesn't
+    exist. fal.ai answers "403 Forbidden" with "User is locked. Reason:
+    TOP_UP". Both actually mean the same thing as Anthropic's explicit
+    "credit balance is too low"."""
+    text = str(exc).lower()
+    if "insufficient_quota" in text or "credit_balance_exhausted" in text or "no credits remaining" in text:
+        return "crédit épuisé"
+    if "credit balance is too low" in text:
+        return "crédit épuisé"
+    if "reason: top_up" in text or "user is locked" in text:
+        return "compte bloqué (recharge requise)"
+    if "401" in text or "invalid api key" in text or "authentication" in text:
+        return "clé API refusée"
+    if "429" in text:
+        return "trop de requêtes"
+    if "timeout" in text or "timed out" in text:
+        return "délai dépassé"
+    return str(exc)[:120]
+
+
 def _run_with_fallback(steps: list) -> str:
     """Tries each (provider_name, fn) pair in order, moving to the next one
-    on any failure (missing key, no credit, network/HTTP error, ...). Raises
-    the last error if every provider failed."""
-    last_exc = None
+    on any failure (missing key, no credit, network/HTTP error, ...). If every
+    provider fails, reports what happened on EACH of them — reporting only the
+    last one made a chain of three exhausted accounts look like a single
+    OpenAI rate limit."""
+    failures = []
     for name, fn in steps:
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a fallback chain
             logger.warning(f"[vision] provider '{name}' failed, trying next: {exc}")
-            last_exc = exc
-    raise RuntimeError(f"All AI providers failed for this request. Last error: {last_exc}")
+            failures.append(f"{name} : {_diagnose_provider_error(exc)}")
+    raise RuntimeError("Aucun fournisseur IA disponible — " + " · ".join(failures))
 
 
 # ---------------------------------------------------------------------------
