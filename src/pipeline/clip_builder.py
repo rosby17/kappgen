@@ -129,3 +129,27 @@ def build_image_clip(
     output_clip_path.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(cmd)
     return output_clip_path
+
+
+def build_video_clip(
+    video_path: Path,
+    output_clip_path: Path,
+    duration: float,
+    fps: int = 30,
+) -> Path:
+    """Prepare a creator-provided B-roll clip for one narration scene.
+
+    The source is looped when shorter than the scene and center-cropped to the
+    same 1920x1080 canvas as image scenes. Audio from the B-roll is discarded;
+    the narration/mix remains the single authoritative audio track.
+    """
+    filter_graph = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps={}:format=yuv420p".format(fps)
+    cmd = [
+        "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(video_path),
+        "-t", f"{duration:.3f}", "-vf", filter_graph,
+        "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+        str(output_clip_path),
+    ]
+    output_clip_path.parent.mkdir(parents=True, exist_ok=True)
+    run_ffmpeg(cmd)
+    return output_clip_path

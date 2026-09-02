@@ -9,7 +9,7 @@ from src.utils.ffmpeg_runner import get_audio_duration
 from src.pipeline.pacing import calculate_pacing_segments
 from src.pipeline.images import fetch_or_generate_images
 from src.pipeline.scene_director import build_scene_prompts
-from src.pipeline.clip_builder import analyze_scene_audio_energy, build_image_clip
+from src.pipeline.clip_builder import analyze_scene_audio_energy, build_image_clip, build_video_clip
 from src.pipeline.subtitles import generate_ass_subtitles, overlay_subtitles_on_image
 from src.pipeline.music import get_background_music_track
 from src.pipeline.audio_mixer import mix_audio_tracks
@@ -180,6 +180,26 @@ def run_video_pipeline(
         niche=channel_config.get("niche"),
         channel_id=channel_config.get("id"),
     )
+
+    # Creator-provided B-roll is mixed into the timeline at a restrained,
+    # predictable cadence. Images remain the default; every third scene uses
+    # the next clip, so a handful of short clips adds motion without taking
+    # over the entire montage.
+    broll_paths = []
+    broll_dir_value = image_style_cfg.get("broll_path")
+    if broll_dir_value:
+        from src.config import STORAGE_PATH
+        candidate_dir = (STORAGE_PATH / broll_dir_value).resolve()
+        storage_root = STORAGE_PATH.resolve()
+        if storage_root in candidate_dir.parents and candidate_dir.is_dir():
+            broll_paths = sorted([p for p in candidate_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}])
+    visual_paths = list(image_paths)
+    visual_types = ["image"] * len(visual_paths)
+    if broll_paths:
+        for i in range(2, min(len(visual_paths), len(segments)), 3):
+            visual_paths[i] = broll_paths[(i // 3) % len(broll_paths)]
+            visual_types[i] = "video"
+        logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
     
     # 5. Generate Subtitles ASS file
     logger.info("Step 4/7: Formatting ASS subtitles...")
@@ -242,8 +262,8 @@ def run_video_pipeline(
     with ThreadPoolExecutor(max_workers=max_clip_workers) as pool:
         futures = [
             pool.submit(
-                build_image_clip,
-                image_path=subtitled_image_paths[i],
+                build_video_clip if visual_types[i] == "video" else build_image_clip,
+                **({"video_path": visual_paths[i]} if visual_types[i] == "video" else {"image_path": subtitled_image_paths[i]}),
                 output_clip_path=clip_paths[i],
                 duration=seg["duration"],
                 zoom_min_pct=zoom_min,
@@ -299,6 +319,8 @@ def run_video_pipeline(
             "end": seg["end"],
             "duration": seg["duration"],
             "image_path": str(image_paths[i]),
+            "visual_path": str(visual_paths[i]),
+            "visual_type": visual_types[i],
             "clip_path": str(clip_paths[i]),
             "audio_segment_path": str(audio_segment_paths[i]),
             "word_start_idx": word_ranges[i][0],

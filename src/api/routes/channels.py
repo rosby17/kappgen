@@ -1818,6 +1818,59 @@ def get_my_channel_library_image(channel_id: str, filename: str, current_user: U
     return FileResponse(candidate)
 
 
+@router.post("/{channel_id}/broll")
+async def upload_channel_broll(channel_id: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Store creator-provided B-roll clips. No AI generation or paid provider is involved."""
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    broll_dir = STORAGE_PATH / "channels" / channel.id / "broll"
+    broll_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    rejected = 0
+    for file in files:
+        ext = Path(file.filename or "").suffix.lower()
+        contents = await file.read()
+        if ext not in ALLOWED_BROLL_EXTENSIONS or not contents or len(contents) > MAX_BROLL_UPLOAD_BYTES:
+            rejected += 1
+            continue
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(file.filename or "broll").stem)[:60] or "broll"
+        (broll_dir / f"{uuid.uuid4().hex[:8]}_{stem}{ext}").write_bytes(contents)
+        saved += 1
+    if not saved:
+        raise HTTPException(status_code=400, detail="Aucun clip vidéo valide (MP4, MOV, WebM ou M4V, 250 Mo max).")
+    style = dict(channel.image_style or {})
+    style["broll_path"] = f"channels/{channel.id}/broll"
+    style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])
+    style["broll_rejected_count"] = rejected
+    channel.image_style = style
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
+@router.get("/{channel_id}/broll")
+def list_channel_broll(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    directory = STORAGE_PATH / "channels" / channel.id / "broll"
+    files = sorted([f.name for f in directory.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS], reverse=True) if directory.is_dir() else []
+    return {"filenames": files, "total": len(files)}
+
+
+@router.get("/{channel_id}/broll/{filename}")
+def get_channel_broll(channel_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    directory = (STORAGE_PATH / "channels" / channel.id / "broll").resolve()
+    candidate = (directory / filename).resolve()
+    if candidate.parent != directory or not candidate.is_file() or candidate.suffix.lower() not in ALLOWED_BROLL_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Clip introuvable.")
+    return FileResponse(candidate)
+
+
 @router.delete("/{channel_id}/library/images/{filename}")
 def delete_my_channel_library_image(channel_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement
