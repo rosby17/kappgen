@@ -45,16 +45,25 @@ def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> 
     """
     Generates a background music track via Izivoice's music-generation endpoint.
 
-    Confirmed against https://www.izivoice.app/api-docs: POST /music takes a
-    `prompt` string (no documented duration param — the API decides the
-    length), returns {success, task_id}, polled via GET /tasks/{task_id}
-    until status == "done", at which point metadata.audio_url holds the track.
+    POST /music now requires create_mode ("simple" or "custom") — a field it
+    silently started rejecting requests without (400 "Invalid creation
+    mode"), breaking this call entirely until this was updated. "simple"
+    mode takes gpt_description_prompt (not the old bare `prompt` field) and
+    make_instrumental — background music always instrumental, never
+    generated vocals competing with the narration. No documented duration
+    param either way — the API decides the length. Returns {success,
+    task_id}, polled via GET /tasks/{task_id} until status == "done", at
+    which point metadata.audio_url holds the track.
     """
     with httpx.Client() as client:
         resp = client.post(
             f"{IZIVOICE_BASE_URL}/music",
             headers=_izivoice_headers(),
-            json={"prompt": prompt[:2000]},
+            json={
+                "create_mode": "simple",
+                "gpt_description_prompt": prompt[:2000],
+                "make_instrumental": True,
+            },
             timeout=30.0
         )
         resp.raise_for_status()
