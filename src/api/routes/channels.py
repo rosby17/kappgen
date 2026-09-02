@@ -1687,6 +1687,134 @@ async def upload_channel_library_images(
     db.refresh(channel)
     return channel.to_dict()
 
+
+# --- Creator-facing library management --------------------------------------
+# What a creator uploaded to the server (image folders, background music) and
+# a way to actually delete it — distinct from the admin community-library
+# tools above, this is scoped to the current user's own channels only, no
+# admin rights needed. Video-attached audio (a script-upload's source file)
+# is not covered here; it's tied to that video's own lifecycle and cleaned up
+# when the video itself is deleted, not a standalone asset a creator manages.
+
+@router.get("/library/overview")
+def get_library_overview(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channels = db.query(Channel).filter(Channel.user_id == current_user.id).order_by(Channel.name.asc()).all()
+    overview = []
+    for channel in channels:
+        library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+        image_count = 0
+        if library_dir.is_dir():
+            image_count = len([f for f in library_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS])
+        tracks = list((channel.music_preference or {}).get("tracks") or [])
+        overview.append({
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "niche": channel.niche,
+            "image_count": image_count,
+            "music_track_count": len(tracks),
+        })
+    return {"channels": overview}
+
+
+@router.get("/{channel_id}/library/images")
+def list_my_channel_library_images(
+    channel_id: str, offset: int = 0, limit: int = 60,
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    library_dir = STORAGE_PATH / "channels" / channel_id / "library"
+    if not library_dir.is_dir():
+        return {"filenames": [], "total": 0, "offset": 0, "has_more": False}
+    all_filenames = sorted(
+        (item.name for item in library_dir.iterdir() if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS),
+        reverse=True,
+    )
+    offset = max(0, offset)
+    limit = max(1, min(limit, 120))
+    filenames = all_filenames[offset:offset + limit]
+    return {
+        "filenames": filenames,
+        "total": len(all_filenames),
+        "offset": offset,
+        "has_more": offset + len(filenames) < len(all_filenames),
+    }
+
+
+@router.get("/{channel_id}/library/images/{filename}")
+def get_my_channel_library_image(channel_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from fastapi.responses import FileResponse
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image introuvable.")
+    return FileResponse(candidate)
+
+
+@router.delete("/{channel_id}/library/images/{filename}")
+def delete_my_channel_library_image(channel_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Image introuvable.")
+    candidate.unlink()
+    db.query(CommunityLibraryImagePlacement).filter(
+        CommunityLibraryImagePlacement.channel_id == channel_id,
+        CommunityLibraryImagePlacement.filename == filename,
+    ).delete(synchronize_session=False)
+    image_style = dict(channel.image_style or {})
+    new_count = max(0, int(image_style.get("library_image_count") or 0) - 1)
+    image_style["library_image_count"] = new_count
+    channel.image_style = image_style
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if folder:
+        folder.image_count = new_count
+    db.commit()
+    return {"deleted": True, "image_count": new_count}
+
+
+@router.delete("/{channel_id}/library/images")
+def delete_all_my_channel_library_images(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Wipes the whole folder in one call — the "efface tout ce que j'ai
+    uploadé" case, instead of forcing a click-per-image loop client-side."""
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    library_dir = STORAGE_PATH / "channels" / channel_id / "library"
+    deleted = 0
+    if library_dir.is_dir():
+        for item in list(library_dir.iterdir()):
+            if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS:
+                item.unlink()
+                deleted += 1
+    db.query(CommunityLibraryImagePlacement).filter(CommunityLibraryImagePlacement.channel_id == channel_id).delete(synchronize_session=False)
+    image_style = dict(channel.image_style or {})
+    image_style["library_image_count"] = 0
+    channel.image_style = image_style
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if folder:
+        folder.image_count = 0
+    db.commit()
+    return {"deleted": deleted, "image_count": 0}
+
+
 @router.get("/{channel_id}/youtube/auth-url")
 def get_youtube_auth_url(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
