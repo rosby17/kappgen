@@ -1871,6 +1871,23 @@ def get_channel_broll(channel_id: str, filename: str, current_user: User = Depen
     return FileResponse(candidate)
 
 
+@router.delete("/{channel_id}/broll/{filename}")
+def delete_channel_broll(channel_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    directory = (STORAGE_PATH / "channels" / channel.id / "broll").resolve()
+    candidate = (directory / filename).resolve()
+    if candidate.parent != directory or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Clip introuvable.")
+    candidate.unlink()
+    style = dict(channel.image_style or {})
+    style["broll_count"] = max(0, int(style.get("broll_count") or 1) - 1)
+    channel.image_style = style
+    db.commit()
+    return {"deleted": True, "broll_count": style["broll_count"]}
+
+
 @router.delete("/{channel_id}/library/images/{filename}")
 def delete_my_channel_library_image(channel_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement

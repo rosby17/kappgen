@@ -53,6 +53,7 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     message instead of silently rendering placeholder-only art."""
     from src.pipeline.images import resolve_enabled_image_sources
     image_style = channel.image_style or {}
+    media_mode = image_style.get("media_mode", "images")
     enabled = resolve_enabled_image_sources(image_style)
 
     if "ai_generated" in enabled:
@@ -75,7 +76,7 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
         return
 
     has_real_source = False
-    if "library" in enabled:
+    if media_mode != "videos" and "library" in enabled:
         library_path = str(image_style.get("library_path") or "")
         expected_prefix = f"channels/{channel.id}/library"
         library_dir = (STORAGE_PATH / library_path).resolve() if library_path else None
@@ -85,7 +86,7 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
             item.is_file() and item.suffix.lower() in LIBRARY_IMAGE_EXTENSIONS
             for item in library_dir.iterdir()
         ))
-    if "community" in enabled:
+    if media_mode != "videos" and "community" in enabled:
         has_approved_folder = db.query(CommunityLibraryFolder).filter(
             CommunityLibraryFolder.status == "approved",
             CommunityLibraryFolder.niche.ilike(channel.niche or ""),
@@ -99,6 +100,15 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
                 CommunityLibraryImagePlacement.niche.ilike(channel.niche or ""),
             ).first() is not None
         has_real_source = has_real_source or has_approved_folder
+    if media_mode == "videos":
+        broll_path = str(image_style.get("broll_path") or "")
+        expected_prefix = f"channels/{channel.id}/broll"
+        broll_dir = (STORAGE_PATH / broll_path).resolve() if broll_path else None
+        root = STORAGE_PATH.resolve()
+        safe = broll_dir is not None and root in broll_dir.parents
+        has_real_source = safe and broll_path == expected_prefix and broll_dir.is_dir() and any(
+            item.is_file() and item.suffix.lower() in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"} for item in broll_dir.iterdir()
+        )
     if not has_real_source:
         raise HTTPException(
             status_code=400,

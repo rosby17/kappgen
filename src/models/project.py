@@ -103,6 +103,11 @@ class ImageStyle(BaseModel):
     style_prompt: str = "cinematic, dramatic lighting, high detail, masterpiece"
     library_path: Optional[str] = None
     library_image_count: int = 0
+    broll_path: Optional[str] = None
+    broll_count: int = 0
+    # How the creator wants the montage to consume their uploaded media.
+    # Kept separate from `sources`, which controls AI/community image pools.
+    media_mode: str = "images"  # images | videos | mixed
     # Opt-in only, set at upload time — this channel's own library becomes
     # eligible for admin curation into its niche's shared community library
     # (see CommunityLibraryFolder). Never shared without this being true.

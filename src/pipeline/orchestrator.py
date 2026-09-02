@@ -171,14 +171,11 @@ def run_video_pipeline(
         if directed_prompts:
             prompts = directed_prompts + prompts[len(directed_prompts):]
 
-    image_paths = fetch_or_generate_images(
-        prompts,
-        images_dir,
-        image_style_cfg,
+    media_mode = image_style_cfg.get("media_mode", "images")
+    image_paths = [] if media_mode == "videos" else fetch_or_generate_images(
+        prompts, images_dir, image_style_cfg,
         unique_generation_count=ai_unique_scene_count if ai_enabled else None,
-        user_id=channel_config.get("user_id"),
-        niche=channel_config.get("niche"),
-        channel_id=channel_config.get("id"),
+        user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
     )
 
     # Creator-provided B-roll is mixed into the timeline at a restrained,
@@ -195,8 +192,15 @@ def run_video_pipeline(
             broll_paths = sorted([p for p in candidate_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}])
     visual_paths = list(image_paths)
     visual_types = ["image"] * len(visual_paths)
+    if media_mode == "videos":
+        visual_paths = [None] * len(segments)
+        visual_types = ["video"] * len(segments)
+    elif len(visual_paths) < len(segments):
+        visual_paths.extend([None] * (len(segments) - len(visual_paths)))
+        visual_types.extend(["image"] * (len(segments) - len(visual_types)))
     if broll_paths:
-        for i in range(2, min(len(visual_paths), len(segments)), 3):
+        indices = range(len(segments)) if media_mode == "videos" else range(2, len(segments), 3)
+        for i in indices:
             visual_paths[i] = broll_paths[(i // 3) % len(broll_paths)]
             visual_types[i] = "video"
         logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
@@ -318,7 +322,7 @@ def run_video_pipeline(
             "start": seg["start"],
             "end": seg["end"],
             "duration": seg["duration"],
-            "image_path": str(image_paths[i]),
+            "image_path": str(image_paths[i]) if i < len(image_paths) else None,
             "visual_path": str(visual_paths[i]),
             "visual_type": visual_types[i],
             "clip_path": str(clip_paths[i]),
