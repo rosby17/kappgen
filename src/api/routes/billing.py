@@ -59,8 +59,8 @@ def estimate_script_cost(total_words: int, num_parts: int = 1, current_user: Use
 
 class CheckoutPayload(BaseModel):
     plan_id: str
-    provider: str  # "maketou" | "tarapay"
-    billing_cycle: str = "monthly"  # "monthly" | "quarterly" | "semiannual" | "yearly" | "lifetime"
+    provider: str  # Payment method identifier returned by KappGen.
+    billing_cycle: str = "monthly"
 
 
 @router.post("/checkout")
@@ -269,7 +269,7 @@ def verify_order(order_id: str, current_user: User = Depends(get_current_user), 
     return {"status": "pending"}
 
 
-@router.post("/webhook/tarapay")
+@router.post("/webhook/tarapay", include_in_schema=False)
 async def tarapay_webhook(request: Request, key: str = "", db: Session = Depends(get_db)):
     # Tara Money doesn't sign webhooks — the shared secret embedded in the
     # webHookUrl query param at checkout time IS the auth mechanism (matches
