@@ -813,6 +813,19 @@ def get_video_thumbnail_history(video_id: str, filename: str, current_user: User
         raise HTTPException(status_code=404, detail="Version introuvable")
     return FileResponse(path, media_type="image/jpeg")
 
+@router.post("/{video_id}/thumbnail/history/{filename}/restore")
+def restore_video_thumbnail_history(video_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    current = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
+    base = current.parent / "thumbnail_history"
+    source = base / filename
+    if not source.exists() or not source.is_relative_to(base):
+        raise HTTPException(status_code=404, detail="Version introuvable")
+    if current.exists():
+        shutil.copy2(current, base / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg")
+    shutil.copy2(source, current)
+    return {"status": "ok"}
+
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
