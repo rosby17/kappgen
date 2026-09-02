@@ -82,7 +82,12 @@ def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # The endpoint is called directly from the browser while a creator adds
+    # references. A default SDK timeout can outlive Cloudflare's response
+    # window, which turns an ordinary provider delay into a misleading
+    # browser-level "Failed to fetch". Keep each fallback short enough that
+    # the route can return a normal JSON error instead.
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=25.0)
     content = []
     for image_bytes, media_type in images:
         content.append({
@@ -126,7 +131,7 @@ def _analyze_many_with_fal(images: list, instruction: str) -> str:
             "prompt": instruction,
             "model": "anthropic/claude-sonnet-4.5",
         },
-        timeout=60.0,
+        timeout=25.0,
     )
     resp.raise_for_status()
     output = (resp.json() or {}).get("output")
@@ -152,7 +157,7 @@ def _analyze_many_with_openai(images: list, instruction: str) -> str:
             "max_tokens": 400,
             "messages": [{"role": "user", "content": content}],
         },
-        timeout=60.0,
+        timeout=25.0,
     )
     resp.raise_for_status()
     data = resp.json()
