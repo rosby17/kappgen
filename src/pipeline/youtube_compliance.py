@@ -21,6 +21,11 @@ def _word_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, a[:20000], b[:20000]).ratio()
 
 
+def text_similarity(left: str, right: str) -> float:
+    """Public similarity primitive shared by generation and publication guards."""
+    return _word_similarity(left, right)
+
+
 def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) -> dict:
     """Deterministic pre-publication guardrail; no claim of YouTube approval."""
     score = 100

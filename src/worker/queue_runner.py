@@ -1059,16 +1059,15 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     # sentences instead of short punchy ones. Now uses the real title,
     # falling back to the script's first line only for legacy videos that
     # somehow have neither (should be rare-to-never going forward).
-    recent_titles = [
-        v.title or (v.script_text or "").split("\n")[0][:120]
-        for v in (
+    recent_video_history = (
             db.query(Video)
             .filter(Video.channel_id == channel.id)
             .order_by(Video.created_at.desc())
             .limit(AUTOMATION_RECENT_TITLES_LIMIT)
             .all()
-        )
-    ]
+    )
+    recent_titles = [v.title or (v.script_text or "").split("\n")[0][:120] for v in recent_video_history]
+    recent_scripts = [v.script_text for v in recent_video_history if (v.script_text or "").strip()]
 
     # Folded together rather than threading a new parameter through
     # script_writer's whole call chain: the channel description says what
@@ -1114,6 +1113,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         topic_examples=channel.topic_examples,
         use_web_trends=bool(channel.use_web_trends),
         on_progress=_on_script_progress,
+        recent_scripts=recent_scripts,
     )
     if not result:
         db.delete(video)
@@ -1258,16 +1258,15 @@ def retry_auto_video_script_background(video_id: str):
             db.commit()
             return
 
-        recent_titles = [
-            v.title or (v.script_text or "").split("\n")[0][:120]
-            for v in (
+        recent_video_history = (
                 db.query(Video)
                 .filter(Video.channel_id == channel.id, Video.id != video.id)
                 .order_by(Video.created_at.desc())
                 .limit(AUTOMATION_RECENT_TITLES_LIMIT)
                 .all()
-            )
-        ]
+        )
+        recent_titles = [v.title or (v.script_text or "").split("\n")[0][:120] for v in recent_video_history]
+        recent_scripts = [v.script_text for v in recent_video_history if (v.script_text or "").strip()]
         combined_style_prompt = "\n".join(filter(None, [
             f"What this channel is about: {channel.description}" if channel.description else None,
             channel.automation_style_prompt,
@@ -1281,6 +1280,7 @@ def retry_auto_video_script_background(video_id: str):
             default_language="French" if (owner.locale or "fr") == "fr" else "English",
             topic_examples=channel.topic_examples,
             use_web_trends=bool(channel.use_web_trends),
+            recent_scripts=recent_scripts,
         )
         if not result:
             video.status = VideoStatus.FAILED.value

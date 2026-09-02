@@ -255,6 +255,29 @@ async def submit_video_subject(
     else: # input_type == "text"
         if not (script_text and script_text.strip()):
             raise HTTPException(status_code=400, detail="Veuillez saisir un texte de script pour la génération TTS.")
+
+        # Stop near-duplicate manual submissions before they consume credits
+        # or enter the render queue. This complements the post-render report;
+        # originality must be enforced at creation time, not only publication.
+        from src.pipeline.youtube_compliance import text_similarity
+        history = (
+            db.query(Video)
+            .filter(Video.channel_id == channel.id)
+            .order_by(Video.created_at.desc())
+            .limit(30)
+            .all()
+        )
+        closest = max(
+            ((text_similarity(script_text, old.script_text or ""), old) for old in history),
+            default=(0.0, None), key=lambda item: item[0],
+        )
+        if closest[0] >= 0.72:
+            raise HTTPException(status_code=409, detail={
+                "code": "script_too_similar",
+                "message": f"Ce scénario ressemble à {round(closest[0] * 100)} % à une ancienne vidéo. Réécrivez son angle, ses exemples et sa structure avant de le générer.",
+                "similar_video_id": closest[1].id if closest[1] else None,
+                "similar_title": closest[1].title if closest[1] else None,
+            })
             
         # Rough speech-rate estimate (~150 wpm) so the queue can prioritize
         # shorter jobs; corrected to the real duration once TTS runs.

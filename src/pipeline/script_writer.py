@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
 from src.pipeline.ai_text import generate_text
 from src.utils.logger import logger
+from src.pipeline.youtube_compliance import text_similarity
 
 SCRIPT_WRITER_MODEL = "claude-sonnet-5"
 
@@ -195,6 +196,7 @@ def _write_part(
     previous_tail: str,
     is_last_part: bool,
     cost_sink: Optional[List[float]] = None,
+    originality_context: str = "",
 ) -> Optional[str]:
     word_count = int(part.get("word_count", 300) or 300)
     rules_block = "\n".join(f"- {r}" for r in formatting_rules) if formatting_rules else ""
@@ -219,6 +221,11 @@ This section must be about {word_count} words long and must cover: {guidance_tex
 {continuity_block}
 
 Respond with ONLY the narration text for this section, nothing else — no title, no preamble, no quotation marks, no labels."""
+    if originality_context:
+        instruction += f"""
+
+Originality guardrail: older videos from this channel commonly used the following openings, conclusions or formulations. Do not imitate their wording, rhetorical sequence, examples or hook pattern. Create a materially different treatment:
+{originality_context}"""
 
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
@@ -238,6 +245,7 @@ def generate_daily_script(
     topic_examples: Optional[str] = None,
     use_web_trends: bool = False,
     on_progress: Optional[callable] = None,
+    recent_scripts: Optional[List[str]] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -268,6 +276,11 @@ def generate_daily_script(
         return None
 
     cost_sink: List[float] = []
+    recent_scripts = [text for text in (recent_scripts or []) if (text or "").strip()][:10]
+    originality_context = "\n---\n".join(
+        f"Opening: {text.strip()[:280]}\nEnding: {text.strip()[-220:]}"
+        for text in recent_scripts[:5]
+    )
     try:
         title = _pick_topic(
             niche, recent_titles, style_prompt, language, cost_sink=cost_sink,
@@ -284,6 +297,7 @@ def generate_daily_script(
             part_text = _write_part(
                 title, niche, language, style_prompt, formatting_rules, cta_style,
                 part, tail, is_last_part=(i == len(parts) - 1), cost_sink=cost_sink,
+                originality_context=originality_context,
             )
             if not part_text:
                 logger.warning(f"Daily script generation: part '{part.get('name')}' failed, aborting this run.")
@@ -306,6 +320,10 @@ def generate_daily_script(
         # least a full sentence or two, comfortably over this floor.
         if len(script_text) < 100:
             logger.warning(f"Daily script generation: final script only {len(script_text)} char(s) long, treating as a failure.")
+            return None
+        max_similarity = max((text_similarity(script_text, old) for old in recent_scripts), default=0.0)
+        if max_similarity >= 0.58:
+            logger.error("Daily script generation rejected by originality guard (similarity %.0f%%).", max_similarity * 100)
             return None
         return {"title": title, "script_text": script_text, "generation_cost_usd": sum(cost_sink)}
     except Exception as e:
