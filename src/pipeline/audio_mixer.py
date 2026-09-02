@@ -117,6 +117,16 @@ def mix_audio_tracks(
     settings = processing or {}
     run_ffmpeg([
         "ffmpeg", "-y", "-i", str(voiceover_path), "-i", str(music_path),
+        # Forces single-threaded filter-graph initialization. This studio-mix
+        # graph chains multiple asplit nodes (multiband + reverb), and under
+        # concurrent load (several videos rendering at once on the same VPS)
+        # FFmpeg's default multi-threaded graph init has a known race that
+        # spuriously reports "Filter asplit has an unconnected output" on an
+        # otherwise-valid graph — confirmed here: the exact same command with
+        # the exact same files succeeds every time when run in isolation, but
+        # failed twice in production under load. Audio filtering is cheap
+        # enough that single-threaded init costs nothing noticeable.
+        "-filter_complex_threads", "1",
         "-filter_complex", build_studio_mix_filter(vo_duration, music_volume, settings),
         "-map", "[aout]", "-c:a", "libmp3lame", "-b:a", "192k", str(output_audio_path),
     ])
