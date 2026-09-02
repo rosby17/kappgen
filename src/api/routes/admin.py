@@ -529,7 +529,7 @@ KNOWN_NICHES = [
     "Philosophie", "Philosophie Stoïcienne", "Philosophie de Machiavel", "Philosophie de Napoleon Hill",
     "Stoïcisme", "Prière", "Méditation", "Bouddhisme", "Islam",
     "Mythologie", "Histoires Antiques", "Histoire Européenne", "Histoire",
-    "Développement Personnel", "Motivation", "Récits Captivants", "Psychologie", "Finance", "Business",
+    "Développement Personnel", "Motivation", "Récits Captivants", "Psychologie de Carl Jung", "Finance", "Business",
     "Santé & Bien-être", "Football", "Sport", "Science", "Faits Divers", "True Crime", "Voyage", "Cuisine",
     "Astuces Maison",
 ]
