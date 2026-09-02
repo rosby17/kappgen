@@ -351,6 +351,7 @@ def list_all_videos(current_user: User = Depends(get_current_user), db: Session 
         .order_by(Video.created_at.desc())
         .all()
     )
+    _backfill_trust_scores(db, videos)
     return [v.to_dict() for v in videos]
 
 def _get_owned_video(db: Session, video_id: str, current_user: User) -> Video:
@@ -529,6 +530,27 @@ def _append_compliance_event(video: Video, event: str, details: Optional[dict] =
     history = list(video.youtube_compliance_history or [])
     history.append({"at": datetime.utcnow().isoformat(), "event": event, "details": details or {}})
     video.youtube_compliance_history = history[-50:]
+
+
+def _backfill_trust_scores(db: Session, videos: List[Video]) -> None:
+    """Give finished legacy videos the same automatic Trust Score as newly
+    rendered videos. The video list is the first place creators return to,
+    so it should never make them click merely to initialise an analysis."""
+    missing = [video for video in videos if video.status == VideoStatus.DONE.value and not video.youtube_compliance_report]
+    if not missing:
+        return
+    for video in missing:
+        previous = (
+            db.query(Video)
+            .filter(Video.channel_id == video.channel_id, Video.id != video.id)
+            .order_by(Video.created_at.desc())
+            .limit(30)
+            .all()
+        )
+        report = evaluate_youtube_compliance(video, video.channel, previous)
+        video.youtube_compliance_report = report
+        _append_compliance_event(video, "trust_score_backfilled", {"score": report["score"], "status": report["status"]})
+    db.commit()
 
 
 @router.get("/{video_id}/youtube/compliance")
@@ -742,6 +764,7 @@ def list_channel_videos(channel_id: str, current_user: User = Depends(get_curren
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     videos = db.query(Video).filter(Video.channel_id == channel_id).order_by(Video.created_at.desc()).all()
+    _backfill_trust_scores(db, videos)
     return [v.to_dict() for v in videos]
 
 @router.post("/{video_id}/retry")
