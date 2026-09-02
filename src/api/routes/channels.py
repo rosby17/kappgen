@@ -1422,17 +1422,76 @@ def _thumbnail_reference_paths(thumbnail_style: dict) -> List[str]:
     return [single] if single else []
 
 
+def _analyze_thumbnail_style_background(channel_id: str, all_paths: List[str]) -> None:
+    """Runs the actual (multi-provider, up to ~75s worst case) vision analysis
+    off the request thread — see upload_channel_thumbnail_style below for why."""
+    from src.db.session import SessionLocal
+    from src.pipeline.vision import analyze_thumbnail_reference_profile
+    db = SessionLocal()
+    try:
+        images = []
+        for rel_path in all_paths:
+            abs_path = STORAGE_PATH / rel_path
+            ext = abs_path.suffix.lower()
+            media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
+            if abs_path.exists() and media_type:
+                images.append((abs_path.read_bytes(), media_type))
+
+        channel = db.query(Channel).filter(Channel.id == channel_id).first()
+        if not channel:
+            return
+        try:
+            profile = analyze_thumbnail_reference_profile(images)
+        except Exception as e:
+            previous = dict(channel.thumbnail_style or {})
+            previous["analyzing"] = False
+            previous["analysis_error"] = f"Analyse des images impossible : {e}"
+            channel.thumbnail_style = previous
+            db.commit()
+            return
+
+        previous = dict(channel.thumbnail_style or {})
+        previous.update({
+            "reference_image_paths": all_paths,
+            "style_prompt": profile["style_prompt"],
+            "text_side": profile.get("text_side") or previous.get("text_side"),
+            "analysis_summary": profile.get("analysis_summary"),
+            "character_anchor": profile.get("character_anchor") or previous.get("character_anchor"),
+            "analyzing": False,
+            "analysis_error": None,
+        })
+        channel.thumbnail_style = previous
+        image_style = dict(channel.image_style or {})
+        image_style["generate_thumbnail_with_ai"] = True
+        channel.image_style = image_style
+        db.commit()
+    finally:
+        db.close()
+
+
 @router.post("/{channel_id}/thumbnail-style")
 async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Adds one or more thumbnail-specific reference images for this channel, then
-    re-analyzes ALL of them together (existing + newly uploaded) into a single
-    reusable style prompt — kept separate from image_style, since the thumbnail
-    look is often deliberately different from the video's own body-image style."""
+    """Saves one or more thumbnail-specific reference images for this channel
+    and starts re-analyzing ALL of them together (existing + newly uploaded)
+    into a single reusable style prompt — kept separate from image_style,
+    since the thumbnail look is often deliberately different from the
+    video's own body-image style.
+
+    Only saves the files and starts the analysis, returning immediately —
+    the vision call falls back across up to 3 providers (~75s worst case),
+    and multiple large images take real time just to upload/decode on top of
+    that, well past what Cloudflare's edge proxy holds a request open for;
+    the browser previously saw the cut connection as a bare "Failed to
+    fetch" once several reference images were added at once. The frontend
+    polls /{channel_id}/thumbnail-style/status instead of awaiting this
+    response."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
     if channel.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Accès refusé.")
+    if (channel.thumbnail_style or {}).get("analyzing"):
+        raise HTTPException(status_code=409, detail="Une analyse est déjà en cours pour cette chaîne.")
 
     channel_dir = STORAGE_PATH / "channels" / channel.id / "thumbnail_references"
     channel_dir.mkdir(parents=True, exist_ok=True)
@@ -1451,35 +1510,31 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
         new_paths.append(f"channels/{channel.id}/thumbnail_references/{dest_file.name}")
 
     all_paths = existing_paths + new_paths
-    images = []
-    for rel_path in all_paths:
-        abs_path = STORAGE_PATH / rel_path
-        ext = abs_path.suffix.lower()
-        media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
-        if abs_path.exists() and media_type:
-            images.append((abs_path.read_bytes(), media_type))
-
-    from src.pipeline.vision import analyze_thumbnail_reference_profile
-    try:
-        profile = analyze_thumbnail_reference_profile(images)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
-
     previous = dict(channel.thumbnail_style or {})
-    previous.update({
-        "reference_image_paths": all_paths,
-        "style_prompt": profile["style_prompt"],
-        "text_side": profile.get("text_side") or previous.get("text_side"),
-        "analysis_summary": profile.get("analysis_summary"),
-        "character_anchor": profile.get("character_anchor") or previous.get("character_anchor"),
-    })
+    previous["analyzing"] = True
+    previous["analysis_error"] = None
     channel.thumbnail_style = previous
-    image_style = dict(channel.image_style or {})
-    image_style["generate_thumbnail_with_ai"] = True
-    channel.image_style = image_style
     db.commit()
     db.refresh(channel)
+
+    import threading
+    threading.Thread(target=_analyze_thumbnail_style_background, args=(channel_id, all_paths), daemon=True).start()
     return channel.to_dict()
+
+
+@router.get("/{channel_id}/thumbnail-style/status")
+def get_thumbnail_style_status(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    style = channel.thumbnail_style or {}
+    return {
+        "analyzing": bool(style.get("analyzing")),
+        "analysis_error": style.get("analysis_error"),
+        "channel": channel.to_dict(),
+    }
 
 
 @router.post("/{channel_id}/thumbnail-concept/propose")
