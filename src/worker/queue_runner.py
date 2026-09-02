@@ -1,3 +1,4 @@
+import os
 import shutil
 import json
 import signal
@@ -1704,10 +1705,17 @@ def _render_worker_loop(worker_name: str, poll_interval_seconds: float):
 
 def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = False, max_concurrent_renders: Optional[int] = None):
     """
-    Starts one strictly sequential priority render lane, plus the independent
-    voice-clone and periodic-maintenance loops. max_concurrent_renders remains
-    in the signature for backward-compatible callers but is intentionally
-    ignored: product policy is one video render at a time.
+    Starts N parallel render lanes (default 2), plus the independent
+    voice-clone and periodic-maintenance loops. Each lane claims its own video
+    via process_single_queued_video()'s `with_for_update(skip_locked=True)`
+    row lock, so lanes never race for the same video, and every render writes
+    to its own video_dir — nothing shared between two videos rendering at
+    once. The worker container itself is CPU-capped by Docker (2.5 cores at
+    time of writing), which is what actually bounds host impact: adding lanes
+    lets that budget be shared by more than one video instead of raising it,
+    so this is safe to bump without a host resource change. Override via
+    MAX_CONCURRENT_RENDERS if that cap is ever raised and more lanes make
+    sense, or dropped back to 1 to revert to strictly sequential rendering.
     """
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     from src.utils.error_tracking import init_error_tracking
@@ -1715,7 +1723,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     init_db()
     requeue_orphaned_videos()
     requeue_orphaned_voice_clone_jobs()
-    concurrency = 1
+    concurrency = max_concurrent_renders or int(os.getenv("MAX_CONCURRENT_RENDERS", "2"))
 
     if single_run:
         # Used for one-shot/manual invocations — render exactly one video and
