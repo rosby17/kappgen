@@ -20,7 +20,10 @@ from src.db.models import AppSetting
 # explicitly adds a paid provider to the order from the "Ressources" tab.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
 THUMBNAIL_PROVIDERS_ALL = ["huggingface", "fal", "izivoice"]
-THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["huggingface"]
+# GPT Image 2 is the default thumbnail renderer: its instruction following
+# and reference-image conditioning are materially better suited to thumbnail
+# art direction than FLUX schnell. Izivoice remains an explicit fallback.
+THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["fal", "izivoice"]
 
 
 def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
