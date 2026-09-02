@@ -207,7 +207,7 @@ def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     return text.strip(), 0.0
 
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 
 
 def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
@@ -218,7 +218,15 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
         params={"key": GEMINI_API_KEY},
         json={
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": max(max_tokens, 300)},
+            # This model burns the vast majority of maxOutputTokens on hidden
+            # "thinking" before writing any visible text — observed ~90-95%
+            # of the budget gone to thoughtsTokenCount regardless of
+            # thinkingConfig (thinkingBudget: 0 is rejected outright by this
+            # model, and lower positive budgets are silently ignored). Padding
+            # generously here is the only way to reliably get the requested
+            # content length instead of an early MAX_TOKENS cutoff — still
+            # free-tier, just token-budget-hungry.
+            "generationConfig": {"maxOutputTokens": max(max_tokens * 15, 4000)},
         },
         timeout=120.0,
     )
