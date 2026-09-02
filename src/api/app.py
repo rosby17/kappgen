@@ -1,4 +1,6 @@
 from fastapi import Depends, FastAPI
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
@@ -49,8 +51,10 @@ generated media are returned as short-lived URLs where applicable.
     contact={"name": "KappGen support", "email": "contact@kappgen.com", "url": "https://kappgen.com"},
     license_info={"name": "KappGen API Terms", "url": "https://kappgen.com/terms"},
     servers=[{"url": "https://api.kappgen.com", "description": "Production"}],
-    docs_url="/docs",
-    redoc_url="/redoc",
+    # Served below with the KappGen favicon instead of Swagger's default
+    # green logo, so the API docs share the product identity.
+    docs_url=None,
+    redoc_url=None,
     swagger_ui_parameters={"persistAuthorization": True, "displayRequestDuration": True, "filter": True, "tryItOutEnabled": True},
 )
 
@@ -98,6 +102,29 @@ class SecurityHeadersMiddleware:
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+KAPPGEN_FAVICON = "https://kappgen.com/assets/logo/favicon-32.png"
+
+@app.get("/docs", include_in_schema=False)
+def swagger_docs() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title="KappGen API · Documentation",
+        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+        swagger_favicon_url=KAPPGEN_FAVICON,
+        swagger_ui_parameters=app.swagger_ui_parameters,
+    )
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_docs() -> HTMLResponse:
+    return get_redoc_html(
+        openapi_url=app.openapi_url,
+        title="KappGen API · Référence",
+        redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js",
+        redoc_favicon_url=KAPPGEN_FAVICON,
+    )
 
 # Mount static storage directory for output video streaming and downloads
 app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
