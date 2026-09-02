@@ -125,31 +125,6 @@ tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fi
         return fallback
 
 
-def stock_credits_block(video_dir: Path) -> str:
-    """Credit lines for the free stock footage used in this video, or "" when
-    none was. Pexels' API terms require crediting the platform and recommend
-    crediting each videographer — this is what actually satisfies that, since
-    the licence is only free to use commercially on those terms. Written at
-    render time by the pipeline (source/stock_credits.json)."""
-    credits_file = video_dir / "source" / "stock_credits.json"
-    if not credits_file.is_file():
-        return ""
-    try:
-        entries = json.loads(credits_file.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return ""
-    authors = []
-    for entry in entries if isinstance(entries, list) else []:
-        author = (entry or {}).get("author")
-        if author and author not in authors:
-            authors.append(author)
-    if not authors:
-        return ""
-    lines = ["Séquences vidéo : Pexels (https://www.pexels.com)"]
-    lines.append("Vidéastes : " + ", ".join(authors[:20]))
-    return "\n".join(lines)
-
-
 def _font(size: int, font_file: str = None):
     candidates = [
         font_file,
