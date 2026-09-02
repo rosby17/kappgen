@@ -1098,6 +1098,27 @@ def admin_delete_channel(channel_id: str, admin: User = Depends(get_current_admi
     return {"deleted": True}
 
 
+class AdminChannelAutomationPayload(BaseModel):
+    automation_mode: str  # "manual" | "auto"
+
+
+@router.patch("/channels/{channel_id}/automation")
+def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomationPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Lets support flip a channel off automatic script writing without the
+    creator's own session — e.g. a locked-out account still generating
+    (and billing) videos daily with no way for the owner to log in and stop
+    it themselves."""
+    if payload.automation_mode not in ("manual", "auto"):
+        raise HTTPException(status_code=400, detail="Mode invalide.")
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    channel.automation_mode = payload.automation_mode
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
 # --- Hugging Face free-tier image generation accounts ------------------------
 # Admin-managed pool of accounts for the free FLUX.1-schnell path (see
 # src/pipeline/images.py) — lets new accounts keep being added over time
