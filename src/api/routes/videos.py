@@ -56,7 +56,7 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     media_mode = image_style.get("media_mode", "images")
     enabled = resolve_enabled_image_sources(image_style)
 
-    if "ai_generated" in enabled:
+    if "ai_generated" in enabled and media_mode != "videos":
         # Scene images (unlike thumbnails, which can use a paid
         # reference-image-conditioned provider) are generated exclusively
         # through Hugging Face's free-tier FLUX.1-schnell, with a non-billed
