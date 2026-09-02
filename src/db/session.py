@@ -178,6 +178,24 @@ def init_db():
                     logger.info(f"Migrating channels table: adding {col_name} column.")
                     conn.execute(text(ddl))
 
+    if "voice_clone_jobs" in inspector.get_table_names():
+        # Added after the table already existed in production: gender was
+        # referenced by /voice/clone (write) and /voice/clone/mine i.e.
+        # /my-cloned-voices (read) without ever being a real column, so
+        # create_all() alone never added it — every read of "Mes voix
+        # clonées" crashed with AttributeError deep inside the ASGI stack,
+        # which the browser only ever saw as a bare "Failed to fetch" (no
+        # CORS headers make it back on a connection torn down mid-response).
+        existing_vcj_columns = {col["name"] for col in inspector.get_columns("voice_clone_jobs")}
+        vcj_migrations = {
+            "gender": "ALTER TABLE voice_clone_jobs ADD COLUMN gender VARCHAR(20) DEFAULT 'neutral' NOT NULL",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in vcj_migrations.items():
+                if col_name not in existing_vcj_columns:
+                    logger.info(f"Migrating voice_clone_jobs table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
     if "folders" in inspector.get_table_names():
         existing_folder_columns = {col["name"] for col in inspector.get_columns("folders")}
         folder_migrations = {

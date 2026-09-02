@@ -766,6 +766,7 @@ class VoiceCloneJob(Base):
     audio_path = Column(String(1024), nullable=False)  # relative to STORAGE_PATH; deleted once processed
     status = Column(String(20), nullable=False, default="pending")  # "pending" | "processing" | "done" | "error"
     voice_id = Column(String(255), nullable=True)
+    gender = Column(String(20), nullable=False, default="neutral")  # "male" | "female" | "neutral"
     preview_url = Column(String(1024), nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
@@ -777,6 +778,7 @@ class VoiceCloneJob(Base):
             "status": self.status,
             "voice_id": self.voice_id,
             "name": self.name,
+            "gender": self.gender,
             "preview_url": self.preview_url,
             "detail": self.error_message,
         }
