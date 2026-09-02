@@ -295,6 +295,25 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     chunk_dir = audio_path.parent / f"{audio_path.stem}_stt_chunks"
     chunks = _split_audio_for_stt(audio_path, chunk_dir)
 
+    # Precompute each chunk's proportional slice of the known script text
+    # (fallback_text) up front, keyed by word count proportional to that
+    # chunk's share of the total audio duration — used only if Izivoice's
+    # STT fails for that specific chunk, so a transient 500 on one 5-minute
+    # segment doesn't leave that whole span with literally zero subtitles
+    # (observed: a 17-minute video with real subtitles only on its last
+    # ~2 minutes because 3 of 4 chunks failed STT and were silently skipped).
+    chunk_durations = [get_audio_duration(c) for c in chunks]
+    total_chunked_duration = sum(chunk_durations) or 1.0
+    fallback_words_all = clean_script_text(fallback_text).split()
+    chunk_fallback_texts: List[str] = []
+    _word_cursor = 0
+    _duration_cursor = 0.0
+    for d in chunk_durations:
+        _duration_cursor += d
+        end_idx = round(len(fallback_words_all) * (_duration_cursor / total_chunked_duration))
+        chunk_fallback_texts.append(" ".join(fallback_words_all[_word_cursor:end_idx]))
+        _word_cursor = end_idx
+
     all_words: List[Dict[str, Any]] = []
     all_text_parts: List[str] = []
     offset = 0.0
@@ -302,8 +321,8 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
 
     try:
         with httpx.Client() as client:
-            for chunk_path in chunks:
-                chunk_duration = get_audio_duration(chunk_path)
+            for chunk_index, chunk_path in enumerate(chunks):
+                chunk_duration = chunk_durations[chunk_index]
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
                 try:
@@ -326,10 +345,23 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                     # requests) must not throw away transcript already
                     # recovered from the OTHER chunks — previously any single
                     # failure fell back to showing the video's filename/title
-                    # as "subtitles" for the entire video. Skip just this
-                    # segment (no subtitle line during its span) instead.
+                    # as "subtitles" for the entire video. Instead of leaving
+                    # this segment with NO subtitles at all (the video's known
+                    # script text still tells us roughly what's being said
+                    # here), fall back to synthetic timing over this chunk's
+                    # proportional slice of the script — approximate, but far
+                    # better than several real minutes of silence on screen.
                     failed_chunks += 1
-                    logger.warning(f"Transcription failed for chunk {chunk_path.name} ({chunk_err}); leaving this segment without subtitles rather than discarding the rest of the transcript.")
+                    logger.warning(f"Transcription failed for chunk {chunk_path.name} ({chunk_err}); using synthetic subtitle timing for this segment instead of leaving it blank.")
+                    fallback_slice = chunk_fallback_texts[chunk_index]
+                    if fallback_slice:
+                        for w in synthetic_word_timings(fallback_slice, chunk_duration):
+                            all_words.append({
+                                "word": w["word"],
+                                "start": round(w["start"] + offset, 2),
+                                "end": round(w["end"] + offset, 2)
+                            })
+                        all_text_parts.append(fallback_slice)
                     offset += chunk_duration
                     continue
 
