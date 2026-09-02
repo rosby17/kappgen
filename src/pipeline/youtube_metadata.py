@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageFilter
 
 from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, STORAGE_PATH, ASSETS_PATH
 from src.pipeline.ai_text import generate_text
@@ -168,7 +168,13 @@ def _pick_thumbnail_variant(seed: str, thumbnail_style: dict = None):
     if text_position not in ("top", "center", "bottom"):
         text_position = "center"
 
-    return font_file, font_family, accent_color, text_position
+    text_side = thumbnail_style.get("text_side")
+    if text_side not in ("left", "right"):
+        # Keep the result deterministic, but vary the grid across videos for
+        # legacy channels that do not yet have a locked art direction.
+        text_side = "left" if int(digest[16:24], 16) % 2 == 0 else "right"
+
+    return font_file, font_family, accent_color, text_position, text_side
 
 
 THUMBNAIL_CONCEPT_INSTRUCTION = """You are a YouTube thumbnail art director. A creator is starting a new "{niche}" channel and needs a distinctive, reusable visual identity for their thumbnails — not a single one-off image, but a locked-in STYLE that every future video's thumbnail will follow, the same way real successful channels in this niche have one instantly-recognizable look (e.g. a senior-health channel using a warm flat-illustration mascot instead of stock medical photos; a true-crime channel using a dark grainy photo-collage look; a finance channel using bold chart-and-cash iconography).
@@ -188,7 +194,9 @@ Respond with ONLY this JSON object, no other text:
   "text_style": "one short phrase on how the bold headline text should look/behave to match this concept, e.g. 'thick rounded sans-serif in cream and terracotta banners' or 'condensed red/white slab caps like a news chyron'",
   "font_family": "exactly one of the font families listed above",
   "accent_hex": "a single #RRGGBB hex color for the headline's highlighted punch-word — must actually fit this concept's palette, not always gold/yellow",
-  "text_position": "one of: top, center, bottom — wherever the headline reads best against this concept's composition"
+  "text_position": "one of: top, center, bottom — wherever the headline reads best against this concept's composition",
+  "text_side": "one of: left, right — lock one side for the headline and reserve the opposite side for the dominant subject",
+  "niche_examples": ["3 short concrete visual thumbnail recipes that are proven/appropriate for this niche, each describing subject, action, symbol, camera framing and palette; these are learning examples, not copies"]
 }}"""
 
 
@@ -230,7 +238,44 @@ def propose_thumbnail_concept(niche: str, sample_titles: list, rejected_concepts
         data["accent_hex"] = None
     if data.get("text_position") not in ("top", "center", "bottom"):
         data["text_position"] = None
+    if data.get("text_side") not in ("left", "right"):
+        data["text_side"] = None
+    if not isinstance(data.get("niche_examples"), list):
+        data["niche_examples"] = []
+    data["niche_examples"] = [str(x).strip() for x in data["niche_examples"] if str(x).strip()][:5]
     return data
+
+
+def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: dict = None, image_style: dict = None) -> str:
+    """Build a shot-specific art brief, not a generic image prompt.
+
+    Thumbnail generators otherwise interpret an abstract headline as scenery:
+    a distant figure in a large empty room is technically relevant but has no
+    mobile-size focal point. This contract forces the model to design the
+    background around the later typography and to tell one readable visual
+    story with foreground, midground and background detail.
+    """
+    thumbnail_style = thumbnail_style or {}
+    style_prompt = (thumbnail_style.get("style_prompt") or "").strip() or (
+        (image_style or {}).get("style_prompt") or ""
+    ).strip()
+    text_side = thumbnail_style.get("text_side")
+    if text_side not in ("left", "right"):
+        text_side = "left"
+    subject_side = "right" if text_side == "left" else "left"
+    return (
+        f"Premium YouTube thumbnail key art for the idea: {text}. Niche: {niche or 'general'}. "
+        f"Art direction: {style_prompt or 'editorial cinematic poster, rich tactile detail, bold controlled palette'}. "
+        f"COMPOSITION: reserve the {text_side} 42 percent for a readable headline while keeping it visually alive with controlled texture, "
+        f"light and atmospheric detail; place the main subject on the {subject_side}, occupying 55 to 75 percent of the full frame height, "
+        f"tight close-up or dramatic medium close-up, face/eyes or the key object clearly readable at phone size, expressive gesture, "
+        f"strong silhouette, foreground detail, absolutely no tiny distant figure, no full-body silhouette, no empty corridor, no anonymous landscape. "
+        f"VISUAL STORY: translate the idea into one immediate, emotionally legible metaphor; add 3 to 5 topic-specific secondary elements or characters, "
+        f"foreground props, tactile costume/skin/material detail and a layered environment that reward a second look, while keeping one unmistakable focal point. "
+        f"LIGHT AND FINISH: sculpted key light on the face, deep blacks, luminous highlights, rich texture, crisp subject separation, "
+        f"premium editorial poster finish, intentional color grading, sharp important details, nuanced background storytelling, no bland stock-photo staging. "
+        f"16:9 landscape, edge-to-edge artwork. Absolutely no text, letters, words, captions, typography, logos or watermark in the generated art."
+    )
 
 
 def _generate_ai_thumbnail_background(text: str, channel, destination: Path, video_id: Optional[str] = None) -> Path:
@@ -247,8 +292,6 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # thumbnail look (e.g. a consistent character/composition) that a generic
     # per-scene style prompt wouldn't capture.
     thumbnail_style = channel.thumbnail_style or {}
-    thumbnail_style_prompt = (thumbnail_style.get("style_prompt") or "").strip()
-    style_prompt = thumbnail_style_prompt or ((channel.image_style or {}).get("style_prompt") or "").strip()
     niche = (channel.niche or "").strip()
     # "no text" alone is routinely ignored by image models on scenes with
     # books/scrolls/signs (a lit candle + open book prompt, for instance,
@@ -264,13 +307,7 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # instruction (now part of style_prompt) is trusted instead; the
     # boilerplate only kicks in as a bare-minimum floor for channels that
     # never generated one (style_prompt empty/legacy).
-    composition_floor = "" if thumbnail_style_prompt else "high detail, striking composition, "
-    prompt = (
-        f"YouTube thumbnail background, {text}, {niche} niche, {style_prompt}, "
-        f"{composition_floor}16:9. "
-        f"Absolutely no text, no letters, no words, no titles, no captions, no typography, "
-        f"no writing of any kind anywhere in the image, no watermark — pure photographic/artistic scene only."
-    )
+    prompt = build_thumbnail_background_prompt(text, niche, thumbnail_style, channel.image_style or {})
     ai_path = destination.with_suffix(".ai.jpg")
 
     # Feed the creator's own uploaded thumbnail references straight into the
@@ -339,11 +376,15 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     image = image.resize((1280, 720)) if image.size != (1280, 720) else image
     image = ImageEnhance.Contrast(image).enhance(1.12)
     image = ImageEnhance.Color(image).enhance(1.1)
+    # AI providers frequently return a soft 1024/720 image. A restrained
+    # unsharp pass restores the crisp, poster-like micro-contrast visible in
+    # strong competitor thumbnails without creating halos around typography.
+    image = image.filter(ImageFilter.UnsharpMask(radius=1.4, percent=125, threshold=3))
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
     thumbnail_style = (channel.thumbnail_style or {}) if channel is not None else {}
-    font_file, font_family, accent_color, text_position = _pick_thumbnail_variant(text, thumbnail_style)
+    font_file, font_family, accent_color, text_position, text_side = _pick_thumbnail_variant(text, thumbnail_style)
     accent_rgb = tuple(int(accent_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
     use_upper = font_family not in _THUMBNAIL_MIXED_CASE_FAMILIES
 
@@ -353,7 +394,10 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     # either wrapped far too early or overflowed the frame depending on which
     # letters were involved. Wrap against MAX_TEXT_WIDTH at the largest font
     # size that still fits in <=4 lines, shrinking one step at a time.
-    MAX_TEXT_WIDTH = 1180
+    # Use a real two-column poster grid. The previous 1180px text block ran
+    # across virtually the entire canvas and inevitably covered the image's
+    # subject; generators then learned to leave an empty, low-impact scene.
+    MAX_TEXT_WIDTH = 590
     LEFT_MARGIN = 50
 
     def _wrap(words, font):
@@ -369,7 +413,7 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
         return lines
 
     words = (text.upper() if use_upper else text).split()
-    for size in (140, 122, 104, 88, 74):
+    for size in (124, 112, 100, 88, 76, 68):
         font = _font(size, font_file)
         lines = _wrap(words, font)
         if len(lines) <= 4:
@@ -420,7 +464,9 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     y = top
     for index, line in enumerate(lines):
         color = accent_color if index in highlight_indices else "white"
-        draw.text((LEFT_MARGIN, y), line, font=font, fill=color, stroke_width=stroke_width, stroke_fill="#000000")
+        line_width = int(font.getlength(line))
+        x = LEFT_MARGIN if text_side == "left" else 1280 - LEFT_MARGIN - line_width
+        draw.text((x, y), line, font=font, fill=color, stroke_width=stroke_width, stroke_fill="#000000")
         y += line_height
 
     # Small diamond-dash divider under the headline, like the reference
@@ -429,9 +475,10 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     # than a full-width bar.
     divider_y = top + text_block_height + 14
     divider_width = min(360, int(font.getlength(lines[-1])) or 360)
-    draw.line([(LEFT_MARGIN, divider_y), (LEFT_MARGIN + divider_width, divider_y)], fill=accent_rgb + (255,), width=3)
+    divider_left = LEFT_MARGIN if text_side == "left" else 1280 - LEFT_MARGIN - divider_width
+    draw.line([(divider_left, divider_y), (divider_left + divider_width, divider_y)], fill=accent_rgb + (255,), width=3)
     for dx in (-14, divider_width + 14):
-        cx = LEFT_MARGIN + dx
+        cx = divider_left + dx
         r = 7
         draw.polygon([(cx, divider_y - r), (cx + r, divider_y), (cx, divider_y + r), (cx - r, divider_y)], fill=accent_rgb + (255,))
 

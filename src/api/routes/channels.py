@@ -1453,13 +1453,20 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
         if abs_path.exists() and media_type:
             images.append((abs_path.read_bytes(), media_type))
 
-    from src.pipeline.vision import analyze_thumbnail_reference_images
+    from src.pipeline.vision import analyze_thumbnail_reference_profile
     try:
-        style_prompt = analyze_thumbnail_reference_images(images)
+        profile = analyze_thumbnail_reference_profile(images)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
 
-    channel.thumbnail_style = {"reference_image_paths": all_paths, "style_prompt": style_prompt}
+    previous = dict(channel.thumbnail_style or {})
+    previous.update({
+        "reference_image_paths": all_paths,
+        "style_prompt": profile["style_prompt"],
+        "text_side": profile.get("text_side") or previous.get("text_side"),
+        "analysis_summary": profile.get("analysis_summary"),
+    })
+    channel.thumbnail_style = previous
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
@@ -1514,6 +1521,8 @@ def propose_channel_thumbnail_concept(channel_id: str, payload: dict = None, cur
         "font_family": concept.get("font_family"),
         "accent_hex": concept.get("accent_hex"),
         "text_position": concept.get("text_position"),
+        "text_side": concept.get("text_side"),
+        "niche_examples": concept.get("niche_examples", []),
     }
     preview_channel.image_style = channel.image_style
     preview_channel.niche = channel.niche
@@ -1570,6 +1579,8 @@ def approve_channel_thumbnail_concept(channel_id: str, payload: dict, current_us
     existing["font_family"] = (payload or {}).get("font_family")
     existing["accent_hex"] = (payload or {}).get("accent_hex")
     existing["text_position"] = (payload or {}).get("text_position")
+    existing["text_side"] = (payload or {}).get("text_side")
+    existing["niche_examples"] = (payload or {}).get("niche_examples") or []
     channel.thumbnail_style = existing
     db.commit()
     db.refresh(channel)

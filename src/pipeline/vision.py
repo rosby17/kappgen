@@ -1,4 +1,6 @@
 import base64
+import json
+import re
 import httpx
 from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
 from src.utils.logger import logger
@@ -32,15 +34,18 @@ THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION = (
 
 
 THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
-    "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
-    "You are shown several reference thumbnails from the same channel. Write a single, "
-    "dense image-generation prompt (comma-separated descriptors, no full sentences, no "
-    "preamble) that captures the visual identity shared across ALL of them: recurring "
-    "subject archetype (e.g. elderly bearded man in a robe, praying) if consistent across "
-    "images, framing/composition, art style/medium, color palette, lighting, mood, and "
-    "level of detail. If the images disagree on a detail, favor whatever appears in most "
-    "of them. Do not mention any on-image text/typography, since that is added separately. "
-    "Reply with only the prompt text."
+    "You are a senior YouTube thumbnail art director studying a competitor moodboard. "
+    "Separate the repeatable visual grammar from each video's incidental subject. Analyze "
+    "the dominant human archetype and facial intensity, subject scale, camera distance, "
+    "foreground/midground/background layering, recurring symbolic props, density, palette, "
+    "contrast, lighting direction, texture, art medium, and which side is consistently left "
+    "clear for copy. Infer the majority pattern across ALL images; never describe one screenshot "
+    "in isolation and never copy a logo, creator identity, or exact composition. The resulting "
+    "style must stay reusable while poses, actions, supporting characters and metaphors change "
+    "to match each new video's idea. Do not include typography in the generated artwork. "
+    "Return ONLY valid JSON: {\"style_prompt\": \"dense comma-separated generation brief with "
+    "all repeatable visual rules and explicit subject scale/grid\", \"text_side\": \"left or right\", "
+    "\"analysis_summary\": \"one concise sentence explaining the shared visual grammar\"}."
 )
 
 
@@ -248,11 +253,38 @@ def analyze_thumbnail_reference_images(images: list) -> str:
     Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
     """
     instruction = THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION
-    return _run_with_fallback([
+    raw = _run_with_fallback([
         ("anthropic", lambda: _analyze_many_with_anthropic(images, instruction)),
         ("fal.ai", lambda: _analyze_many_with_fal(images, instruction)),
         ("openai", lambda: _analyze_many_with_openai(images, instruction)),
     ])
+    if len(images) == 1:
+        return raw
+    # Keep the historical string return type for callers while accepting the
+    # richer moodboard response. New callers use the profile helper below.
+    try:
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+        return str(json.loads(cleaned)["style_prompt"]).strip()
+    except (ValueError, KeyError, TypeError):
+        return raw
+
+
+def analyze_thumbnail_reference_profile(images: list) -> dict:
+    """Return both the reusable visual brief and its typography-safe grid."""
+    if len(images) < 2:
+        return {"style_prompt": analyze_thumbnail_reference_images(images), "text_side": None, "analysis_summary": None}
+    raw = _run_with_fallback([
+        ("anthropic", lambda: _analyze_many_with_anthropic(images, THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION)),
+        ("fal.ai", lambda: _analyze_many_with_fal(images, THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION)),
+        ("openai", lambda: _analyze_many_with_openai(images, THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION)),
+    ])
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    data = json.loads(cleaned)
+    if not str(data.get("style_prompt") or "").strip():
+        raise ValueError("Moodboard analysis returned no style_prompt")
+    if data.get("text_side") not in ("left", "right"):
+        data["text_side"] = None
+    return data
 
 
 def generate_music_prompt(niche: str, script_excerpt: str = "") -> str:
