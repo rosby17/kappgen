@@ -310,6 +310,34 @@ def _diagnose_provider_error(exc: Exception) -> str:
     return str(exc)[:120]
 
 
+# Vision-capable providers only. DeepSeek is in the admin's provider list but
+# has no image input, so it's simply skipped here rather than failing a slot.
+_VISION_PROVIDERS = {
+    "anthropic": _analyze_many_with_anthropic,
+    "fal": _analyze_many_with_fal,
+    "openai": _analyze_many_with_openai,
+    "groq": _analyze_many_with_groq,
+}
+_VISION_DEFAULT_ORDER = ["anthropic", "fal", "openai", "groq"]
+
+
+def _vision_chain(images: list, instruction: str) -> list:
+    """Builds the provider chain for one image-analysis call, honouring the
+    admin's "Fournisseur IA texte" priority order (Ressources tab) exactly
+    like text generation already did.
+
+    Image analysis used to hardcode anthropic → fal → openai, so turning a
+    provider off in the admin changed nothing here: a channel's reference
+    upload kept hitting the dead account first and failing outright. Anything
+    the admin didn't rank still gets appended behind, so the chain is
+    reordered, never emptied — there is always a fallback left.
+    """
+    from src.utils.app_settings import ai_text_provider_order
+    ranked = [p for p in ai_text_provider_order() if p in _VISION_PROVIDERS]
+    order = ranked + [p for p in _VISION_DEFAULT_ORDER if p not in ranked]
+    return [(name, (lambda fn=_VISION_PROVIDERS[name]: fn(images, instruction))) for name in order]
+
+
 def _run_with_fallback(steps: list) -> str:
     """Tries each (provider_name, fn) pair in order, moving to the next one
     on any failure (missing key, no credit, network/HTTP error, ...). If every
@@ -333,12 +361,7 @@ def _run_with_fallback(steps: list) -> str:
 def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
     """Analyzes a reference image and returns a reusable image-generation style prompt.
     Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI."""
-    return _run_with_fallback([
-        ("anthropic", lambda: _analyze_many_with_anthropic([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
-        ("fal.ai", lambda: _analyze_many_with_fal([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
-        ("openai", lambda: _analyze_many_with_openai([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
-        ("groq", lambda: _analyze_many_with_groq([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
-    ])
+    return _run_with_fallback(_vision_chain([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION))
 
 
 def analyze_reference_images(images: list) -> str:
@@ -350,12 +373,7 @@ def analyze_reference_images(images: list) -> str:
     if not images:
         raise ValueError("At least one reference image is required.")
     instruction = STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else MULTI_STYLE_ANALYSIS_INSTRUCTION
-    return _run_with_fallback([
-        ("anthropic", lambda: _analyze_many_with_anthropic(images, instruction)),
-        ("fal.ai", lambda: _analyze_many_with_fal(images, instruction)),
-        ("openai", lambda: _analyze_many_with_openai(images, instruction)),
-        ("groq", lambda: _analyze_many_with_groq(images, instruction)),
-    ])
+    return _run_with_fallback(_vision_chain(images, instruction))
 
 
 def analyze_thumbnail_reference_image(image_bytes: bytes, media_type: str) -> str:
@@ -394,12 +412,7 @@ def analyze_thumbnail_reference_profile(images: list) -> dict:
     got replayed as the background brief of every later thumbnail whatever the
     topic was, and left typography undefined so the generator reinvented it
     each time."""
-    raw = _run_with_fallback([
-        ("anthropic", lambda: _analyze_many_with_anthropic(images, _thumbnail_analysis_instruction(images))),
-        ("fal.ai", lambda: _analyze_many_with_fal(images, _thumbnail_analysis_instruction(images))),
-        ("openai", lambda: _analyze_many_with_openai(images, _thumbnail_analysis_instruction(images))),
-        ("groq", lambda: _analyze_many_with_groq(images, _thumbnail_analysis_instruction(images))),
-    ])
+    raw = _run_with_fallback(_vision_chain(images, _thumbnail_analysis_instruction(images)))
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
     try:
         data = json.loads(cleaned)
