@@ -469,6 +469,17 @@ class Video(Base):
     # job and returns immediately instead of blocking; the frontend polls
     # this flag rather than awaiting one long response.
     thumbnail_regenerating = Column(Boolean, nullable=False, default=False)
+    # Bumped every time thumbnail.jpg is (re)written — the actual file is
+    # overwritten in place at a fixed path, so nothing about the video row
+    # itself (finished_at, output_path, ...) changes when it's regenerated.
+    # The frontend used finished_at as its cache-busting query param before
+    # this existed, which meant a page refresh right after regenerating
+    # reused the exact same image URL as before the regen — the browser (or
+    # an intermediate CDN cache) would then keep serving the stale cached
+    # thumbnail even though the file on disk was already the new one, which
+    # read as "it didn't actually save". This field changes on every
+    # regeneration so the URL always changes too.
+    thumbnail_updated_at = Column(DateTime, nullable=True)
     # Set for recurring automatic/scheduled publication — the worker leaves
     # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)
@@ -529,6 +540,7 @@ class Video(Base):
             "youtube_description": self.youtube_description,
             "thumbnail_text": self.thumbnail_text,
             "thumbnail_regenerating": self.thumbnail_regenerating,
+            "thumbnail_updated_at": self.thumbnail_updated_at.isoformat() if self.thumbnail_updated_at else None,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "youtube_compliance_report": self.youtube_compliance_report,

@@ -774,6 +774,7 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
     regenerate_video_thumbnail below for why."""
     from src.db.session import SessionLocal
     db = SessionLocal()
+    succeeded = False
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
@@ -789,6 +790,7 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
             shutil.copy2(current, archive)
         generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
+        succeeded = True
     except Exception as e:
         logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
     finally:
@@ -796,6 +798,11 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             video = db.query(Video).filter(Video.id == video_id).first()
             if video:
                 video.thumbnail_regenerating = False
+                if succeeded:
+                    # Bumps the frontend's cache-busting key so a refresh right
+                    # after regenerating never reuses the old, now-stale image
+                    # URL (see the field's own comment in db/models.py).
+                    video.thumbnail_updated_at = datetime.utcnow()
                 db.commit()
         except Exception:
             pass
