@@ -121,7 +121,7 @@ def swagger_docs() -> HTMLResponse:
   darkMode: true,
   hideModels: false,
   hideDownloadButton: false,
-  hideClientButton: false,
+  hideClientButton: true,
   showSidebar: true,
   hideTestRequestButton: false,
   metaData: {{title: 'KappGen API', description: 'API de création, montage et publication vidéo'}},
