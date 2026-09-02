@@ -1234,6 +1234,40 @@ def set_thumbnail_provider_mode(payload: ThumbnailProviderOrderPayload, admin: U
     return {"order": cleaned}
 
 
+# --- Voiceover/TTS provider switch -------------------------------------
+# Same order-picker structure as thumbnails above — only "izivoice" exists
+# today (one shared key, not a pool), but this leaves room to add another
+# TTS provider (e.g. ElevenLabs) later without changing the admin UI's shape.
+
+VOICEOVER_PROVIDERS = ["izivoice"]
+
+
+@router.get("/settings/voiceover-provider-mode")
+def get_voiceover_provider_mode(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import voiceover_provider_order
+    from src.config import IZIVOICE_API_KEY
+    configured = {"izivoice": bool(IZIVOICE_API_KEY)}
+    order = voiceover_provider_order()
+    return {"order": order, "available": VOICEOVER_PROVIDERS, "configured": configured}
+
+
+class VoiceoverProviderOrderPayload(BaseModel):
+    order: List[str]
+
+
+@router.patch("/settings/voiceover-provider-mode")
+def set_voiceover_provider_mode(payload: VoiceoverProviderOrderPayload, admin: User = Depends(get_current_admin)):
+    cleaned = []
+    for p in payload.order:
+        if p not in VOICEOVER_PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
+        if p not in cleaned:
+            cleaned.append(p)
+    from src.utils.app_settings import set_voiceover_provider_order
+    set_voiceover_provider_order(cleaned)
+    return {"order": cleaned}
+
+
 # --- AI text-generation provider switch --------------------------------
 # Which of Anthropic/DeepSeek/fal.ai/OpenAI/Groq (see src/pipeline/ai_text.py)
 # is tried FIRST for every text-generation call (script writing, topic

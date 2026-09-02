@@ -83,3 +83,28 @@ def ai_text_provider_order() -> List[str]:
 
 def set_ai_text_provider_order(order: List[str]) -> None:
     set_setting(AI_TEXT_PROVIDER_ORDER_KEY, json.dumps(order))
+
+
+# Admin-defined priority order for voiceover/TTS providers — only "izivoice"
+# exists today (a single shared key, not a pool — see src/pipeline/voiceover.py),
+# but this is the same order-picker structure as thumbnails/AI-text above so
+# a second provider (e.g. ElevenLabs) can be added later without changing the
+# admin UI's shape, just this list.
+VOICEOVER_PROVIDER_ORDER_KEY = "voiceover_provider_order"
+VOICEOVER_PROVIDERS_ALL = ["izivoice"]
+VOICEOVER_PROVIDER_ORDER_DEFAULT = ["izivoice"]
+
+
+def voiceover_provider_order() -> List[str]:
+    raw = get_setting(VOICEOVER_PROVIDER_ORDER_KEY, None)
+    if raw is None:
+        return list(VOICEOVER_PROVIDER_ORDER_DEFAULT)
+    try:
+        order = json.loads(raw)
+        return [p for p in order if p in VOICEOVER_PROVIDERS_ALL] if isinstance(order, list) else list(VOICEOVER_PROVIDER_ORDER_DEFAULT)
+    except (ValueError, TypeError):
+        return list(VOICEOVER_PROVIDER_ORDER_DEFAULT)
+
+
+def set_voiceover_provider_order(order: List[str]) -> None:
+    set_setting(VOICEOVER_PROVIDER_ORDER_KEY, json.dumps(order))
