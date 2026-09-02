@@ -48,7 +48,8 @@ generated media are returned as short-lived URLs where applicable.
         {"name": "api-keys", "description": "Create and revoke integration keys."},
         {"name": "billing", "description": "Plans, credits and purchase history."},
     ],
-    contact={"name": "KappGen support", "email": "contact@kappgen.com", "url": "https://kappgen.com"},
+    # Contact channel currently handled through the owner's WhatsApp.
+    contact={"name": "Support KappGen · WhatsApp", "url": "https://wa.me/237655306425"},
     license_info={"name": "KappGen API Terms", "url": "https://kappgen.com/terms"},
     servers=[{"url": "https://api.kappgen.com", "description": "Production"}],
     # Served below with the KappGen favicon instead of Swagger's default
