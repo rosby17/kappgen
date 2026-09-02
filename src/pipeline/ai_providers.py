@@ -26,6 +26,7 @@ PROVIDERS = [
     {"id": "fal",       "label": "fal.ai",             "key": "FAL_API_KEY",       "capabilities": {"text", "vision"}},
     {"id": "openai",    "label": "OpenAI",             "key": "OPENAI_API_KEY",    "capabilities": {"text", "vision"}},
     {"id": "groq",      "label": "Groq",               "key": "GROQ_API_KEY",      "capabilities": {"text", "vision"}},
+    {"id": "gemini",    "label": "Google Gemini",      "key": "GEMINI_API_KEY",    "capabilities": {"text", "vision"}},
 ]
 
 ALL_IDS = [p["id"] for p in PROVIDERS]

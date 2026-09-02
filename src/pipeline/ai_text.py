@@ -12,7 +12,7 @@ import httpx
 from typing import Optional
 from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
-    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY, GEMINI_API_KEY,
 )
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, PRICING
@@ -207,6 +207,43 @@ def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     return text.strip(), 0.0
 
 
+GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not configured on the server.")
+    resp = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        params={"key": GEMINI_API_KEY},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": max(max_tokens, 300)},
+        },
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    candidates = data.get("candidates") or []
+    parts = (((candidates or [{}])[0]).get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    if not text:
+        # Gemini reports why nothing came back via finishReason (e.g. "MAX_TOKENS"
+        # cutting off before any real text, or "SAFETY") instead of an HTTP error —
+        # surface it so a wall of empty retries in the log doesn't read as a mystery.
+        reason = (candidates[0] if candidates else {}).get("finishReason", "unknown")
+        raise RuntimeError(f"Gemini text generation returned no text content (finishReason={reason}).")
+    usage = data.get("usageMetadata") or {}
+    in_tok, out_tok = usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
+    log_usage(
+        "gemini", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+        0.0,
+        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+        meta={"model": GEMINI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
+    )
+    return text, 0.0
+
+
 def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not configured on the server.")
@@ -315,6 +352,7 @@ def generate_text(
         "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
         "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),
         "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
+        "gemini": lambda: _gemini_complete(prompt, max_tokens, usage_ctx),
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]
