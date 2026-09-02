@@ -2,7 +2,7 @@ import base64
 import json
 import re
 import httpx
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
+from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, GROQ_API_KEY
 from src.utils.logger import logger
 
 STYLE_ANALYSIS_INSTRUCTION = (
@@ -196,6 +196,38 @@ def _analyze_many_with_openai(images: list, instruction: str) -> str:
     return text.strip()
 
 
+def _analyze_many_with_groq(images: list, instruction: str) -> str:
+    """Free-tier vision fallback. Groq serves multimodal Llama models on an
+    OpenAI-compatible endpoint, with a free tier that needs no card — the only
+    provider in this chain that still answers when every paid balance is dry
+    (which is exactly what happened: Anthropic out of credit, fal.ai locked
+    pending top-up, OpenAI returning 429/insufficient_quota)."""
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not configured on the server.")
+
+    content = [{"type": "text", "text": instruction}]
+    for image_bytes, media_type in images:
+        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}})
+
+    resp = httpx.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "max_tokens": 2000,
+            "messages": [{"role": "user", "content": content}],
+        },
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("Groq vision analysis returned no text content.")
+    return text.strip()
+
+
 def _generate_music_prompt_with_anthropic(user_text: str) -> str:
     import anthropic
 
@@ -305,6 +337,7 @@ def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
         ("anthropic", lambda: _analyze_many_with_anthropic([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
         ("fal.ai", lambda: _analyze_many_with_fal([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
         ("openai", lambda: _analyze_many_with_openai([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
+        ("groq", lambda: _analyze_many_with_groq([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
     ])
 
 
@@ -321,6 +354,7 @@ def analyze_reference_images(images: list) -> str:
         ("anthropic", lambda: _analyze_many_with_anthropic(images, instruction)),
         ("fal.ai", lambda: _analyze_many_with_fal(images, instruction)),
         ("openai", lambda: _analyze_many_with_openai(images, instruction)),
+        ("groq", lambda: _analyze_many_with_groq(images, instruction)),
     ])
 
 
@@ -364,6 +398,7 @@ def analyze_thumbnail_reference_profile(images: list) -> dict:
         ("anthropic", lambda: _analyze_many_with_anthropic(images, _thumbnail_analysis_instruction(images))),
         ("fal.ai", lambda: _analyze_many_with_fal(images, _thumbnail_analysis_instruction(images))),
         ("openai", lambda: _analyze_many_with_openai(images, _thumbnail_analysis_instruction(images))),
+        ("groq", lambda: _analyze_many_with_groq(images, _thumbnail_analysis_instruction(images))),
     ])
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
     try:
