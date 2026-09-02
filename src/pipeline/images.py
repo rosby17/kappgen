@@ -33,8 +33,8 @@ TASK_POLL_TIMEOUT_SECONDS = 90  # fail fast to a fallback image rather than stal
 IZIVOICE_IMAGE_MODEL_ID = "bytedance-seedream-4.5"
 
 
-def _izivoice_headers(token: Optional[str] = None) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {token or IZIVOICE_API_KEY}"}
+def _izivoice_headers() -> Dict[str, str]:
+    return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
 
 
 def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
@@ -206,14 +206,14 @@ def _persist_generated_images_to_channel_library(
         db.close()
 
 
-def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS, token: Optional[str] = None) -> Dict[str, Any]:
+def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS) -> Dict[str, Any]:
     """Polls GET /api/tasks/{task_id} until status is 'done' or 'error'/'failed' (or timeout).
     Transient 5xx responses are retried rather than treated as a hard failure, since the
     underlying task may still be processing."""
     elapsed = 0.0
     while elapsed < timeout_seconds:
         try:
-            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(token), timeout=30.0)
+            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(), timeout=30.0)
             if resp.status_code >= 500:
                 logger.warning(f"Izivoice image poll for task {task_id} returned {resp.status_code}, retrying...")
                 time.sleep(TASK_POLL_INTERVAL_SECONDS)
@@ -236,7 +236,7 @@ def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: flo
     raise TimeoutError(f"Izivoice image task {task_id} did not complete within {timeout_seconds}s")
 
 
-def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None, token: Optional[str] = None) -> dict:
+def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> dict:
     model_parameters = json.dumps({"aspect_ratio": "16:9", "resolution": "2K"})
     fields = {
         "prompt": (None, text_free_image_prompt(prompt)),
@@ -261,7 +261,7 @@ def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_ima
     try:
         resp = client.post(
             f"{IZIVOICE_BASE_URL}/images/generate",
-            headers=_izivoice_headers(token),
+            headers=_izivoice_headers(),
             files=parts,
             timeout=30.0
         )
@@ -279,54 +279,29 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll
     generation first (see _submit_izivoice_image_task); if Izivoice rejects
     that request shape (4xx), retries once as a plain text-only prompt rather
     than failing the whole image — the caller's own broader failure fallback
-    (e.g. a video frame grab for thumbnails) is reserved for when both fail.
+    (e.g. a video frame grab for thumbnails) is reserved for when both fail."""
+    try:
+        data = _submit_izivoice_image_task(prompt, client, reference_image_paths)
+    except httpx.HTTPStatusError as exc:
+        if reference_image_paths and exc.response is not None and exc.response.status_code < 500:
+            logger.warning(f"Izivoice rejected reference-image-conditioned request ({exc.response.status_code}), retrying with text-only prompt: {exc}")
+            data = _submit_izivoice_image_task(prompt, client, reference_image_paths=None)
+        else:
+            raise
+    if not data.get("success") or not data.get("task_id"):
+        raise ValueError(f"Unexpected Izivoice generate-image response: {data}")
 
-    Tries every enabled account in the admin-managed Izivoice pool (see
-    src/utils/izivoice_pool.py) in turn, so one account being exhausted
-    doesn't block the others — same failover pattern as the Hugging Face
-    pool above."""
-    from src.utils.izivoice_pool import resolve_izivoice_candidates, mark_izivoice_account
-    candidates = resolve_izivoice_candidates()
-    if not candidates:
-        raise RuntimeError("No Izivoice key configured (env or admin pool).")
+    task = _poll_izivoice_task(data["task_id"], client, timeout_seconds=poll_timeout_seconds)
+    result_images = (task.get("metadata") or {}).get("result_images") or []
+    if not result_images:
+        raise ValueError(f"Izivoice image task {data['task_id']} completed with no result_images: {task}")
 
-    last_exc: Optional[Exception] = None
-    for candidate in candidates:
-        token = candidate["token"]
-        account_id = candidate["id"]
-        try:
-            try:
-                data = _submit_izivoice_image_task(prompt, client, reference_image_paths, token=token)
-            except httpx.HTTPStatusError as exc:
-                if reference_image_paths and exc.response is not None and exc.response.status_code < 500:
-                    logger.warning(f"Izivoice rejected reference-image-conditioned request ({exc.response.status_code}), retrying with text-only prompt: {exc}")
-                    data = _submit_izivoice_image_task(prompt, client, reference_image_paths=None, token=token)
-                else:
-                    raise
-            if not data.get("success") or not data.get("task_id"):
-                raise ValueError(f"Unexpected Izivoice generate-image response: {data}")
-
-            task = _poll_izivoice_task(data["task_id"], client, timeout_seconds=poll_timeout_seconds, token=token)
-            result_images = (task.get("metadata") or {}).get("result_images") or []
-            if not result_images:
-                raise ValueError(f"Izivoice image task {data['task_id']} completed with no result_images: {task}")
-
-            image_url = result_images[0]["imageUrl"]
-            img_resp = client.get(image_url, timeout=60.0)
-            img_resp.raise_for_status()
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(img_resp.content)
-            mark_izivoice_account(account_id, "active")
-            return output_path
-        except Exception as exc:
-            last_exc = exc
-            status = "invalid"
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code in (402, 429):
-                status = "quota_exhausted"
-            mark_izivoice_account(account_id, status, str(exc)[:300])
-            logger.warning(f"Izivoice account {account_id or '(env)'} image generation failed, trying next account: {exc}")
-            continue
-    raise RuntimeError(f"Izivoice image generation failed on all {len(candidates)} configured account(s). Last error: {last_exc}")
+    image_url = result_images[0]["imageUrl"]
+    img_resp = client.get(image_url, timeout=60.0)
+    img_resp.raise_for_status()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(img_resp.content)
+    return output_path
 
 
 def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:

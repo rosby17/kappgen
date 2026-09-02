@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount, IzivoiceAccount
+from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
 from src.utils.auth import get_current_admin
 from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
 
@@ -1190,105 +1190,6 @@ def update_hf_account(account_id: str, is_enabled: Optional[bool] = None, label:
 @router.delete("/hf-accounts/{account_id}")
 def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Compte introuvable.")
-    db.delete(account)
-    db.commit()
-    return {"deleted": True}
-
-
-# --- Izivoice shared accounts (voiceover / music / images) -------------------
-# Admin-managed pool of shared Izivoice API keys, same pattern as the Hugging
-# Face pool above — see src/utils/izivoice_pool.py. Only affects the default
-# key used when a creator hasn't connected their own personal Izivoice key.
-
-@router.get("/izivoice-accounts")
-def list_izivoice_accounts(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    accounts = db.query(IzivoiceAccount).order_by(IzivoiceAccount.created_at.asc()).all()
-    return [a.to_dict() for a in accounts]
-
-
-class IzivoiceAccountPayload(BaseModel):
-    token: str
-    label: Optional[str] = None
-
-
-def _test_izivoice_token(token: str) -> tuple[str, Optional[str]]:
-    """A cheap read-only call (list voices) to classify the token as
-    active/quota_exhausted/invalid — no generation cost incurred."""
-    import httpx
-    from src.config import IZIVOICE_BASE_URL
-    try:
-        resp = httpx.get(
-            f"{IZIVOICE_BASE_URL}/voices",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"page": 0, "page_size": 1},
-            timeout=15.0,
-        )
-        if resp.status_code == 200:
-            return "active", None
-        if resp.status_code in (401, 403):
-            return "invalid", resp.text[:300]
-        if resp.status_code in (402, 429):
-            return "quota_exhausted", resp.text[:300]
-        return "invalid", f"HTTP {resp.status_code}: {resp.text[:300]}"
-    except Exception as exc:
-        return "invalid", str(exc)[:300]
-
-
-@router.post("/izivoice-accounts")
-def add_izivoice_account(payload: IzivoiceAccountPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    token = payload.token.strip()
-    if not token:
-        raise HTTPException(status_code=400, detail="Le token ne peut pas être vide.")
-    if db.query(IzivoiceAccount).filter(IzivoiceAccount.token == token).first():
-        raise HTTPException(status_code=400, detail="Ce token est déjà enregistré.")
-
-    status, error = _test_izivoice_token(token)
-    account = IzivoiceAccount(
-        token=token,
-        label=(payload.label or "").strip() or None,
-        status=status,
-        last_checked_at=datetime.utcnow(),
-        last_error=error,
-    )
-    db.add(account)
-    db.commit()
-    db.refresh(account)
-    return account.to_dict()
-
-
-@router.post("/izivoice-accounts/{account_id}/check")
-def check_izivoice_account(account_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    account = db.query(IzivoiceAccount).filter(IzivoiceAccount.id == account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Compte introuvable.")
-    status, error = _test_izivoice_token(account.token)
-    account.status = status
-    account.last_error = error
-    account.last_checked_at = datetime.utcnow()
-    db.commit()
-    db.refresh(account)
-    return account.to_dict()
-
-
-@router.patch("/izivoice-accounts/{account_id}")
-def update_izivoice_account(account_id: str, is_enabled: Optional[bool] = None, label: Optional[str] = None, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    account = db.query(IzivoiceAccount).filter(IzivoiceAccount.id == account_id).first()
-    if not account:
-        raise HTTPException(status_code=404, detail="Compte introuvable.")
-    if is_enabled is not None:
-        account.is_enabled = is_enabled
-    if label is not None:
-        account.label = label.strip() or None
-    db.commit()
-    db.refresh(account)
-    return account.to_dict()
-
-
-@router.delete("/izivoice-accounts/{account_id}")
-def delete_izivoice_account(account_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    account = db.query(IzivoiceAccount).filter(IzivoiceAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
     db.delete(account)

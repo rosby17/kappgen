@@ -1047,8 +1047,7 @@ async def preview_ai_music(
     """Generates a short AI music preview on the spot, so the client can listen
     to it in the wizard before saving the channel — same prompt path used at
     render time (Claude-written prompt, or the client's own override)."""
-    from src.utils.izivoice_pool import resolve_izivoice_candidates
-    if not resolve_izivoice_candidates():
+    if not IZIVOICE_API_KEY:
         raise HTTPException(status_code=503, detail="La génération musicale IA n'est pas configurée sur le serveur.")
 
     from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
@@ -1088,8 +1087,7 @@ async def preview_music_video_track(
     src/utils/billing.py's future per-music-video charge (Phase 4) — so
     experimenting with style during setup has to stay free or creators would
     pay just to find the sound that fits their channel."""
-    from src.utils.izivoice_pool import resolve_izivoice_candidates
-    if not resolve_izivoice_candidates():
+    if not IZIVOICE_API_KEY:
         raise HTTPException(status_code=503, detail="La génération musicale IA n'est pas configurée sur le serveur.")
 
     prompt = style_prompt.strip()

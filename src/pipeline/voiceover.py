@@ -376,10 +376,8 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
     real transcription via Izivoice speech-to-text when configured, else a
     synthetic even-split alignment over the fallback title/text.
     """
-    from src.utils.izivoice_pool import resolve_izivoice_candidates
-    candidates = resolve_izivoice_candidates(api_key)
-    if not candidates:
-        logger.info("No Izivoice key configured (env or admin pool). Using synthetic subtitle timing for uploaded audio.")
+    if not (api_key or IZIVOICE_API_KEY):
+        logger.info("IZIVOICE_API_KEY not set. Using synthetic subtitle timing for uploaded audio.")
         duration = get_audio_duration(audio_path)
         return {
             "text": fallback_text or "Audio préenregistré",
@@ -388,7 +386,7 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
         }
 
     try:
-        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key or candidates[0]["token"])
+        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key)
     except Exception as e:
         logger.warning(f"Izivoice speech-to-text failed ({e}). Falling back to synthetic subtitle timing.")
         duration = get_audio_duration(audio_path)
@@ -417,80 +415,57 @@ def generate_voiceover(
     """
     script_text = clean_script_text(script_text)
 
-    from src.utils.izivoice_pool import resolve_izivoice_candidates, mark_izivoice_account
-    candidates = resolve_izivoice_candidates(api_key)
-    if not candidates:
-        logger.info("No Izivoice key configured (env or admin pool). Using local TTS fallback.")
+    effective_key = api_key or IZIVOICE_API_KEY
+    if not effective_key:
+        logger.info("IZIVOICE_API_KEY not set. Using local TTS fallback.")
         return generate_mock_voiceover(script_text, output_audio_path)
 
-    # Credited once regardless of how many shared-pool accounts get tried
-    # below — a failover to the next account is the same billed operation,
-    # not a new one, so this must sit outside the retry loop.
-    char_count = len(script_text)
-    if user_id:
-        from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
-        if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts"):
-            raise RuntimeError("Solde de crédits KappGen insuffisant pour la synthèse vocale.")
-
-    last_exc: Optional[Exception] = None
-    for candidate in candidates:
-        effective_key = candidate["token"]
-        account_id = candidate["id"]
-        try:
-            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
-            with httpx.Client() as client:
-                voice_id_for_attempt = voice_id or _get_default_voice_id(client, effective_key)
-
-                logger.info("Requesting voiceover from Izivoice /text-to-speech...")
-                with _izivoice_semaphore:
-                    resp = _post_with_retry(
-                        client,
-                        f"{IZIVOICE_BASE_URL}/text-to-speech",
-                        headers=_izivoice_headers(effective_key),
-                        # Izivoice's /text-to-speech now requires a JSON body — sending
-                        # this as form-urlencoded (the old `data=` kwarg) gets rejected
-                        # with a generic 400 "Requête invalide" regardless of the
-                        # voice_id or fields used (confirmed by reproducing the same
-                        # 400 with a guaranteed-valid voice_id and minimal fields, then
-                        # getting 200 by switching only the transport to `json=`).
-                        json={
-                            "text": script_text,
-                            "voice_id": voice_id_for_attempt,
-                            "speed": (voice_settings or {}).get("speed", 0.845),
-                            "with_transcript": False,
-                            "stability": (voice_settings or {}).get("stability", 0.8),
-                            "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
-                            "style": (voice_settings or {}).get("style", 0.0),
-                        },
-                        timeout=30.0
-                    )
-                    resp.raise_for_status()
-                    task_id = resp.json()["task_id"]
-
-                    task = _poll_task(task_id, client, effective_key)
-                audio_url = (task.get("metadata") or {}).get("audio_url")
-                if not audio_url:
-                    raise ValueError(f"Unexpected Izivoice text-to-speech response: {task}")
-
-                audio_resp = client.get(audio_url, timeout=60.0)
-                audio_resp.raise_for_status()
-                output_audio_path.write_bytes(audio_resp.content)
-            mark_izivoice_account(account_id, "active")
-            voice_id = voice_id_for_attempt
-            break
-        except Exception as exc:
-            last_exc = exc
-            status = "invalid"
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code in (401, 402, 429):
-                status = "quota_exhausted" if exc.response.status_code != 401 else "invalid"
-            mark_izivoice_account(account_id, status, str(exc)[:300])
-            logger.warning(f"Izivoice account {account_id or '(env)'} failed, trying next account: {exc}")
-            continue
-    else:
-        # Loop finished without a `break` — every candidate account failed.
-        raise RuntimeError(f"Izivoice text-to-speech failed on all {len(candidates)} configured account(s). Last error: {last_exc}") from last_exc
-
     try:
+        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        with httpx.Client() as client:
+            voice_id = voice_id or _get_default_voice_id(client, effective_key)
+
+            char_count = len(script_text)
+            if user_id:
+                from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
+                if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts"):
+                    raise RuntimeError("Solde de crédits KappGen insuffisant pour la synthèse vocale.")
+
+            logger.info("Requesting voiceover from Izivoice /text-to-speech...")
+            with _izivoice_semaphore:
+                resp = _post_with_retry(
+                    client,
+                    f"{IZIVOICE_BASE_URL}/text-to-speech",
+                    headers=_izivoice_headers(effective_key),
+                    # Izivoice's /text-to-speech now requires a JSON body — sending
+                    # this as form-urlencoded (the old `data=` kwarg) gets rejected
+                    # with a generic 400 "Requête invalide" regardless of the
+                    # voice_id or fields used (confirmed by reproducing the same
+                    # 400 with a guaranteed-valid voice_id and minimal fields, then
+                    # getting 200 by switching only the transport to `json=`).
+                    json={
+                        "text": script_text,
+                        "voice_id": voice_id,
+                        "speed": (voice_settings or {}).get("speed", 0.845),
+                        "with_transcript": False,
+                        "stability": (voice_settings or {}).get("stability", 0.8),
+                        "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
+                        "style": (voice_settings or {}).get("style", 0.0),
+                    },
+                    timeout=30.0
+                )
+                resp.raise_for_status()
+                task_id = resp.json()["task_id"]
+
+                task = _poll_task(task_id, client, effective_key)
+            audio_url = (task.get("metadata") or {}).get("audio_url")
+            if not audio_url:
+                raise ValueError(f"Unexpected Izivoice text-to-speech response: {task}")
+
+            audio_resp = client.get(audio_url, timeout=60.0)
+            audio_resp.raise_for_status()
+            output_audio_path.write_bytes(audio_resp.content)
+
         # Izivoice's /text-to-speech has been observed returning a 200 with a
         # genuinely truncated audio file for very long scripts — no error, just
         # noticeably less audio than the script implies. Nothing downstream

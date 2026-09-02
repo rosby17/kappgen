@@ -12,15 +12,15 @@ TASK_POLL_INTERVAL_SECONDS = 3.0
 TASK_POLL_TIMEOUT_SECONDS = 90
 
 
-def _izivoice_headers(token: Optional[str] = None) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {token or IZIVOICE_API_KEY}"}
+def _izivoice_headers() -> Dict[str, str]:
+    return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
 
 
-def _poll_izivoice_task(task_id: str, client: httpx.Client, token: Optional[str] = None) -> Dict[str, Any]:
+def _poll_izivoice_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     elapsed = 0.0
     while elapsed < TASK_POLL_TIMEOUT_SECONDS:
         try:
-            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(token), timeout=30.0)
+            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(), timeout=30.0)
             if resp.status_code >= 500:
                 time.sleep(TASK_POLL_INTERVAL_SECONDS)
                 elapsed += TASK_POLL_INTERVAL_SECONDS
@@ -49,52 +49,29 @@ def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> 
     `prompt` string (no documented duration param — the API decides the
     length), returns {success, task_id}, polled via GET /tasks/{task_id}
     until status == "done", at which point metadata.audio_url holds the track.
+    """
+    with httpx.Client() as client:
+        resp = client.post(
+            f"{IZIVOICE_BASE_URL}/music",
+            headers=_izivoice_headers(),
+            json={"prompt": prompt[:2000]},
+            timeout=30.0
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success") or not data.get("task_id"):
+            raise ValueError(f"Unexpected Izivoice music-generate response: {data}")
 
-    Tries every enabled account in the admin-managed Izivoice pool (see
-    src/utils/izivoice_pool.py) in turn — same failover as voiceover TTS and
-    Izivoice image generation."""
-    from src.utils.izivoice_pool import resolve_izivoice_candidates, mark_izivoice_account
-    candidates = resolve_izivoice_candidates()
-    if not candidates:
-        raise RuntimeError("No Izivoice key configured (env or admin pool).")
+        task = _poll_izivoice_task(data["task_id"], client)
+        audio_url = (task.get("metadata") or {}).get("audio_url")
+        if not audio_url:
+            raise ValueError(f"Izivoice music task {data['task_id']} completed with no audio_url: {task}")
 
-    last_exc: Optional[Exception] = None
-    for candidate in candidates:
-        token = candidate["token"]
-        account_id = candidate["id"]
-        try:
-            with httpx.Client() as client:
-                resp = client.post(
-                    f"{IZIVOICE_BASE_URL}/music",
-                    headers=_izivoice_headers(token),
-                    json={"prompt": prompt[:2000]},
-                    timeout=30.0
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                if not data.get("success") or not data.get("task_id"):
-                    raise ValueError(f"Unexpected Izivoice music-generate response: {data}")
-
-                task = _poll_izivoice_task(data["task_id"], client, token=token)
-                audio_url = (task.get("metadata") or {}).get("audio_url")
-                if not audio_url:
-                    raise ValueError(f"Izivoice music task {data['task_id']} completed with no audio_url: {task}")
-
-                audio_resp = client.get(audio_url, timeout=60.0)
-                audio_resp.raise_for_status()
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(audio_resp.content)
-            mark_izivoice_account(account_id, "active")
-            return output_path
-        except Exception as exc:
-            last_exc = exc
-            status = "invalid"
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code in (402, 429):
-                status = "quota_exhausted"
-            mark_izivoice_account(account_id, status, str(exc)[:300])
-            logger.warning(f"Izivoice account {account_id or '(env)'} music generation failed, trying next account: {exc}")
-            continue
-    raise RuntimeError(f"Izivoice music generation failed on all {len(candidates)} configured account(s). Last error: {last_exc}")
+        audio_resp = client.get(audio_url, timeout=60.0)
+        audio_resp.raise_for_status()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(audio_resp.content)
+    return output_path
 
 
 def _generate_synthetic_fallback_track(duration: float) -> Path:
@@ -144,9 +121,8 @@ def get_background_music_track(
         return _generate_synthetic_fallback_track(duration)
 
     if mode == "ai_generate":
-        from src.utils.izivoice_pool import resolve_izivoice_candidates
-        if not resolve_izivoice_candidates():
-            logger.info("Music mode is 'ai_generate' but no Izivoice key is configured (env or admin pool); using fallback tone.")
+        if not IZIVOICE_API_KEY:
+            logger.info("Music mode is 'ai_generate' but IZIVOICE_API_KEY is not set; using fallback tone.")
             return _generate_synthetic_fallback_track(duration)
 
         prompt = music_pref.get("ai_prompt")
