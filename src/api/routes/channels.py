@@ -1474,6 +1474,9 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
         "character_anchor": profile.get("character_anchor") or previous.get("character_anchor"),
     })
     channel.thumbnail_style = previous
+    image_style = dict(channel.image_style or {})
+    image_style["generate_thumbnail_with_ai"] = True
+    channel.image_style = image_style
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
@@ -1614,6 +1617,9 @@ def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = 
             if file_path.exists() and file_path.is_relative_to(channel_dir):
                 file_path.unlink(missing_ok=True)
         channel.thumbnail_style = None
+        image_style = dict(channel.image_style or {})
+        image_style["generate_thumbnail_with_ai"] = False
+        channel.image_style = image_style
         db.commit()
         db.refresh(channel)
         return channel.to_dict()
@@ -1627,6 +1633,9 @@ def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = 
 
     if not remaining_paths:
         channel.thumbnail_style = None
+        image_style = dict(channel.image_style or {})
+        image_style["generate_thumbnail_with_ai"] = False
+        channel.image_style = image_style
     else:
         images = []
         for rel_path in remaining_paths:
@@ -1640,6 +1649,9 @@ def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = 
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
         channel.thumbnail_style = {"reference_image_paths": remaining_paths, "style_prompt": style_prompt}
+        image_style = dict(channel.image_style or {})
+        image_style["generate_thumbnail_with_ai"] = True
+        channel.image_style = image_style
 
     db.commit()
     db.refresh(channel)

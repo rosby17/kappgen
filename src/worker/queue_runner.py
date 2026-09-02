@@ -161,7 +161,11 @@ def process_single_queued_video() -> bool:
         # The future is joined below just before the completed video is exposed.
         thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thumbnail")
         thumbnail_destination = video_dir / "thumbnail.jpg"
-        thumbnail_enabled = bool((channel.image_style or {}).get("generate_thumbnail_with_ai", False))
+        # A thumbnail exists only when the creator supplied its style references.
+        # The moodboard is therefore both the creative brief and explicit consent
+        # to spend thumbnail credits; a legacy boolean alone is never enough.
+        thumbnail_style = channel.thumbnail_style or {}
+        thumbnail_enabled = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
         thumbnail_future = thumbnail_executor.submit(
             youtube_metadata.generate_thumbnail,
             video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
