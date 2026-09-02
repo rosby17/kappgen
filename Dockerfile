@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-linuxlibertine \
     fonts-lobstertwo \
     fonts-manrope \
+    fonts-montserrat \
     fonts-national-park \
     fonts-play \
     fonts-quattrocento \
