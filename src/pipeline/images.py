@@ -384,8 +384,11 @@ def _mark_hf_account(account_id: Optional[str], status: str, error: Optional[str
             if account:
                 account.status = status
                 account.last_used_at = datetime.utcnow()
-                if status != "active":
-                    account.last_error = error
+                # Clear the stale error the moment an account works again —
+                # leaving a months-old "402 Payment Required" visible under a
+                # green "Actif" badge (which is what an admin actually sees)
+                # reads as "this is broken right now" when it isn't.
+                account.last_error = error if status != "active" else None
                 db.commit()
         finally:
             db.close()
