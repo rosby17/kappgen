@@ -304,15 +304,15 @@ def clone_voice_status(job_id: str, current_user: User = Depends(get_current_use
 
 @router.get("/my-cloned-voices")
 def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Every voice this user has successfully cloned, ever — read from
-    VoiceCloneJob (server-side, permanent) instead of the "Mes voix clonées"
-    tab's old localStorage-only tracking (per-browser, wiped by a cleared
-    cache or just never present on a different device/tab), which is why a
-    creator's own cloned voices kept "disappearing" even though they still
-    worked fine for actually generating videos — the channel's voice_id was
-    always saved server-side, only the picker's memory of "this exists" was
-    local and fragile. One entry per voice_id (a creator can re-clone the
-    same sample under a new job; only the latest such job is shown)."""
+    """Lists all personal clones available to the current creator.
+
+    KappGen's VoiceCloneJob rows are durable ownership records for clones
+    created in KappGen. They cannot, however, know about clones created
+    directly in the creator's Izivoice account. When a personal Izivoice key
+    is connected, merge `/voices?mine=true` as the authoritative external
+    inventory so a new channel sees every existing clone, not only the ones
+    created through this UI.
+    """
     jobs = (
         db.query(VoiceCloneJob)
         .filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.status == "done", VoiceCloneJob.voice_id.isnot(None))
@@ -326,6 +326,44 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
             continue
         seen.add(job.voice_id)
         voices.append({"id": job.voice_id, "name": job.name, "gender": job.gender, "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None})
+
+    # Never query `mine=true` with KappGen's shared service key: that key is
+    # not a creator identity and could expose another user's private clones.
+    # A connected personal key is exactly the scope Izivoice needs here.
+    if current_user.izivoice_api_key_encrypted:
+        try:
+            api_key = izivoice_key_for_user(current_user)
+            page = 0
+            with httpx.Client(timeout=20) as client:
+                while True:
+                    response = client.get(
+                        f"{IZIVOICE_BASE_URL}/voices",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        params={"page": page, "page_size": 100, "mine": "true"},
+                    )
+                    if not response.is_success:
+                        logger.warning("Izivoice clone sync failed for user %s: HTTP %s", current_user.id, response.status_code)
+                        break
+                    data = (response.json() or {}).get("data") or {}
+                    batch = data.get("voices") or []
+                    for voice in batch:
+                        voice_id = str(voice.get("voice_id") or voice.get("id") or "").strip()
+                        if not voice_id or voice_id in seen:
+                            continue
+                        seen.add(voice_id)
+                        voices.append({
+                            "id": voice_id,
+                            "name": voice.get("name") or f"Voix {voice_id[:8]}",
+                            "gender": voice.get("gender") or "neutral",
+                            "preview_url": voice.get("preview_url"),
+                        })
+                    if not data.get("has_more") or not batch:
+                        break
+                    page += 1
+                    if page >= 50:  # defensive ceiling against an upstream pagination loop
+                        break
+        except Exception as exc:  # Existing KappGen clones must remain usable offline.
+            logger.warning("Izivoice clone sync failed for user %s: %s", current_user.id, exc)
     return {"voices": voices}
 
 
