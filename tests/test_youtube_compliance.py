@@ -7,8 +7,8 @@ def video(script, title="Un titre YouTube suffisamment précis", description="Un
     return SimpleNamespace(id=id, script_text=script, title=title, youtube_description=description)
 
 
-def channel(niche="Histoire", description="Récits historiques documentés"):
-    return SimpleNamespace(niche=niche, description=description)
+def channel(niche="Général", description="Documentaires originaux", made_for_kids=False):
+    return SimpleNamespace(niche=niche, description=description, youtube_made_for_kids=made_for_kids)
 
 
 def test_original_substantial_video_is_green():
@@ -31,3 +31,26 @@ def test_sensitive_niche_requires_human_review():
     report = evaluate_youtube_compliance(video(script), channel("Santé"), [])
     assert report["status"] == "orange"
     assert report["requires_human_review"] is True
+
+
+def test_financial_guarantee_is_blocked():
+    script = ("Cette méthode offre un profit garanti et un rendement garanti. " * 80)
+    report = evaluate_youtube_compliance(video(script), channel("Finance et trading"), [])
+    assert report["status"] == "red"
+    assert any(check["code"] == "dangerous_claim" and check["state"] == "fail" for check in report["checks"])
+
+
+def test_kids_channel_requires_correct_youtube_declaration():
+    script = " ".join(f"histoire{i}" for i in range(500))
+    blocked = evaluate_youtube_compliance(video(script), channel("Comptines pour enfants"), [])
+    allowed = evaluate_youtube_compliance(video(script), channel("Comptines pour enfants", made_for_kids=True), [])
+    assert blocked["status"] == "red"
+    assert allowed["status"] == "orange"
+
+
+def test_source_link_is_recognised_for_history():
+    script = " ".join(f"archive{i}" for i in range(500))
+    item = video(script, description="Analyse historique détaillée. Source : https://example.org/archive")
+    report = evaluate_youtube_compliance(item, channel("Histoire"), [])
+    source_check = next(check for check in report["checks"] if check["code"] == "sources")
+    assert source_check["state"] == "pass"

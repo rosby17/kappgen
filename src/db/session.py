@@ -128,6 +128,7 @@ def init_db():
             "youtube_token_expiry": "ALTER TABLE channels ADD COLUMN youtube_token_expiry TIMESTAMP",
             "youtube_connected_at": "ALTER TABLE channels ADD COLUMN youtube_connected_at TIMESTAMP",
             "publish_mode": "ALTER TABLE channels ADD COLUMN publish_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
+            "youtube_made_for_kids": "ALTER TABLE channels ADD COLUMN youtube_made_for_kids BOOLEAN DEFAULT FALSE NOT NULL",
             "publish_time_mode": "ALTER TABLE channels ADD COLUMN publish_time_mode VARCHAR(20) DEFAULT 'range' NOT NULL",
             "publish_schedule_hour": "ALTER TABLE channels ADD COLUMN publish_schedule_hour INTEGER DEFAULT 8 NOT NULL",
             "publish_schedule_day_offset": "ALTER TABLE channels ADD COLUMN publish_schedule_day_offset INTEGER DEFAULT 1 NOT NULL",

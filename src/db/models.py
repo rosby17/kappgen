@@ -225,6 +225,7 @@ class Channel(Base):
     # "manual" (default): never auto-publish — the creator downloads and
     #   posts it themselves, or publishes on demand from NicheCut.
     publish_mode = Column(String(20), nullable=False, default="manual")
+    youtube_made_for_kids = Column(Boolean, nullable=False, default=False)
     # "fixed": always publish_schedule_hour, exactly. "range" (default): a
     # randomized time inside automation_window_start/end_hour — those columns
     # always have a non-null default (7/11), so without this flag the worker
@@ -318,6 +319,7 @@ class Channel(Base):
             "voice_name": self.voice_name,
             "voice_settings": self.voice_settings or {"speed": 0.845, "stability": 0.8, "similarity_boost": 0.9, "style": 0.0},
             "publish_mode": self.publish_mode or "manual",
+            "youtube_made_for_kids": bool(self.youtube_made_for_kids),
             "publish_time_mode": self.publish_time_mode or "range",
             "publish_schedule_hour": self.publish_schedule_hour,
             "publish_schedule_day_offset": self.publish_schedule_day_offset,

@@ -139,6 +139,7 @@ def upload_video(
     category_id: str = "22",  # "People & Blogs" — reasonable default for narration/faceless channels
     tags: Optional[list] = None,
     contains_synthetic_media: bool = True,
+    made_for_kids: bool = False,
 ) -> str:
     """
     Uploads a finished video file to the account behind access_token via
@@ -159,7 +160,7 @@ def upload_video(
         },
         "status": {
             "privacyStatus": privacy_status,
-            "selfDeclaredMadeForKids": False,
+            "selfDeclaredMadeForKids": made_for_kids,
             "containsSyntheticMedia": contains_synthetic_media,
         },
     }
@@ -226,7 +227,10 @@ def publish_video_for_channel(
     access_token = get_valid_access_token(channel)
     if not access_token:
         raise RuntimeError("Chaîne non connectée à YouTube, ou jeton d'accès expiré/révoqué.")
-    video_id = upload_video(access_token, video_path, title, description, tags=tags)
+    video_id = upload_video(
+        access_token, video_path, title, description, tags=tags,
+        made_for_kids=bool(getattr(channel, "youtube_made_for_kids", False)),
+    )
     if thumbnail_path and thumbnail_path.exists():
         try:
             set_video_thumbnail(access_token, video_id, thumbnail_path)

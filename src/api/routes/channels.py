@@ -595,6 +595,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         voice_name=payload.voice_name,
         voice_settings=payload.voice_settings,
         publish_mode=payload.publish_mode or "manual",
+        youtube_made_for_kids=bool(payload.youtube_made_for_kids),
         publish_time_mode=payload.publish_time_mode or "range",
         publish_schedule_hour=payload.publish_schedule_hour,
         publish_schedule_day_offset=payload.publish_schedule_day_offset,
@@ -788,6 +789,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
                     detail="La publication automatique sur YouTube n'est pas incluse dans ton abonnement actuel. Passe à un palier supérieur pour l'activer.",
                 )
         channel.publish_mode = payload.publish_mode
+    if payload.youtube_made_for_kids is not None:
+        channel.youtube_made_for_kids = payload.youtube_made_for_kids
     if payload.publish_time_mode is not None:
         channel.publish_time_mode = payload.publish_time_mode
     if payload.publish_schedule_hour is not None:

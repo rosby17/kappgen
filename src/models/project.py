@@ -154,6 +154,7 @@ class ChannelCreate(BaseModel):
     voice_name: Optional[str] = None
     voice_settings: Optional[dict] = None
     publish_mode: str = "manual"  # "auto" | "scheduled" | "manual"
+    youtube_made_for_kids: bool = False
     publish_time_mode: str = "range"  # "fixed" (publish_schedule_hour) | "range" (automation_window_*)
     publish_schedule_hour: int = 8
     publish_schedule_day_offset: int = 1
@@ -189,6 +190,7 @@ class ChannelUpdate(BaseModel):
     voice_name: Optional[str] = None
     voice_settings: Optional[dict] = None
     publish_mode: Optional[str] = None
+    youtube_made_for_kids: Optional[bool] = None
     publish_time_mode: Optional[str] = None
     publish_schedule_hour: Optional[int] = None
     publish_schedule_day_offset: Optional[int] = None
