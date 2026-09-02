@@ -214,7 +214,11 @@ def _analyze_many_with_groq(images: list, instruction: str) -> str:
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            # Verified against the account's own /models list: the Llama 4
+            # vision models aren't served there, Qwen3.8 is and reads images
+            # cleanly. Groq's catalogue moves, so check /models before
+            # changing this rather than assuming a name exists.
+            "model": "qwen/qwen3.8-27b",
             "max_tokens": 2000,
             "messages": [{"role": "user", "content": content}],
         },
@@ -303,6 +307,8 @@ def _diagnose_provider_error(exc: Exception) -> str:
         return "compte bloqué (recharge requise)"
     if "401" in text or "invalid api key" in text or "authentication" in text:
         return "clé API refusée"
+    if "404" in text:
+        return "modèle indisponible chez ce fournisseur"
     if "429" in text:
         return "trop de requêtes"
     if "timeout" in text or "timed out" in text:
@@ -412,6 +418,9 @@ def analyze_thumbnail_reference_profile(images: list) -> dict:
     topic was, and left typography undefined so the generator reinvented it
     each time."""
     raw = _run_with_fallback(_vision_chain(images, _thumbnail_analysis_instruction(images)))
+    # Reasoning models (Qwen on Groq, for one) prefix their answer with a
+    # <think>…</think> block, which is not JSON and breaks the parse.
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
     try:
         data = json.loads(cleaned)
