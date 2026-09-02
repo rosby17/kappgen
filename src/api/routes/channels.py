@@ -845,12 +845,24 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
 
     if channel.automation_mode != "auto":
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas en mode automatique.")
-    from src.utils.billing import user_ai_script_enabled
+    from src.utils.billing import user_ai_script_enabled, user_can_render
     if not user_ai_script_enabled(db, current_user):
         raise HTTPException(
             status_code=403,
             detail="La génération automatique de script (IA) n'est pas incluse dans ton abonnement actuel. Passe à un palier supérieur pour l'utiliser.",
         )
+    # Checked here, synchronously, instead of only inside the background
+    # thread below: a quota/credit rejection there is only ever logged
+    # server-side (generate_and_queue_auto_video_background swallows it into
+    # a warning) — the frontend just polls for a new video, finds nothing
+    # for 3 minutes, and gives up with no error shown at all. A creator
+    # hitting their plan's video quota (or an empty credit balance) saw this
+    # exactly as "the button stopped working" with zero explanation. Failing
+    # fast here instead means the existing !res.ok toast in the frontend
+    # actually fires.
+    can_render, reason = user_can_render(db, current_user)
+    if not can_render:
+        raise HTTPException(status_code=402, detail=reason)
 
     from threading import Thread
     from src.worker.queue_runner import generate_and_queue_auto_video_background
