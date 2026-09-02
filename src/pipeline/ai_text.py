@@ -221,6 +221,19 @@ def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
     return text.strip()
 
 
+# Single source of truth for "can this deployment do AI text at all?".
+# Feature guards used to each hardcode `ANTHROPIC_API_KEY or FAL_API_KEY or
+# OPENAI_API_KEY`, a list frozen before DeepSeek and Groq existed here: a
+# deployment holding only a (free) Groq key was told no provider was
+# available and silently dropped to its non-AI fallback, even though
+# generate_text() below would have answered fine. Anything added to the
+# fallback chain must be added here too — that's the point of it being one
+# function instead of five copies of a tuple.
+def any_text_provider_configured() -> bool:
+    from src.pipeline.ai_providers import any_configured
+    return any_configured("text")
+
+
 def generate_text(
     prompt: str,
     max_tokens: int = 1000,
@@ -272,10 +285,8 @@ def generate_text(
         "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),
         "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
     }
-    default_order = ["anthropic", "deepseek", "fal", "openai", "groq"]
-    from src.utils.app_settings import ai_text_provider_order
-    custom_order = [p for p in ai_text_provider_order() if p in providers]
-    order = custom_order + [p for p in default_order if p not in custom_order]
+    from src.pipeline.ai_providers import ordered_ids
+    order = [pid for pid in ordered_ids("text") if pid in providers]
     last_exc = None
     for name in order:
         try:

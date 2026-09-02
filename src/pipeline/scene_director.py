@@ -9,8 +9,7 @@ with each other.
 import json
 import re
 from typing import List, Optional
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
-from src.pipeline.ai_text import generate_text
+from src.pipeline.ai_text import generate_text, any_text_provider_configured
 from src.utils.logger import logger
 
 SCENE_DIRECTOR_MODEL = "claude-sonnet-5"
@@ -38,7 +37,7 @@ def build_scene_prompts(
     (character/setting/style) derived from the whole script. Returns None on
     any failure so callers can fall back to their previous behavior.
     """
-    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY) or not segment_texts:
+    if not any_text_provider_configured() or not segment_texts:
         return None
 
     try:
@@ -89,7 +88,7 @@ def build_stock_search_queries(
     regress the image path if this call fails — it just returns None and
     every scene stays on its image.
     """
-    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY) or not segment_texts:
+    if not any_text_provider_configured() or not segment_texts:
         return None
 
     try:

@@ -7,8 +7,8 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageFilter
 
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, STORAGE_PATH, ASSETS_PATH
-from src.pipeline.ai_text import generate_text
+from src.config import STORAGE_PATH, ASSETS_PATH
+from src.pipeline.ai_text import generate_text, any_text_provider_configured
 from src.pipeline.subtitles import _resolve_font_file
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.logger import logger
@@ -77,7 +77,7 @@ def _fallback_metadata(video, channel) -> dict:
 
 def generate_metadata(video, channel) -> dict:
     fallback = _fallback_metadata(video, channel)
-    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
+    if not any_text_provider_configured():
         return fallback
     # A blank/near-empty script_text (e.g. a manual "text" submission with
     # nothing pasted in, or an edge case upstream) must never reach the

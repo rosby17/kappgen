@@ -1444,20 +1444,17 @@ def set_render_concurrency(payload: RenderConcurrencyPayload, admin: User = Depe
 # exactly this situation: an exhausted Anthropic balance with no time to
 # redeploy — flip to a configured provider from the "Ressources" tab and
 # every call picks it up immediately, no restart needed.
-AI_TEXT_PROVIDERS = ["anthropic", "deepseek", "fal", "openai", "groq"]
+# Kept as a name for the routes below, but sourced from the single registry
+# (src/pipeline/ai_providers.py) so a provider added there shows up in this
+# picker — and in every fallback chain — without editing anything here.
+from src.pipeline.ai_providers import ALL_IDS as AI_TEXT_PROVIDERS
 
 
 @router.get("/settings/ai-text-provider")
 def get_ai_text_provider(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import ai_text_provider_order
-    from src.config import ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, FAL_API_KEY, OPENAI_API_KEY, GROQ_API_KEY
-    configured = {
-        "anthropic": bool(ANTHROPIC_API_KEY),
-        "deepseek": bool(DEEPSEEK_API_KEY),
-        "fal": bool(FAL_API_KEY),
-        "openai": bool(OPENAI_API_KEY),
-        "groq": bool(GROQ_API_KEY),
-    }
+    from src.pipeline.ai_providers import configured_map
+    configured = configured_map()
     custom_order = [p for p in ai_text_provider_order() if p in AI_TEXT_PROVIDERS]
     # Providers not explicitly ranked by the admin still trail behind, in the
     # module's default order, so the "available" list always covers all five.

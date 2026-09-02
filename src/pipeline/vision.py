@@ -318,7 +318,7 @@ _VISION_PROVIDERS = {
     "openai": _analyze_many_with_openai,
     "groq": _analyze_many_with_groq,
 }
-_VISION_DEFAULT_ORDER = ["anthropic", "fal", "openai", "groq"]
+
 
 
 def _vision_chain(images: list, instruction: str) -> list:
@@ -332,9 +332,8 @@ def _vision_chain(images: list, instruction: str) -> list:
     the admin didn't rank still gets appended behind, so the chain is
     reordered, never emptied — there is always a fallback left.
     """
-    from src.utils.app_settings import ai_text_provider_order
-    ranked = [p for p in ai_text_provider_order() if p in _VISION_PROVIDERS]
-    order = ranked + [p for p in _VISION_DEFAULT_ORDER if p not in ranked]
+    from src.pipeline.ai_providers import ordered_ids
+    order = [pid for pid in ordered_ids("vision") if pid in _VISION_PROVIDERS]
     return [(name, (lambda fn=_VISION_PROVIDERS[name]: fn(images, instruction))) for name in order]
 
 
@@ -459,8 +458,8 @@ def generate_music_prompt(niche: str, script_excerpt: str = "") -> str:
         user_text += f"Video script excerpt: {script_excerpt[:800]}\n"
     user_text += "\n" + MUSIC_PROMPT_INSTRUCTION
 
-    return _run_with_fallback([
-        ("anthropic", lambda: _generate_music_prompt_with_anthropic(user_text)),
-        ("fal.ai", lambda: _generate_music_prompt_with_fal(user_text)),
-        ("openai", lambda: _generate_music_prompt_with_openai(user_text)),
-    ])
+    # Routed through generate_text so this obeys the same admin-ordered
+    # provider chain as everything else, instead of its own frozen
+    # anthropic → fal → openai list that never knew about DeepSeek or Groq.
+    from src.pipeline.ai_text import generate_text
+    return generate_text(user_text, max_tokens=200, operation="music_prompt").strip()

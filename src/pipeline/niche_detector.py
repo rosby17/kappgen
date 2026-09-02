@@ -5,8 +5,7 @@ published on YouTube."""
 import json
 import re
 
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
-from src.pipeline.ai_text import generate_text
+from src.pipeline.ai_text import generate_text, any_text_provider_configured
 from src.utils.logger import logger
 
 
@@ -14,7 +13,7 @@ def suggest_niche(title: str, description: str, existing_niches: list) -> str | 
     """Returns a niche label — either one of `existing_niches` (preferred, so
     the shared niche list stays tidy) or a short new one if nothing fits.
     Returns None if it can't produce a confident guess."""
-    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY) or not title:
+    if not any_text_provider_configured() or not title:
         return None
     try:
         niches_list = "\n".join(f"- {n}" for n in existing_niches[:200]) or "(aucune pour l'instant)"

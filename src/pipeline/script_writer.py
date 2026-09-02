@@ -20,8 +20,7 @@ within a safe output-token budget regardless of how long the full script is.
 import json
 import re
 from typing import Dict, List, Optional
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY
-from src.pipeline.ai_text import generate_text
+from src.pipeline.ai_text import generate_text, any_text_provider_configured
 from src.utils.logger import logger
 from src.pipeline.youtube_compliance import text_similarity
 
@@ -260,7 +259,7 @@ def generate_daily_script(
     English — a channel run by a French creator should never get an English
     script just because nobody explicitly typed "French" into its settings.
     """
-    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY):
+    if not any_text_provider_configured():
         logger.error("No AI provider configured (Anthropic/fal.ai/OpenAI) — cannot auto-generate a daily script.")
         return None
 
