@@ -327,6 +327,53 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
     return {"voices": voices}
 
 
+@router.delete("/my-cloned-voices/{voice_id}")
+def delete_my_cloned_voice(voice_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Deletes a cloned voice: removes it from Izivoice itself (best-effort —
+    an Izivoice-side failure doesn't block clearing it from KappGen, since a
+    voice_id that no longer resolves there is useless here too) and from every
+    VoiceCloneJob row that reference it, so it stops appearing in "Mes voix
+    clonées". Refuses if any of the user's channels still has it selected as
+    their active voiceover voice, to avoid silently breaking future renders —
+    the creator has to pick a different voice on that channel first."""
+    owns_it = (
+        db.query(VoiceCloneJob)
+        .filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.voice_id == voice_id)
+        .first()
+    )
+    if not owns_it:
+        raise HTTPException(status_code=404, detail="Voix clonée introuvable.")
+
+    channels_using_it = (
+        db.query(Channel)
+        .filter(Channel.user_id == current_user.id, Channel.voice_id == voice_id)
+        .all()
+    )
+    if channels_using_it:
+        names = ", ".join(c.name for c in channels_using_it)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cette voix est encore utilisée par : {names}. Choisis une autre voix sur cette/ces chaîne(s) avant de la supprimer.",
+        )
+
+    api_key = izivoice_key_for_user(current_user)
+    if api_key:
+        try:
+            resp = httpx.delete(
+                f"{IZIVOICE_BASE_URL}/clone/{voice_id}",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=30.0,
+            )
+            if resp.status_code not in (200, 204, 404):
+                logger.warning(f"Izivoice refused deleting voice {voice_id}: {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Failed to delete voice {voice_id} on Izivoice ({e}) — clearing it from KappGen anyway.")
+
+    db.query(VoiceCloneJob).filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.voice_id == voice_id).delete()
+    db.commit()
+    return {"status": "deleted"}
+
+
 @router.get("/voice/{voice_id}/preview")
 def get_voice_preview(voice_id: str, current_user: User = Depends(get_current_user)):
     """Serves the short sample generated right after cloning (see
