@@ -26,7 +26,7 @@ surfaced on the Ressources page at all.
 import httpx
 from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY,
-    IZIVOICE_API_KEY, IZIVOICE_BASE_URL,
+    IZIVOICE_BASE_URL,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY,
 )
 
@@ -109,16 +109,33 @@ def _check_fal():
 
 
 def _check_izivoice():
-    if not IZIVOICE_API_KEY:
+    # Checks the whole admin-managed pool (src/utils/izivoice_pool.py), not
+    # just the single env-var key — this is what actually determines whether
+    # voiceover/music/image generation can still fail over to a backup
+    # account, so the admin card should reflect the pool, not one key.
+    from src.utils.izivoice_pool import izivoice_accounts_from_db
+    accounts = izivoice_accounts_from_db()
+    if not accounts:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé partagée configurée (les utilisateurs peuvent connecter la leur individuellement)."}
-    try:
-        resp = httpx.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {IZIVOICE_API_KEY}"}, params={"page": 0, "page_size": 1}, timeout=PROBE_TIMEOUT)
-        if resp.status_code in (401, 403):
-            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
-        resp.raise_for_status()
-        return {"configured": True, "status": "ok", "detail": "Clé valide. Izivoice n'expose aucun solde consultable via l'API."}
-    except Exception as exc:
-        return {"configured": True, "status": "error", "detail": f"Izivoice injoignable : {exc}"}
+    working = 0
+    last_error = None
+    for account in accounts:
+        try:
+            resp = httpx.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {account['token']}"}, params={"page": 0, "page_size": 1}, timeout=PROBE_TIMEOUT)
+            if resp.status_code in (401, 403):
+                last_error = "Clé invalide ou révoquée."
+                continue
+            resp.raise_for_status()
+            working += 1
+        except Exception as exc:
+            last_error = str(exc)
+    total = len(accounts)
+    if working == total:
+        detail = f"{total} compte(s) valide(s). Izivoice n'expose aucun solde consultable via l'API." if total > 1 else "Clé valide. Izivoice n'expose aucun solde consultable via l'API."
+        return {"configured": True, "status": "ok", "detail": detail}
+    if working > 0:
+        return {"configured": True, "status": "ok", "detail": f"{working}/{total} compte(s) valide(s) — au moins un est en panne : {last_error}"}
+    return {"configured": True, "status": "error", "detail": f"Aucun des {total} compte(s) n'est utilisable : {last_error}"}
 
 
 def check_all_providers() -> list:

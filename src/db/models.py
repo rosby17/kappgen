@@ -720,6 +720,40 @@ class HuggingFaceAccount(Base):
         }
 
 
+class IzivoiceAccount(Base):
+    """One shared Izivoice API key, for the default voiceover/TTS/STT/image
+    path used whenever a creator hasn't connected their own personal Izivoice
+    key (see src/utils/credentials.py). Same rotation pattern as
+    HuggingFaceAccount above (see src/utils/izivoice_pool.py) — admin-managed
+    so a second (third, ...) Izivoice account can be added as automatic
+    backup the moment the first one's balance runs out, with no redeploy and
+    no single point of failure for every creator relying on the shared key."""
+    __tablename__ = "izivoice_accounts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    token = Column(String(255), nullable=False, unique=True)
+    label = Column(String(255), nullable=True)
+    status = Column(String(20), nullable=False, default="active")
+    last_used_at = Column(DateTime, nullable=True)
+    last_checked_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "token_preview": f"{self.token[:8]}...{self.token[-4:]}" if len(self.token) > 12 else self.token,
+            "label": self.label,
+            "status": self.status,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_checked_at": self.last_checked_at.isoformat() if self.last_checked_at else None,
+            "last_error": self.last_error,
+            "is_enabled": self.is_enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class VoiceCloneJob(Base):
     """A voice-cloning request, processed by the worker (not the API process)
     and tracked here instead of in an in-memory dict — the API container gets
