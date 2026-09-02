@@ -100,12 +100,12 @@ def evaluate_script_compliance(script: str, title: str, channel, previous_videos
         checks.append({"code": code, "label": label, "state": state, "message": message, "score": confidence})
 
     if len(words) < 80:
-        add("script_depth", "Substance", "fail", f"Scénario insuffisant ({len(words)} mots).", 45)
-        blockers.append("Développez le scénario avant de lancer le rendu.")
+        add("script_depth", "Substance", "fail", f"Script insuffisant ({len(words)} mots).", 45)
+        blockers.append("Développez le script avant de lancer le rendu.")
     elif len(words) < 180:
-        add("script_depth", "Substance", "warning", f"Scénario court ({len(words)} mots).", 14)
+        add("script_depth", "Substance", "warning", f"Script court ({len(words)} mots).", 14)
     else:
-        add("script_depth", "Substance", "pass", f"Scénario suffisamment développé ({len(words)} mots).")
+        add("script_depth", "Substance", "pass", f"Script suffisamment développé ({len(words)} mots).")
 
     if len(title) < 8:
         add("title_quality", "Titre", "warning", "Le titre est absent ou trop vague.", 8)
@@ -147,8 +147,8 @@ def evaluate_script_compliance(script: str, title: str, channel, previous_videos
         max_title_similarity = max(max_title_similarity, title_similarity)
     similarity_pct = round(max_script_similarity * 100)
     if max_script_similarity >= 0.72 or max_title_similarity >= 0.88:
-        add("originality", "Originalité", "fail", f"Scénario trop proche d’une ancienne vidéo ({similarity_pct} %).", 45)
-        blockers.append("Changez l’angle, les exemples et la structure du scénario.")
+        add("originality", "Originalité", "fail", f"Script trop proche d’une ancienne vidéo ({similarity_pct} %).", 45)
+        blockers.append("Changez l’angle, les exemples et la structure du script.")
     elif max_script_similarity >= 0.48 or max_title_similarity >= 0.70:
         add("originality", "Originalité", "warning", f"Ressemblance avec « {closest_title or 'une ancienne vidéo'} » ({similarity_pct} %).", 22)
     else:
@@ -325,12 +325,12 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
     if unverified_audio:
         add("script_depth", "Contenu parlé", "warning", "Audio non vérifiable automatiquement : validation humaine obligatoire.", 20)
     elif word_count < 120:
-        add("script_depth", "Substance du scénario", "fail", f"Scénario trop court ({word_count} mots).", 35)
-        blockers.append("Le scénario doit être développé avant publication.")
+        add("script_depth", "Substance du script", "fail", f"Script trop court ({word_count} mots).", 35)
+        blockers.append("Le script doit être développé avant publication.")
     elif word_count < 350:
-        add("script_depth", "Substance du scénario", "warning", f"Scénario assez court ({word_count} mots).", 12)
+        add("script_depth", "Substance du script", "warning", f"Script assez court ({word_count} mots).", 12)
     else:
-        add("script_depth", "Substance du scénario", "pass", f"Scénario substantiel ({word_count} mots).")
+        add("script_depth", "Substance du script", "pass", f"Script substantiel ({word_count} mots).")
 
     if len(title.strip()) < 12:
         add("metadata_title", "Titre", "fail", "Titre absent ou trop vague.", 20)
@@ -360,7 +360,7 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
     if unverified_audio:
         add("originality", "Originalité", "warning", "L’originalité du contenu parlé doit être confirmée manuellement.", 8)
     elif max_script_similarity >= 0.72 or max_title_similarity >= 0.88:
-        add("originality", "Originalité par rapport à la chaîne", "fail", f"Très proche d’une ancienne vidéo ({similarity_pct}% pour le scénario).", 40)
+        add("originality", "Originalité par rapport à la chaîne", "fail", f"Très proche d’une ancienne vidéo ({similarity_pct}% pour le script).", 40)
         blockers.append("Réécrivez la vidéo pour la différencier nettement de l’historique.")
     elif max_script_similarity >= 0.48 or max_title_similarity >= 0.70:
         add("originality", "Originalité par rapport à la chaîne", "warning", f"Ressemblance notable avec « {closest_title or 'une ancienne vidéo'} » ({similarity_pct}%).", 22)
@@ -448,13 +448,23 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
 
         visual_hashes = _visual_asset_hashes(video)
         assets_purged = bool(getattr(video, "edit_assets_purged_at", None))
+        # Beyond the extreme "a single repeated image" case, a montage that
+        # changes visuals too rarely still reads as a static diaporama, not
+        # a real video — this checks the actual pace (distinct visuals per
+        # minute of runtime), not just whether more than one exists at all.
+        images_per_minute = (len(visual_hashes) / (duration / 60)) if (visual_hashes and duration > 0) else 0.0
         if not visual_hashes:
             add("visual_diversity", "Visuels du montage", "warning", "Sources visuelles archivées : contrôle manuel nécessaire." if assets_purged else "Aucun visuel source vérifiable.", 4)
         elif len(visual_hashes) == 1 and duration > 45:
             add("visual_diversity", "Visuels du montage", "fail", "Un seul visuel unique est utilisé dans toute la vidéo.", 32)
             blockers.append("Diversifiez les images ou les scènes avant publication.")
+        elif duration > 60 and images_per_minute < 0.7:
+            add("visual_diversity", "Visuels du montage", "fail", f"Rythme trop lent ({len(visual_hashes)} visuels pour {round(duration/60, 1)} min) — effet diaporama, transitions trop espacées.", 25)
+            blockers.append("Ajoutez davantage de visuels distincts pour resserrer les transitions.")
+        elif duration > 60 and images_per_minute < 1.3:
+            add("visual_diversity", "Visuels du montage", "warning", f"Rythme un peu lent ({len(visual_hashes)} visuels pour {round(duration/60, 1)} min) — resserrer les transitions rendrait le montage plus dynamique.", 10)
         else:
-            add("visual_diversity", "Visuels du montage", "pass", f"{len(visual_hashes)} visuel(s) unique(s) vérifié(s).")
+            add("visual_diversity", "Visuels du montage", "pass", f"{len(visual_hashes)} visuel(s) unique(s) vérifié(s) — rythme de montage cohérent.")
 
         max_visual_overlap = 0.0
         if visual_hashes:
