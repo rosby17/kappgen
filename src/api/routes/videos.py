@@ -783,8 +783,35 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
 
-    generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel)
+    current = video_path.with_name("thumbnail.jpg")
+    if current.exists():
+        history_dir = video_path.parent / "thumbnail_history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+        shutil.copy2(current, archive)
+    generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
     return {"status": "ok"}
+
+
+@router.get("/{video_id}/thumbnail/history")
+def list_video_thumbnail_history(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    video_path = STORAGE_PATH / video.output_path if video.output_path else None
+    history_dir = video_path.parent / "thumbnail_history" if video_path else None
+    items = []
+    if history_dir and history_dir.is_dir():
+        items = [{"filename": p.name, "url": f"/api/videos/{video.id}/thumbnail/history/{p.name}"} for p in sorted(history_dir.glob('*.jpg'), reverse=True)]
+    return {"current": f"/api/videos/{video.id}/thumbnail/download", "history": items[:20]}
+
+
+@router.get("/{video_id}/thumbnail/history/{filename}")
+def get_video_thumbnail_history(video_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    base = (STORAGE_PATH / video.output_path).parent / "thumbnail_history"
+    path = base / filename
+    if not path.exists() or not path.is_relative_to(base):
+        raise HTTPException(status_code=404, detail="Version introuvable")
+    return FileResponse(path, media_type="image/jpeg")
 
 @router.get("/channel/{channel_id}")
 def list_channel_videos(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
