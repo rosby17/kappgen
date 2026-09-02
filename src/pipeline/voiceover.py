@@ -375,6 +375,29 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                     offset += chunk_duration
                     continue
 
+                # A chunk can also come back "successful" but empty — a done
+                # task whose json_url isn't populated yet returns ("", None)
+                # from _extract_words_from_stt_metadata, which raises nothing.
+                # That silently left its whole span with zero subtitle words:
+                # exactly the failure seen in production, where every subtitle
+                # started at 5:00 sharp (one STT_CHUNK_SECONDS) because chunk
+                # 0 answered empty. Treat empty like failed and use the same
+                # synthetic fallback rather than dropping the span.
+                if not chunk_text and not chunk_words:
+                    failed_chunks += 1
+                    logger.warning(f"Transcription for chunk {chunk_path.name} came back empty; using synthetic subtitle timing for this segment instead of leaving it blank.")
+                    fallback_slice = chunk_fallback_texts[chunk_index]
+                    if fallback_slice:
+                        for w in synthetic_word_timings(fallback_slice, chunk_duration):
+                            all_words.append({
+                                "word": w["word"],
+                                "start": round(w["start"] + offset, 2),
+                                "end": round(w["end"] + offset, 2)
+                            })
+                        all_text_parts.append(fallback_slice)
+                    offset += chunk_duration
+                    continue
+
                 all_text_parts.append(chunk_text)
 
                 if chunk_words:
