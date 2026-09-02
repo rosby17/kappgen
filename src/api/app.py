@@ -177,6 +177,7 @@ _PUBLIC_API_OPERATIONS = {
     ("POST", "/api/videos/{video_id}/retry"),
     ("GET", "/api/billing/plans"), ("GET", "/api/billing/subscription"),
     ("GET", "/api/billing/credits"),
+    ("GET", "/api/billing/api-credits"), ("GET", "/api/billing/api-credits/transactions"),
 }
 
 def _public_openapi():

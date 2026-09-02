@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import Plan, Subscription, Order, User
+from src.db.models import Plan, Subscription, Order, User, ApiCreditPot, ApiCreditTransaction
 from src.utils.auth import get_current_user
 from src.utils.logger import logger
 from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
@@ -16,6 +16,17 @@ from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 _limit_checkout = rate_limit("checkout", max_attempts=20, window_seconds=3600)
+
+@router.get("/api-credits")
+def api_credit_balance(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the separate API wallet, never the dashboard wallet."""
+    total = sum(p.amount for p in db.query(ApiCreditPot).filter(ApiCreditPot.user_id == current_user.id, ApiCreditPot.amount > 0, ApiCreditPot.expires_at > datetime.utcnow()).all())
+    return {"balance": total, "currency": "KappGen API credits", "pricing_multiplier": 3}
+
+@router.get("/api-credits/transactions")
+def api_credit_transactions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(ApiCreditTransaction).filter(ApiCreditTransaction.user_id == current_user.id).order_by(ApiCreditTransaction.created_at.desc()).limit(100).all()
+    return [{"amount": r.amount, "type": r.transaction_type, "description": r.description, "request_id": r.request_id, "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]
 
 
 @router.get("/plans")
