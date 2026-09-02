@@ -24,8 +24,18 @@ _izivoice_semaphore = threading.Semaphore(MAX_CONCURRENT_IZIVOICE_CALLS)
 
 
 def clean_script_text(script: str) -> str:
-    """Removes extra whitespace and cleans script text."""
-    return re.sub(r'\s+', ' ', script).strip()
+    """Normalizes whitespace and strips stage directions before anything is
+    spoken. A script writer (human or LLM) naturally slips in annotations like
+    "[pause]", "[musique]", "(il se racle la gorge)" or "*soupir*" — a TTS
+    engine has no notion of stage direction and reads them out loud, word for
+    word, in the finished video. Seen in the wild on competitors' automated
+    channels ("[clears throat]" narrated aloud mid-documentary), and nothing
+    upstream guaranteed our own scripts never contain one. Only removes
+    bracketed/asterisked annotations, never ordinary parenthetical prose the
+    narrator is genuinely meant to say."""
+    without_directions = re.sub(r'\[[^\]]{0,80}\]', ' ', script or '')
+    without_directions = re.sub(r'\*[^*\n]{0,80}\*', ' ', without_directions)
+    return re.sub(r'\s+', ' ', without_directions).strip()
 
 
 def synthetic_word_timings(text: str, duration: float) -> List[Dict[str, Any]]:
