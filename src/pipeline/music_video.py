@@ -61,11 +61,11 @@ Respond with ONLY the title text, nothing else."""
         return "Musique originale"
 
 
-def _generate_audio_track(style_prompt: str, index: int, output_dir: Path, user_id: str | None = None) -> Path:
+def _generate_audio_track(style_prompt: str, index: int, output_dir: Path, user_id: str | None = None, video_id: str | None = None) -> Path:
     output_path = output_dir / f"track_{index}.mp3"
     if user_id:
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
-        if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "music_video_generation"):
+        if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "music_video_generation", video_id=video_id):
             raise RuntimeError("Solde de crédits KappGen insuffisant pour générer la musique.")
     try:
         return generate_music_izivoice(style_prompt, 180.0, output_path)
@@ -80,6 +80,7 @@ def build_audio(
     target_duration_seconds: float,
     output_dir: Path,
     user_id: str | None = None,
+    video_id: str | None = None,
 ) -> Tuple[Path, int]:
     """Returns (final_audio_path, tracks_generated) — tracks_generated feeds
     the single end-of-render credit charge (see MUSIC_VIDEO_CREDITS)."""
@@ -94,7 +95,7 @@ def build_audio(
         segments: List[Path] = []
         total = 0.0
         while total < target_duration_seconds and len(segments) < 20:  # hard cap: never loop forever on a bad estimate
-            track = _generate_audio_track(style_prompt, len(segments) + 1, output_dir, user_id=user_id)
+            track = _generate_audio_track(style_prompt, len(segments) + 1, output_dir, user_id=user_id, video_id=video_id)
             tracks_generated += 1
             segments.append(track)
             total += get_audio_duration(track)
@@ -108,7 +109,7 @@ def build_audio(
         return final_audio, tracks_generated
 
     # "loop" (default): one track, repeated to fill the target duration.
-    track = _generate_audio_track(style_prompt, 1, output_dir, user_id=user_id)
+    track = _generate_audio_track(style_prompt, 1, output_dir, user_id=user_id, video_id=video_id)
     tracks_generated = 1
     final_audio = output_dir / "final_audio.mp3"
     run_ffmpeg([
@@ -217,6 +218,7 @@ def render_music_video(
     progress_callback=None,
     watermark_enabled: bool = True,
     user_id: str | None = None,
+    video_id: str | None = None,
 ) -> Tuple[Path, int]:
     """Main entry point, called from the worker (see queue_runner.py). Returns
     (output_mp4, tracks_generated) — tracks_generated feeds the single
@@ -229,7 +231,7 @@ def render_music_video(
     audio_dir = output_dir / "source" / "audio"
 
     progress("Génération de la musique", 15)
-    final_audio, tracks_generated = build_audio(style_prompt, edit_mode, target_duration_seconds, audio_dir, user_id=user_id)
+    final_audio, tracks_generated = build_audio(style_prompt, edit_mode, target_duration_seconds, audio_dir, user_id=user_id, video_id=video_id)
 
     progress("Génération des images", 45)
     image_paths: List[Path] = []

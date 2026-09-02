@@ -95,6 +95,7 @@ def get_background_music_track(
     niche: Optional[str] = None,
     script_text: Optional[str] = None,
     user_id: Optional[str] = None,
+    video_id: Optional[str] = None,
 ) -> Path:
     """
     Resolves the background music track for a render:
@@ -141,7 +142,7 @@ def get_background_music_track(
                 return output_path
             if user_id:
                 from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
-                if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "ai_music_generation"):
+                if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "ai_music_generation", video_id=video_id):
                     logger.warning(f"Insufficient KappGen credit balance for AI music generation (user {user_id}); using fallback tone instead.")
                     return _generate_synthetic_fallback_track(duration)
             return generate_music_izivoice(prompt, duration, output_path)

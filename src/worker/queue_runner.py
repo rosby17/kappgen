@@ -177,6 +177,7 @@ def process_single_queued_video() -> bool:
                     scene_index=edit["scene_index"],
                     new_text=edit.get("text") or "",
                     izivoice_api_key=izivoice_api_key,
+                    video_id=video.id,
                 )
                 # Keep the database's canonical script aligned with the
                 # scene-level narration edits. YouTube metadata generation and
@@ -239,6 +240,7 @@ def process_single_queued_video() -> bool:
                 progress_callback=update_progress,
                 watermark_enabled=watermark_enabled,
                 user_id=channel.user_id,
+                video_id=video.id,
             )
 
             try:
@@ -257,7 +259,7 @@ def process_single_queued_video() -> bool:
 
             try:
                 youtube_metadata.generate_thumbnail(
-                    output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel
+                    output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel, video_id=video.id
                 )
             except Exception as e:
                 logger.warning(f"Could not pre-generate thumbnail for music video {video.id}: {e}")
@@ -396,6 +398,7 @@ def process_single_queued_video() -> bool:
             voice_id=video.voice_id,
             izivoice_api_key=izivoice_api_key,
             voice_settings=(channel.to_dict().get("voice_settings") or {}),
+            video_id=video.id,
         )
 
         try:
@@ -450,7 +453,7 @@ def process_single_queued_video() -> bool:
 
         try:
             youtube_metadata.generate_thumbnail(
-                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel
+                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel, video_id=video.id
             )
         except Exception as e:
             logger.warning(f"Could not pre-generate thumbnail for video {video.id}: {e}")
@@ -515,6 +518,19 @@ def process_single_queued_video() -> bool:
                 video.error_message = f"Échec à l'étape « {last_stage} » : {_client_facing_error_message(e)}"
                 video.progress_stage = "Échec du rendu"
                 db.commit()
+                # Refund every credit actually spent on this video — but only
+                # for a genuine first-render failure. A reassembly (Studio
+                # scene edit on an already-delivered video) failing doesn't
+                # mean the video was never delivered — it was, before this
+                # edit attempt — so nothing to refund there.
+                if not video.is_reassembly:
+                    try:
+                        from src.utils.billing import refund_video_credits
+                        refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo échouée ({video.title or video.id})")
+                        if refunded:
+                            logger.info(f"Refunded {refunded} credits for failed video {video.id}.")
+                    except Exception as refund_err:
+                        logger.error(f"Failed to refund credits for video {video.id}: {refund_err}")
             except Exception as db_err:
                 logger.error(f"Failed to update video failed status: {db_err}")
         return False
@@ -714,7 +730,7 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
             video.progress_stage = "Génération de la miniature"
             db.commit()
             thumbnail_path = youtube_metadata.generate_thumbnail(
-                output_mp4, existing_thumbnail, meta.get("thumbnail_text") or meta["title"], channel=channel
+                output_mp4, existing_thumbnail, meta.get("thumbnail_text") or meta["title"], channel=channel, video_id=video.id
             )
         except Exception as e:
             logger.warning(f"Thumbnail generation failed for video {video.id}, publishing without a custom one: {e}")
@@ -777,6 +793,14 @@ def requeue_orphaned_videos():
                     "avant de pouvoir se terminer. Relancez-le manuellement une fois le serveur stable."
                 )
                 video.progress_stage = "Échec du rendu"
+                if not video.is_reassembly:
+                    try:
+                        from src.utils.billing import refund_video_credits
+                        refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo échouée ({video.title or video.id})")
+                        if refunded:
+                            logger.info(f"Refunded {refunded} credits for orphaned/interrupted video {video.id}.")
+                    except Exception as refund_err:
+                        logger.error(f"Failed to refund credits for video {video.id}: {refund_err}")
             else:
                 logger.warning(f"Re-queuing orphaned video {video.id} (interrupted mid-render, restart #{video.restart_count}) — restarting from the beginning.")
                 video.status = VideoStatus.QUEUED.value

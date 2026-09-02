@@ -281,7 +281,7 @@ def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
     return sorted(chunk_dir.glob("chunk_*.mp3"))
 
 
-def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Transcribes an audio file via Izivoice's speech-to-text, chunking long files
     (10min+/3h videos) to stay under the API's per-request size limit, and stitching
@@ -290,7 +290,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     total_duration = get_audio_duration(audio_path)
     if user_id:
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
-        if not debit_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt"):
+        if not debit_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt", video_id=video_id):
             raise RuntimeError("Solde de crédits KappGen insuffisant pour la transcription.")
     chunk_dir = audio_path.parent / f"{audio_path.stem}_stt_chunks"
     chunks = _split_audio_for_stt(audio_path, chunk_dir)
@@ -408,7 +408,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     }
 
 
-def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
+def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Public entrypoint used by the orchestrator for pre-recorded/uploaded audio:
     real transcription via Izivoice speech-to-text when configured, else a
@@ -425,7 +425,7 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
         }
 
     try:
-        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key, user_id=user_id)
+        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key, user_id=user_id, video_id=video_id)
     except Exception as e:
         logger.warning(f"Izivoice speech-to-text failed ({e}). Falling back to synthetic subtitle timing.")
         duration = get_audio_duration(audio_path)
@@ -468,7 +468,7 @@ def generate_voiceover(
             char_count = len(script_text)
             if user_id:
                 from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
-                if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts"):
+                if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts", video_id=video_id):
                     raise RuntimeError("Solde de crédits KappGen insuffisant pour la synthèse vocale.")
 
             logger.info("Requesting voiceover from Izivoice /text-to-speech...")
@@ -544,7 +544,7 @@ def generate_voiceover(
             user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id},
         )
         if transcribe:
-            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id)
+            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id, video_id=video_id)
         else:
             transcript_info = {
                 "text": script_text,

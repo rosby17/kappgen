@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Optional
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
@@ -232,7 +233,7 @@ def propose_thumbnail_concept(niche: str, sample_titles: list, rejected_concepts
     return data
 
 
-def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> Path:
+def _generate_ai_thumbnail_background(text: str, channel, destination: Path, video_id: Optional[str] = None) -> Path:
     """Generates the thumbnail's background image — via fal.ai's gpt-image-2
     (falling back to Izivoice if fal.ai fails or its credits run out) —
     instead of just cropping a frame out of the finished video, for a
@@ -300,7 +301,7 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     if channel.user_id and allow_paid_fallback:
         from src.utils.billing import debit_izivoice_usage_by_user_id
         from src.utils.billing import THUMBNAIL_CREDITS
-        if not debit_izivoice_usage_by_user_id(channel.user_id, THUMBNAIL_CREDITS, "ai_thumbnail_generation"):
+        if not debit_izivoice_usage_by_user_id(channel.user_id, THUMBNAIL_CREDITS, "ai_thumbnail_generation", video_id=video_id):
             raise RuntimeError(f"Insufficient KappGen credit balance for AI thumbnail generation (user {channel.user_id}).")
 
     # Unlike the bulk per-scene image generation (many images, needs to fail fast to
@@ -312,13 +313,13 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path) -> 
     return ai_path
 
 
-def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None) -> Path:
+def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
     image = None
     if channel is not None:
         try:
-            ai_path = _generate_ai_thumbnail_background(text, channel, destination)
+            ai_path = _generate_ai_thumbnail_background(text, channel, destination, video_id=video_id)
             image = Image.open(ai_path).convert("RGB")
         except Exception as exc:
             logger.warning(f"AI thumbnail background generation failed, falling back to a video frame: {exc}")

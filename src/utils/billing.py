@@ -532,13 +532,61 @@ def debit_credits(db: Session, user: User, amount: int, description: str, video_
     return True
 
 
-def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, operation: str) -> bool:
+def refund_video_credits(db: Session, video_id: str, reason: str) -> int:
+    """Refunds every credit actually debited for one video — base render
+    fee, script generation, TTS, STT, AI thumbnail, AI music, all of it,
+    summed from CreditTransaction rows tagged with this video_id (see
+    debit_credits' video_id param and every debit call site that threads it
+    through) — not a flat guessed amount, the real total spent on this
+    specific video. Called when a video ultimately fails and is never
+    delivered, so a creator doesn't pay for a video they never got.
+
+    Idempotent: a video already refunded (a prior 'refund' CreditTransaction
+    exists for it) is skipped — the worker's retry/orphan-requeue logic can
+    reach the failure path more than once for the same video, and refunding
+    twice would just be free money. Returns the amount refunded (0 if
+    nothing to refund or already refunded)."""
+    already_refunded = db.query(CreditTransaction).filter(
+        CreditTransaction.video_id == video_id,
+        CreditTransaction.transaction_type == "refund",
+    ).first()
+    if already_refunded:
+        return 0
+
+    spent = db.query(CreditTransaction).filter(
+        CreditTransaction.video_id == video_id,
+        CreditTransaction.transaction_type == "debit",
+    ).all()
+    total = -sum(t.amount for t in spent)  # debit amounts are stored negative
+    if total <= 0:
+        return 0
+
+    user_id = spent[0].user_id
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return 0
+
+    # A fresh, non-expiring-soon pot rather than trying to credit back into
+    # whichever pot(s) the original debit drew from (already partially spent
+    # elsewhere by now, possibly expired) — same mechanism as any other
+    # credit grant (credit_user), just tagged as a refund.
+    pot = CreditPot(user_id=user.id, amount=total, original_amount=total, expires_at=datetime.utcnow() + timedelta(days=365))
+    db.add(pot)
+    db.add(CreditTransaction(user_id=user.id, video_id=video_id, amount=total, transaction_type="refund", description=reason))
+    db.commit()
+    return total
+
+
+def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, operation: str, video_id: Optional[str] = None) -> bool:
     """Self-contained version of debit_izivoice_usage, opening its own
     short-lived session — for deep pipeline call sites (image generation,
     per-scene TTS/STT) that only have a user_id, not a live db session/User
     object, threaded down to them. Billing failures fail closed: returning
     True without a verified user/debit allowed paid provider work to proceed
-    without payment."""
+    without payment. `video_id`, when the caller has one, tags the resulting
+    CreditTransaction so a failed video's total real spend can be refunded
+    later (see refund_video_credits) — every credit actually spent on it,
+    not just the flat base render fee."""
     if not user_id:
         return False
     try:
@@ -549,7 +597,7 @@ def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, opera
             if not user:
                 return False
             has_own_key = bool(user.izivoice_api_key_encrypted)
-            return debit_izivoice_usage(db, user, izivoice_credits, operation, has_own_key)
+            return debit_izivoice_usage(db, user, izivoice_credits, operation, has_own_key, video_id=video_id)
         finally:
             db.close()
     except Exception as exc:
@@ -615,7 +663,7 @@ def debit_script_generation_cost(db: Session, user: User, cost_usd: float, video
     return ok
 
 
-def debit_izivoice_usage(db: Session, user: User, izivoice_credits: float, operation: str, user_has_own_key: bool = False) -> bool:
+def debit_izivoice_usage(db: Session, user: User, izivoice_credits: float, operation: str, user_has_own_key: bool = False, video_id: Optional[str] = None) -> bool:
     """Central metering point for every Izivoice-billed pipeline call (TTS,
     STT, AI image generation, music). Free when the creator connected their
     own Izivoice key (see izivoice_key_for_user) — they're already paying
@@ -627,4 +675,4 @@ def debit_izivoice_usage(db: Session, user: User, izivoice_credits: float, opera
     if user_has_own_key:
         return True
     charge = ceil(izivoice_credits * CREDIT_MARKUP_MULTIPLIER)
-    return debit_credits(db, user, charge, f"{operation} ({izivoice_credits:.0f} cr. Izivoice x{CREDIT_MARKUP_MULTIPLIER})")
+    return debit_credits(db, user, charge, f"{operation} ({izivoice_credits:.0f} cr. Izivoice x{CREDIT_MARKUP_MULTIPLIER})", video_id=video_id)
