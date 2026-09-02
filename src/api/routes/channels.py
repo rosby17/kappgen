@@ -1457,6 +1457,7 @@ def _analyze_thumbnail_style_background(channel_id: str, all_paths: List[str]) -
             "text_side": profile.get("text_side") or previous.get("text_side"),
             "analysis_summary": profile.get("analysis_summary"),
             "character_anchor": profile.get("character_anchor") or previous.get("character_anchor"),
+            "typography_prompt": profile.get("typography_style") or previous.get("typography_prompt"),
             "analyzing": False,
             "analysis_error": None,
         })
@@ -1698,12 +1699,24 @@ def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = 
             media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(abs_path.suffix.lower())
             if abs_path.exists() and media_type:
                 images.append((abs_path.read_bytes(), media_type))
-        from src.pipeline.vision import analyze_thumbnail_reference_images
+        from src.pipeline.vision import analyze_thumbnail_reference_profile
         try:
-            style_prompt = analyze_thumbnail_reference_images(images)
+            profile = analyze_thumbnail_reference_profile(images)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Analyse des images impossible : {e}")
-        channel.thumbnail_style = {"reference_image_paths": remaining_paths, "style_prompt": style_prompt}
+        # Keep the rest of the identity (typography, character, text side) —
+        # removing one reference re-derives the look, it doesn't reset the
+        # channel's thumbnail identity to a bare style string.
+        rebuilt = dict(channel.thumbnail_style or {})
+        rebuilt.update({
+            "reference_image_paths": remaining_paths,
+            "style_prompt": profile["style_prompt"],
+            "text_side": profile.get("text_side") or rebuilt.get("text_side"),
+            "character_anchor": profile.get("character_anchor") or rebuilt.get("character_anchor"),
+            "typography_prompt": profile.get("typography_style") or rebuilt.get("typography_prompt"),
+            "analysis_summary": profile.get("analysis_summary") or rebuilt.get("analysis_summary"),
+        })
+        channel.thumbnail_style = rebuilt
         image_style = dict(channel.image_style or {})
         image_style["generate_thumbnail_with_ai"] = True
         channel.image_style = image_style

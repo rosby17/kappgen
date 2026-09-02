@@ -32,15 +32,32 @@ MULTI_STYLE_ANALYSIS_INSTRUCTION = (
 
 
 THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION = (
-    "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
-    "Look at this reference thumbnail and write a single, dense image-generation prompt "
-    "(comma-separated descriptors, no full sentences, no preamble) that captures its "
-    "reusable visual identity: subject type/archetype (e.g. elderly bearded man in a robe, "
-    "praying), framing/composition, art style/medium, color palette, lighting, mood, and "
-    "level of detail. Unlike a generic style prompt, DO include the recurring subject "
-    "archetype if the thumbnail centers on a consistent character type — that's part of "
-    "this channel's identity. Do not mention any on-image text/typography, since that is "
-    "added separately. Reply with only the prompt text."
+    "You are a senior YouTube thumbnail art director. This reference thumbnail defines a "
+    "channel's visual identity, and your brief will be reused to generate EVERY future "
+    "thumbnail, on completely different topics. So you must separate what repeats from what "
+    "belongs to this one video.\n"
+    "REUSABLE — describe precisely: art medium and rendering technique (illustration / photo / "
+    "3D, line work, shading, texture, edge treatment), the exact palette with its dominant and "
+    "accent colours, the contrast level and whether it reads soft or harsh, lighting direction "
+    "and warmth, overall finish, the framing grid (which side holds the subject, which side "
+    "stays clear for the headline), how much of the frame height the subject occupies, mood.\n"
+    "NEVER PUT IN THE STYLE BRIEF — these belong to this one video and must change every time: "
+    "the action or gesture, the objects being held, the furniture and room, decorative "
+    "icons / badges / speech bubbles / thought bubbles, the background scenery, the specific "
+    "facial expression. A brief that mentions any of them would force this exact scene onto "
+    "every future topic, which is the failure mode you are here to prevent.\n"
+    "Return ONLY valid JSON: {\"style_prompt\": \"dense comma-separated reusable style brief — "
+    "medium, palette, contrast, lighting, finish, grid, subject scale, mood; no scene, no props, "
+    "no action, no icons\", \"character_anchor\": \"the recurring person's stable identity only "
+    "(approximate age, hair, skin, glasses, clothing family), or empty string when there is no "
+    "recurring person\", \"typography_style\": \"how the headline itself is treated: case, weight, "
+    "condensed or wide, whether words sit inside solid boxes/bands or directly on the art, outline and "
+    "shadow treatment, how accent words are highlighted, placement, and — mandatory — the EXPLICIT colours: "
+    "the main word colour and every accent/highlight colour given by name AND approximate hex (e.g. deep "
+    "espresso brown #3B2A20 for main words, vivid brick red #C4442A for accent words), plus the fill colour "
+    "of any box or band behind the text\", "
+    "\"text_side\": \"left or right — the side kept clear for the headline\", "
+    "\"analysis_summary\": \"one concise sentence naming the repeatable visual grammar\"}"
 )
 
 
@@ -53,9 +70,17 @@ THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
     "clear for copy. Infer the majority pattern across ALL images; never describe one screenshot "
     "in isolation and never copy a logo, creator identity, or exact composition. The resulting "
     "style must stay reusable while poses, actions, supporting characters and metaphors change "
-    "to match each new video's idea. Do not include typography in the generated artwork. "
+    "to match each new video's idea. Never write a specific held object, room, furniture, "
+    "decorative icon, speech/thought bubble or gesture into the style brief: those belong to one "
+    "video and would force that same scene onto every future topic. "
     "Return ONLY valid JSON: {\"style_prompt\": \"dense comma-separated generation brief with "
-    "all repeatable visual rules and explicit subject scale/grid\", \"text_side\": \"left or right\", "
+    "all repeatable visual rules and explicit subject scale/grid; no scene, no props, no action, no icons\", "
+    "\"text_side\": \"left or right\", "
+    "\"typography_style\": \"how the headline is treated across the set: case, weight, condensed or wide, "
+    "whether words sit inside solid boxes/bands or directly on the art, outline and shadow treatment, "
+    "how accent words are highlighted, placement, and — mandatory — the EXPLICIT colours: the main word colour "
+    "and every accent/highlight colour given by name AND approximate hex, plus the fill colour of any box or "
+    "band behind the text\", "
     "\"analysis_summary\": \"one concise sentence explaining the shared visual grammar\", "
     "\"character_anchor\": \"only when the same main character clearly recurs: identify a recognizable public figure or describe a private character from the supplied portrait with age, face, hair, clothing and era; empty when recurrence is not reliable\"}."
 )
@@ -285,39 +310,43 @@ def analyze_thumbnail_reference_images(images: list) -> str:
     images: list of (image_bytes, media_type) tuples.
     Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
     """
-    instruction = THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION
-    raw = _run_with_fallback([
-        ("anthropic", lambda: _analyze_many_with_anthropic(images, instruction)),
-        ("fal.ai", lambda: _analyze_many_with_fal(images, instruction)),
-        ("openai", lambda: _analyze_many_with_openai(images, instruction)),
-    ])
-    if len(images) == 1:
-        return raw
-    # Keep the historical string return type for callers while accepting the
-    # richer moodboard response. New callers use the profile helper below.
-    try:
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-        return str(json.loads(cleaned)["style_prompt"]).strip()
-    except (ValueError, KeyError, TypeError):
-        return raw
+    return analyze_thumbnail_reference_profile(images)["style_prompt"]
+
+
+def _thumbnail_analysis_instruction(images: list) -> str:
+    return THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION
 
 
 def analyze_thumbnail_reference_profile(images: list) -> dict:
-    """Return both the reusable visual brief and its typography-safe grid."""
-    if len(images) < 2:
-        return {"style_prompt": analyze_thumbnail_reference_images(images), "text_side": None, "analysis_summary": None}
+    """Return the reusable visual brief plus everything that has to stay
+    separate from it: the recurring character's identity, the channel's
+    headline typography, and which side stays clear for that headline.
+
+    Both the single-reference and the moodboard instructions now answer in the
+    same JSON shape. A single reference used to come back as one free-form
+    paragraph, and that paragraph inevitably described the reference's own
+    scene — the held phone, the couch, the little chat bubbles — which then
+    got replayed as the background brief of every later thumbnail whatever the
+    topic was, and left typography undefined so the generator reinvented it
+    each time."""
     raw = _run_with_fallback([
-        ("anthropic", lambda: _analyze_many_with_anthropic(images, THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION)),
-        ("fal.ai", lambda: _analyze_many_with_fal(images, THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION)),
-        ("openai", lambda: _analyze_many_with_openai(images, THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION)),
+        ("anthropic", lambda: _analyze_many_with_anthropic(images, _thumbnail_analysis_instruction(images))),
+        ("fal.ai", lambda: _analyze_many_with_fal(images, _thumbnail_analysis_instruction(images))),
+        ("openai", lambda: _analyze_many_with_openai(images, _thumbnail_analysis_instruction(images))),
     ])
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-    data = json.loads(cleaned)
+    try:
+        data = json.loads(cleaned)
+    except ValueError:
+        # A model that ignored the JSON contract still gives usable art
+        # direction — keep it rather than failing the whole upload.
+        return {"style_prompt": raw.strip(), "text_side": None, "character_anchor": "", "typography_style": "", "analysis_summary": None}
     if not str(data.get("style_prompt") or "").strip():
-        raise ValueError("Moodboard analysis returned no style_prompt")
+        raise ValueError("Reference analysis returned no style_prompt")
     if data.get("text_side") not in ("left", "right"):
         data["text_side"] = None
     data["character_anchor"] = str(data.get("character_anchor") or "").strip()[:600]
+    data["typography_style"] = str(data.get("typography_style") or "").strip()[:600]
     return data
 
 

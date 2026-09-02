@@ -259,25 +259,77 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
     style_prompt = (thumbnail_style.get("style_prompt") or "").strip() or (
         (image_style or {}).get("style_prompt") or ""
     ).strip()
+    typography = (thumbnail_style.get("typography_prompt") or "").strip()
     text_side = thumbnail_style.get("text_side")
     if text_side not in ("left", "right"):
         text_side = "left"
     subject_side = "right" if text_side == "left" else "left"
     character_anchor = (thumbnail_style.get("character_anchor") or "").strip()
     character_clause = (f"RECURRING CHARACTER ANCHOR: {character_anchor}. Preserve this same recognizable character identity in every thumbnail; change only pose, gesture, expression and action to fit the new topic. " if character_anchor else "Preserve any recurring character identity visible in the supplied references across thumbnails. ")
+
+    # A creator's uploaded reference IS the art direction — it must not be
+    # argued with. The generic "cinematic / deep blacks / sculpted key light /
+    # premium editorial grading" boilerplate below used to be appended on top
+    # of it unconditionally, which is exactly how a soft, flat, warm pastel
+    # reference came back as a dark, high-contrast, heavily textured painting:
+    # the boilerplate contradicted the reference and the generator split the
+    # difference. It is now only the floor for channels that never supplied
+    # one.
+    if style_prompt:
+        art_clause = (
+            f"ART DIRECTION — reproduce this channel's established style exactly: {style_prompt}. "
+            f"Match its medium, line work, shading, palette, contrast level, lighting and finish precisely. "
+            f"Do not add cinematic colour grading, deep blacks, heavy grain or dramatic chiaroscuro unless that "
+            f"style brief already calls for them. "
+        )
+        finish_clause = "Keep the finish faithful to the style brief above, crisp and readable at phone size. "
+    else:
+        art_clause = (
+            "ART DIRECTION: editorial cinematic poster, rich tactile detail, bold controlled palette. "
+        )
+        finish_clause = (
+            "LIGHT AND FINISH: sculpted key light on the face, deep blacks, luminous highlights, rich texture, "
+            "crisp subject separation, premium editorial poster finish, intentional color grading, sharp important "
+            "details, nuanced background storytelling, no bland stock-photo staging. "
+        )
+
+    # The reference's own scene is the single biggest source of repetition:
+    # its held objects, room and decorative bubbles get treated as part of the
+    # channel identity and reappear on every unrelated topic. Say plainly that
+    # only the character and the style carry over.
+    scene_clause = (
+        f"SCENE — must be newly invented for THIS headline: build the setting, action, gesture and props around "
+        f"the idea “{text}”. Only the character identity and the art direction carry over between thumbnails; "
+        f"the environment, held objects, decorative icons, speech or thought bubbles and background are NOT part "
+        f"of the channel's identity and must not be reused from the references. "
+    )
+
+    if typography:
+        type_clause = (
+            f"Add the exact headline “{text}” in the reserved {text_side} area, reproducing this channel's "
+            f"established headline treatment exactly: {typography}. The headline colours are mandatory: use those "
+            f"exact text colours, accent-word colours and box/band fill colours — never substitute your own "
+            f"palette, never default to plain white or black text, never invert the contrast. Perfectly spelled, "
+            f"every word fully visible inside the frame, nothing cropped or cut off. "
+        )
+    else:
+        type_clause = (
+            f"Add the exact headline “{text}” in the reserved {text_side} area, large bold condensed uppercase "
+            f"editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene, "
+            f"every word fully visible inside the frame, nothing cropped or cut off. "
+        )
+
     return (
         f"Premium YouTube thumbnail key art for the idea: {text}. Niche: {niche or 'general'}. "
-        f"Art direction: {style_prompt or 'editorial cinematic poster, rich tactile detail, bold controlled palette'}. {character_clause}"
+        f"{art_clause}{character_clause}{scene_clause}"
         f"COMPOSITION: reserve the {text_side} 42 percent for a readable headline while keeping it visually alive with controlled texture, "
         f"light and atmospheric detail; place the main subject on the {subject_side}, occupying 55 to 75 percent of the full frame height, "
         f"tight close-up or dramatic medium close-up, face/eyes or the key object clearly readable at phone size, expressive gesture, "
         f"strong silhouette, foreground detail, absolutely no tiny distant figure, no full-body silhouette, no empty corridor, no anonymous landscape. "
         f"VISUAL STORY: translate the idea into one immediate, emotionally legible metaphor; add 3 to 5 topic-specific secondary elements or characters, "
         f"foreground props, tactile costume/skin/material detail and a layered environment that reward a second look, while keeping one unmistakable focal point. "
-        f"LIGHT AND FINISH: sculpted key light on the face, deep blacks, luminous highlights, rich texture, crisp subject separation, "
-        f"premium editorial poster finish, intentional color grading, sharp important details, nuanced background storytelling, no bland stock-photo staging. "
-        f"16:9 landscape, edge-to-edge artwork. [[ALLOW_TEXT]] Add the exact headline “{text}” in the reserved {text_side} area, "
-        f"large bold condensed uppercase editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene, "
+        f"{finish_clause}"
+        f"16:9 landscape, edge-to-edge artwork. [[ALLOW_TEXT]] {type_clause}"
         f"no other words, no logo, no watermark."
     )
 
