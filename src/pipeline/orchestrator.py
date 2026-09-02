@@ -236,6 +236,21 @@ def run_video_pipeline(
                         if clip_path:
                             visual_paths[scene_index] = clip_path
                             visual_types[scene_index] = "video"
+                    # Scenes footage didn't cover, and that have no image
+                    # either (AI tier off/out of quota, empty libraries),
+                    # take a real stock photograph rather than the synthetic
+                    # placeholder they'd otherwise fall back to.
+                    from src.pipeline.stock_video import fetch_stock_photo
+                    photo_count = 0
+                    for position, scene_index in enumerate(open_indices):
+                        if visual_types[scene_index] == "video" or visual_paths[scene_index]:
+                            continue
+                        photo_path = fetch_stock_photo(queries[position])
+                        if photo_path:
+                            visual_paths[scene_index] = photo_path
+                            photo_count += 1
+                    if photo_count:
+                        logger.info(f"Stock photos: {photo_count} scene(s) filled from Pexels.")
                     if clips:
                         logger.info(f"Stock footage: {len(clips)} scene(s) filled from Pexels.")
                         # Pexels' API terms require crediting the platform and

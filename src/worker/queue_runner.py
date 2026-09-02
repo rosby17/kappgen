@@ -742,6 +742,13 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     default_description = (channel.youtube_default_description or "").strip()
     if default_description:
         meta["description"] = (meta.get("description") or "").strip() + "\n\n" + default_description
+    # Pexels' API terms require crediting the platform (and recommend
+    # crediting each contributor) wherever its free media is used — appended
+    # here so every published video carries real credits, not just a promise
+    # made on the API-key application form.
+    stock_credits = youtube_metadata.stock_credits_block(output_mp4.parent)
+    if stock_credits:
+        meta["description"] = (meta.get("description") or "").strip() + "\n\n" + stock_credits
     default_tags = list(channel.youtube_default_tags or [])
     meta["tags"] = list(dict.fromkeys([*(meta.get("tags") or []), *default_tags]))[:500]
     # Usually already sitting on disk — generated right after the render
