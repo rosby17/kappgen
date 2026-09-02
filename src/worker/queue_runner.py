@@ -1,5 +1,6 @@
 import shutil
 import json
+from concurrent.futures import ThreadPoolExecutor
 import signal
 import threading
 import time
@@ -154,6 +155,32 @@ def process_single_queued_video() -> bool:
 
         video_dir = STORAGE_PATH / "channels" / str(channel.id) / "videos" / str(video.id)
 
+        # Thumbnail art is independent of the assembled MP4: GPT Image 2 only
+        # needs the headline, niche and channel moodboard. Start it immediately
+        # so the expensive visual work overlaps the narration/editing render.
+        # The future is joined below just before the completed video is exposed.
+        thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thumbnail")
+        thumbnail_destination = video_dir / "thumbnail.jpg"
+        thumbnail_future = thumbnail_executor.submit(
+            youtube_metadata.generate_thumbnail,
+            video_dir / "__thumbnail_source__.mp4",
+            thumbnail_destination,
+            video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
+            channel,
+            video.id,
+        )
+
+        def await_parallel_thumbnail():
+            try:
+                result = thumbnail_future.result()
+                logger.info("Parallel GPT Image 2 thumbnail ready for video %s", video.id)
+                return result
+            except Exception as exc:
+                logger.warning("Parallel thumbnail failed for video %s: %s", video.id, exc)
+                return None
+            finally:
+                thumbnail_executor.shutdown(wait=False, cancel_futures=False)
+
         if video.is_reassembly:
             # Studio editor request — pending_edit says which lightweight edit
             # to run instead of the full pipeline. No pending_edit (or an
@@ -207,6 +234,7 @@ def process_single_queued_video() -> bool:
             db.commit()
             logger.info(f"Worker successfully reassembled video ID: {video.id}")
             try_ensure_sd_variant(output_mp4)
+            await_parallel_thumbnail()
             return True
 
         # Music Video channels (content_type == "music") skip the entire
@@ -257,12 +285,7 @@ def process_single_queued_video() -> bool:
             db.commit()
             logger.info(f"Worker successfully finished rendering music video ID: {video.id}")
 
-            try:
-                youtube_metadata.generate_thumbnail(
-                    output_mp4, output_mp4.with_name("thumbnail.jpg"), video.title or channel.name, channel=channel, video_id=video.id
-                )
-            except Exception as e:
-                logger.warning(f"Could not pre-generate thumbnail for music video {video.id}: {e}")
+            await_parallel_thumbnail()
 
             if channel.youtube_refresh_token:
                 if channel.publish_mode in ("auto", "scheduled"):
@@ -451,12 +474,7 @@ def process_single_queued_video() -> bool:
         except Exception as e:
             logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
-        try:
-            youtube_metadata.generate_thumbnail(
-                output_mp4, output_mp4.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel, video_id=video.id
-            )
-        except Exception as e:
-            logger.warning(f"Could not pre-generate thumbnail for video {video.id}: {e}")
+        await_parallel_thumbnail()
 
         # A Trust Score is part of the finished video, not something the
         # creator has to remember to request. Run this final, post-render
