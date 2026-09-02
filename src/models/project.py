@@ -38,7 +38,7 @@ class SubtitleStyle(BaseModel):
     opacity: float = 100                # 0-100
     rotation: int = 0                   # degrees
     x_offset: int = 0                   # px nudge at 1920 width
-    y_offset: int = 0                   # px nudge at 1080 height
+    y_offset: int = 140                 # 64% on the vertical position control
     box_color: str = "transparent"      # background rectangle color, or "transparent"
     box_padding: int = 10
     shadow: bool = False
