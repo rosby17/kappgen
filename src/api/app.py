@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI
 from fastapi.openapi.docs import get_redoc_html
 from fastapi.responses import HTMLResponse
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
@@ -147,12 +148,54 @@ app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
 app.include_router(auth.router)
 app.include_router(channels.router)
 app.include_router(videos.router)
-app.include_router(folders.router)
-app.include_router(api_keys.router)
+app.include_router(folders.router, include_in_schema=False)
+app.include_router(api_keys.router, include_in_schema=False)
 app.include_router(billing.router)
 # Admin operations remain available to the back-office, but are intentionally
 # excluded from the public OpenAPI contract and interactive documentation.
 app.include_router(admin.router, include_in_schema=False)
+
+# Public API contract: the application has many internal endpoints used by the
+# web console (voice catalogues, previews, editing helpers, diagnostics, etc.).
+# They remain available to the first-party app but are deliberately omitted
+# from the public documentation so the API exposes only stable integration
+# primitives, not our internal architecture.
+_PUBLIC_API_OPERATIONS = {
+    ("GET", "/api/channels"), ("POST", "/api/channels"),
+    ("GET", "/api/channels/{channel_id}"), ("PUT", "/api/channels/{channel_id}"),
+    ("POST", "/api/channels/{channel_id}/generate-now"),
+    ("GET", "/api/channels/{channel_id}/library-preview"),
+    ("POST", "/api/channels/{channel_id}/library-images"),
+    ("GET", "/api/channels/library/overview"),
+    ("GET", "/api/channels/{channel_id}/library/images"),
+    ("POST", "/api/channels/{channel_id}/broll"),
+    ("GET", "/api/channels/{channel_id}/broll"),
+    ("GET", "/api/channels/{channel_id}/youtube/auth-url"),
+    ("POST", "/api/channels/{channel_id}/youtube/disconnect"),
+    ("POST", "/api/videos"), ("GET", "/api/videos"),
+    ("GET", "/api/videos/{video_id}"), ("GET", "/api/videos/{video_id}/download"),
+    ("POST", "/api/videos/{video_id}/retry"),
+    ("GET", "/api/billing/plans"), ("GET", "/api/billing/subscription"),
+    ("GET", "/api/billing/credits"),
+}
+
+def _public_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, summary=app.summary,
+                         description=app.description, routes=app.routes,
+                         tags=app.openapi_tags, contact=app.contact,
+                         license_info=app.license_info, servers=app.servers)
+    schema["paths"] = {
+        path: {method: operation for method, operation in methods.items()
+               if (method.upper(), path) in _PUBLIC_API_OPERATIONS}
+        for path, methods in schema["paths"].items()
+        if any((method.upper(), path) in _PUBLIC_API_OPERATIONS for method in methods)
+    }
+    app.openapi_schema = schema
+    return schema
+
+app.openapi = _public_openapi
 
 @app.on_event("startup")
 def on_startup():
