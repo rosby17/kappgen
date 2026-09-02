@@ -1242,25 +1242,42 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
 
 
 # --- Hugging Face free-tier image generation accounts ------------------------
-# Admin-managed pool of accounts for the free FLUX.1-schnell path (see
-# src/pipeline/images.py) — lets new accounts keep being added over time
-# without a redeploy, and shows which ones are currently working vs
-# quota-exhausted/invalid.
+# Admin-managed key pools for the image-generation providers (see
+# src/pipeline/images.py's _provider_accounts_from_db/_generate_with_key_pool)
+# — lets new keys keep being added over time without a redeploy, and shows
+# which ones are currently working vs quota-exhausted/invalid. Originally
+# Hugging-Face-only ("hf-accounts"); generalized to fal/Izivoice too via the
+# `provider` column, kept under the old URL prefix since the frontend and
+# any saved links already point at it.
+
+IMAGE_KEY_PROVIDERS = ["huggingface", "fal", "izivoice"]
+
 
 @router.get("/hf-accounts")
-def list_hf_accounts(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    accounts = db.query(HuggingFaceAccount).order_by(HuggingFaceAccount.created_at.asc()).all()
+def list_hf_accounts(provider: str = "huggingface", admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    if provider not in IMAGE_KEY_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {provider}")
+    accounts = (
+        db.query(HuggingFaceAccount)
+        .filter(HuggingFaceAccount.provider == provider)
+        .order_by(HuggingFaceAccount.created_at.asc())
+        .all()
+    )
     return [a.to_dict() for a in accounts]
 
 
 class HfAccountPayload(BaseModel):
     token: str
     label: Optional[str] = None
+    provider: str = "huggingface"
 
 
 def _test_hf_token(token: str) -> tuple[str, Optional[str]]:
-    """Fires one real (cheap) generation request to classify the token as
-    active/quota_exhausted/invalid. Returns (status, error_message)."""
+    """Fires one real (cheap, free-tier) generation request to classify the
+    token as active/quota_exhausted/invalid. Only used for Hugging Face —
+    fal.ai and Izivoice have no free test call, so their keys are trusted at
+    face value on add and their real status instead comes from actual usage
+    (see _mark_provider_account, called after every real generation)."""
     import httpx
     try:
         resp = httpx.post(
@@ -1282,14 +1299,20 @@ def _test_hf_token(token: str) -> tuple[str, Optional[str]]:
 
 @router.post("/hf-accounts")
 def add_hf_account(payload: HfAccountPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    if payload.provider not in IMAGE_KEY_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {payload.provider}")
     token = payload.token.strip()
     if not token:
         raise HTTPException(status_code=400, detail="Le token ne peut pas être vide.")
     if db.query(HuggingFaceAccount).filter(HuggingFaceAccount.token == token).first():
         raise HTTPException(status_code=400, detail="Ce token est déjà enregistré.")
 
-    status, error = _test_hf_token(token)
+    if payload.provider == "huggingface":
+        status, error = _test_hf_token(token)
+    else:
+        status, error = "active", None
     account = HuggingFaceAccount(
+        provider=payload.provider,
         token=token,
         label=(payload.label or "").strip() or None,
         status=status,
@@ -1307,9 +1330,10 @@ def check_hf_account(account_id: str, admin: User = Depends(get_current_admin), 
     account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
-    status, error = _test_hf_token(account.token)
-    account.status = status
-    account.last_error = error
+    if account.provider == "huggingface":
+        status, error = _test_hf_token(account.token)
+        account.status = status
+        account.last_error = error
     account.last_checked_at = datetime.utcnow()
     db.commit()
     db.refresh(account)

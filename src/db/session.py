@@ -225,6 +225,13 @@ def init_db():
                     logger.info(f"Migrating folders table: adding {col_name} column.")
                     conn.execute(text(ddl))
 
+    if "huggingface_accounts" in inspector.get_table_names():
+        existing_hf_columns = {col["name"] for col in inspector.get_columns("huggingface_accounts")}
+        if "provider" not in existing_hf_columns:
+            logger.info("Migrating huggingface_accounts table: adding provider column.")
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE huggingface_accounts ADD COLUMN provider VARCHAR(20) DEFAULT 'huggingface' NOT NULL"))
+
     if "plans" in inspector.get_table_names():
         existing_plan_columns = {col["name"] for col in inspector.get_columns("plans")}
         plan_migrations = {

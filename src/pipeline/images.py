@@ -37,8 +37,8 @@ TASK_POLL_TIMEOUT_SECONDS = 90  # fail fast to a fallback image rather than stal
 IZIVOICE_IMAGE_MODEL_ID = "gpt-image-2"
 
 
-def _izivoice_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
+def _izivoice_headers(api_key: Optional[str] = None) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {api_key or IZIVOICE_API_KEY}"}
 
 
 def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
@@ -210,14 +210,14 @@ def _persist_generated_images_to_channel_library(
         db.close()
 
 
-def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS) -> Dict[str, Any]:
+def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Polls GET /api/tasks/{task_id} until status is 'done' or 'error'/'failed' (or timeout).
     Transient 5xx responses are retried rather than treated as a hard failure, since the
     underlying task may still be processing."""
     elapsed = 0.0
     while elapsed < timeout_seconds:
         try:
-            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(), timeout=30.0)
+            resp = client.get(f"{IZIVOICE_BASE_URL}/tasks/{task_id}", headers=_izivoice_headers(api_key), timeout=30.0)
             if resp.status_code >= 500:
                 logger.warning(f"Izivoice image poll for task {task_id} returned {resp.status_code}, retrying...")
                 time.sleep(TASK_POLL_INTERVAL_SECONDS)
@@ -240,7 +240,7 @@ def _poll_izivoice_task(task_id: str, client: httpx.Client, timeout_seconds: flo
     raise TimeoutError(f"Izivoice image task {task_id} did not complete within {timeout_seconds}s")
 
 
-def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> dict:
+def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None, api_key: Optional[str] = None) -> dict:
     model_parameters = json.dumps({"aspect_ratio": "16:9", "resolution": "2K"})
     fields = {
         "prompt": (None, text_free_image_prompt(prompt)),
@@ -265,7 +265,7 @@ def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_ima
     try:
         resp = client.post(
             f"{IZIVOICE_BASE_URL}/images/generate",
-            headers=_izivoice_headers(),
+            headers=_izivoice_headers(api_key),
             files=parts,
             timeout=30.0
         )
@@ -276,7 +276,7 @@ def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_ima
     return resp.json()
 
 
-def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll_timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS, reference_image_paths: Optional[List[Path]] = None) -> Path:
+def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll_timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS, reference_image_paths: Optional[List[Path]] = None, api_key: Optional[str] = None) -> Path:
     """Generates a single 16:9 image via Izivoice's private image API (task-based) and saves it to output_path.
 
     When reference_image_paths is given, attempts style/character-conditioned
@@ -285,17 +285,17 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll
     than failing the whole image — the caller's own broader failure fallback
     (e.g. a video frame grab for thumbnails) is reserved for when both fail."""
     try:
-        data = _submit_izivoice_image_task(prompt, client, reference_image_paths)
+        data = _submit_izivoice_image_task(prompt, client, reference_image_paths, api_key=api_key)
     except httpx.HTTPStatusError as exc:
         if reference_image_paths and exc.response is not None and exc.response.status_code < 500:
             logger.warning(f"Izivoice rejected reference-image-conditioned request ({exc.response.status_code}), retrying with text-only prompt: {exc}")
-            data = _submit_izivoice_image_task(prompt, client, reference_image_paths=None)
+            data = _submit_izivoice_image_task(prompt, client, reference_image_paths=None, api_key=api_key)
         else:
             raise
     if not data.get("success") or not data.get("task_id"):
         raise ValueError(f"Unexpected Izivoice generate-image response: {data}")
 
-    task = _poll_izivoice_task(data["task_id"], client, timeout_seconds=poll_timeout_seconds)
+    task = _poll_izivoice_task(data["task_id"], client, timeout_seconds=poll_timeout_seconds, api_key=api_key)
     result_images = (task.get("metadata") or {}).get("result_images") or []
     if not result_images:
         raise ValueError(f"Izivoice image task {data['task_id']} completed with no result_images: {task}")
@@ -319,12 +319,13 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll
     return output_path
 
 
-def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None) -> Path:
+def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None, api_key: Optional[str] = None) -> Path:
     """Generates a thumbnail via fal.ai's hosted OpenAI gpt-image-2 — reference
     images are passed as real conditioning inputs (image_urls, data URIs),
     not just a text description, for actual visual resemblance to the
     creator's uploaded style references."""
-    if not FAL_API_KEY:
+    api_key = api_key or FAL_API_KEY
+    if not api_key:
         raise RuntimeError("FAL_API_KEY is not configured on the server.")
 
     if reference_image_paths:
@@ -342,7 +343,7 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
 
     resp = client.post(
         f"https://fal.run/{endpoint}",
-        headers={"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Key {api_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=120.0,
     )
@@ -359,20 +360,22 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
     return output_path
 
 
-def _hf_accounts_from_db() -> List[Any]:
-    """Admin-managed pool (src/api/routes/admin.py's hf-accounts routes) —
-    ordered by last_used_at ascending (nulls first) so load spreads evenly
-    across accounts instead of hammering whichever sorts first. Falls back to
-    the static HUGGINGFACE_API_KEYS env list (wrapped as plain dicts, no id)
-    only if the table is empty, so an existing single-env-var deployment
-    keeps working before anyone's added an account via the admin UI."""
+def _provider_accounts_from_db(provider: str, env_fallback_keys: Optional[List[str]] = None) -> List[Any]:
+    """Admin-managed key pool for one image-generation provider
+    (src/api/routes/admin.py's image-provider-keys routes) — "huggingface",
+    "fal", or "izivoice". Ordered by last_used_at ascending (nulls first) so
+    load spreads evenly across keys instead of hammering whichever sorts
+    first. Falls back to `env_fallback_keys` (wrapped as plain dicts, no id)
+    only if the pool is empty for this provider, so an existing
+    single-env-var deployment keeps working before anyone's added a key via
+    the admin UI."""
     from src.db.session import SessionLocal
     from src.db.models import HuggingFaceAccount
     db = SessionLocal()
     try:
         rows = (
             db.query(HuggingFaceAccount)
-            .filter(HuggingFaceAccount.is_enabled == True)  # noqa: E712
+            .filter(HuggingFaceAccount.provider == provider, HuggingFaceAccount.is_enabled == True)  # noqa: E712
             .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst())
             .all()
         )
@@ -380,10 +383,10 @@ def _hf_accounts_from_db() -> List[Any]:
             return [{"id": r.id, "token": r.token} for r in rows]
     finally:
         db.close()
-    return [{"id": None, "token": key} for key in HUGGINGFACE_API_KEYS]
+    return [{"id": None, "token": key} for key in (env_fallback_keys or []) if key]
 
 
-def _mark_hf_account(account_id: Optional[str], status: str, error: Optional[str] = None) -> None:
+def _mark_provider_account(account_id: Optional[str], status: str, error: Optional[str] = None) -> None:
     """Best-effort status update after a real attempt — never allowed to
     fail the actual generation it's tracking (same fail-open convention as
     cost_tracking.log_usage)."""
@@ -422,7 +425,7 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
     Tries every enabled account in the admin-managed pool (least-recently-used
     first) so one account being quota-capped (429) doesn't block the others
     still having free credit left."""
-    accounts = _hf_accounts_from_db()
+    accounts = _provider_accounts_from_db("huggingface", HUGGINGFACE_API_KEYS)
     if not accounts:
         raise RuntimeError("No Hugging Face account configured (add one in the admin panel, or set HUGGINGFACE_API_KEYS).")
 
@@ -443,22 +446,55 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(base64.b64decode(b64))
             log_usage("huggingface_image", operation, 1, "images", 0.0, meta={"model": "black-forest-labs/FLUX.1-schnell (nscale, free tier)", "hf_account_id": account["id"]})
-            _mark_hf_account(account["id"], "active")
+            _mark_provider_account(account["id"], "active")
             return output_path
         except httpx.HTTPStatusError as exc:
             last_exc = exc
             if exc.response is not None and exc.response.status_code in (401, 402, 429):
                 logger.warning(f"Hugging Face account {account['id'] or '(env)'} exhausted/rejected ({exc.response.status_code}), trying next account...")
                 status = "invalid" if exc.response.status_code == 401 else "quota_exhausted"
-                _mark_hf_account(account["id"], status, str(exc)[:300])
+                _mark_provider_account(account["id"], status, str(exc)[:300])
                 continue
-            _mark_hf_account(account["id"], "invalid", str(exc)[:300])
+            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
             raise
         except Exception as exc:
             last_exc = exc
-            _mark_hf_account(account["id"], "invalid", str(exc)[:300])
+            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
             continue
     raise RuntimeError(f"All {len(accounts)} Hugging Face account(s) failed. Last error: {last_exc}")
+
+
+def _generate_with_key_pool(provider: str, env_fallback_key: str, call: "callable") -> Path:
+    """Rotates through the admin-managed key pool for a paid provider (fal,
+    Izivoice), same least-recently-used/mark-on-failure pattern as Hugging
+    Face above — one exhausted/invalid key doesn't stall generation as long
+    as another one in the pool still works. `call(api_key)` performs the
+    actual request and must raise on failure (an httpx.HTTPStatusError with
+    a 401/402/429 marks the key as exhausted rather than invalid)."""
+    accounts = _provider_accounts_from_db(provider, [env_fallback_key] if env_fallback_key else [])
+    if not accounts:
+        raise RuntimeError(f"No {provider} API key configured (add one in the admin panel, or set the env var).")
+
+    last_exc: Optional[Exception] = None
+    for account in accounts:
+        try:
+            result = call(account["token"])
+            _mark_provider_account(account["id"], "active")
+            return result
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+            if exc.response is not None and exc.response.status_code in (401, 402, 429):
+                logger.warning(f"{provider} key {account['id'] or '(env)'} exhausted/rejected ({exc.response.status_code}), trying next key...")
+                status = "invalid" if exc.response.status_code == 401 else "quota_exhausted"
+                _mark_provider_account(account["id"], status, str(exc)[:300])
+                continue
+            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
+            raise
+        except Exception as exc:
+            last_exc = exc
+            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
+            continue
+    raise RuntimeError(f"All {len(accounts)} {provider} key(s) failed. Last error: {last_exc}")
 
 
 def generate_thumbnail_image(
@@ -485,8 +521,8 @@ def generate_thumbnail_image(
     order = [p for p in (provider_order or ["huggingface"]) if not (p == "huggingface" and reference_image_paths)]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
-        "fal": lambda: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths),
-        "izivoice": lambda: generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths),
+        "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),
+        "izivoice": lambda: _generate_with_key_pool("izivoice", IZIVOICE_API_KEY, lambda key: generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths, api_key=key)),
     }
     labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice"}
     last_exc: Optional[Exception] = None

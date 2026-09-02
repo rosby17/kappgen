@@ -732,14 +732,22 @@ class AppSetting(Base):
 
 
 class HuggingFaceAccount(Base):
-    """One free-tier Hugging Face account's API token, for the free
-    FLUX.1-schnell image generation path (src/pipeline/images.py) tried
-    before any paid provider. Admin-managed (add/remove/see live status) so
-    new accounts' small monthly free quota can keep being added over time
-    without a redeploy — see src/api/routes/admin.py's hf-accounts routes."""
+    """A pool of API keys for image-generation providers (Hugging Face,
+    fal.ai, Izivoice), rotated through so one account/key running dry
+    (quota, credits) doesn't stall generation — see the `provider` column
+    and src/pipeline/images.py's provider-generic rotation helper. Table/
+    class names predate the fal/Izivoice generalization (originally
+    Hugging-Face-only); kept as-is rather than a risky rename on a table
+    that already holds production data. Admin-managed (add/remove/see live
+    status per provider) so new keys can be added over time without a
+    redeploy — see src/api/routes/admin.py's image-provider-keys routes."""
     __tablename__ = "huggingface_accounts"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # "huggingface" | "fal" | "izivoice" — which image-generation provider
+    # this key belongs to. Defaults to "huggingface" for rows created before
+    # this column existed.
+    provider = Column(String(20), nullable=False, default="huggingface")
     token = Column(String(255), nullable=False, unique=True)
     label = Column(String(255), nullable=True)
     # "active" (last use succeeded or never tried), "quota_exhausted" (401/402/429
@@ -756,6 +764,7 @@ class HuggingFaceAccount(Base):
     def to_dict(self):
         return {
             "id": self.id,
+            "provider": self.provider,
             "token_preview": f"{self.token[:8]}...{self.token[-4:]}" if len(self.token) > 12 else self.token,
             "label": self.label,
             "status": self.status,
