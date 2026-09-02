@@ -19,6 +19,17 @@ STYLE_ANALYSIS_INSTRUCTION = (
     "reliably produces new images that share this reference's style AND subject world."
 )
 
+MULTI_STYLE_ANALYSIS_INSTRUCTION = (
+    "You are configuring an AI generator for a channel's video-scene visuals. "
+    "Study this set of reference images as one moodboard. Return one dense, reusable "
+    "image-generation prompt (comma-separated descriptors, no preamble) that captures "
+    "the shared subject world, characters, settings, art direction, palette, lighting, "
+    "mood, composition and detail level. Infer the common pattern across the set rather "
+    "than describing individual images. These are B-roll and scene visuals: explicitly "
+    "require no words, captions, logos, typography, watermarks, UI or readable text in "
+    "the generated images. Reply with only the prompt text."
+)
+
 
 THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION = (
     "You are helping configure an AI image generator for YouTube thumbnail backgrounds. "
@@ -233,6 +244,22 @@ def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
         ("anthropic", lambda: _analyze_many_with_anthropic([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
         ("fal.ai", lambda: _analyze_many_with_fal([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
         ("openai", lambda: _analyze_many_with_openai([(image_bytes, media_type)], STYLE_ANALYSIS_INSTRUCTION)),
+    ])
+
+
+def analyze_reference_images(images: list) -> str:
+    """Synthesizes one style brief from a visual-reference moodboard.
+
+    Scene images deliberately differ from thumbnails: their generated output must
+    never contain title text or typography.
+    """
+    if not images:
+        raise ValueError("At least one reference image is required.")
+    instruction = STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else MULTI_STYLE_ANALYSIS_INSTRUCTION
+    return _run_with_fallback([
+        ("anthropic", lambda: _analyze_many_with_anthropic(images, instruction)),
+        ("fal.ai", lambda: _analyze_many_with_fal(images, instruction)),
+        ("openai", lambda: _analyze_many_with_openai(images, instruction)),
     ])
 
 

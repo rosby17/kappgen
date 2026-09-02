@@ -1387,18 +1387,24 @@ def delete_channel_music_track(channel_id: str, track_path: str, current_user: U
 ALLOWED_STYLE_REFERENCE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 @router.post("/analyze-style-image")
-async def analyze_style_image(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
-    """Analyzes a reference image and returns a reusable image-generation style prompt."""
-    ext = Path(file.filename or "").suffix.lower()
-    media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
-    if not media_type:
-        raise HTTPException(status_code=400, detail="Format d'image non supporté (png, jpg, webp).")
+async def analyze_style_image(file: Optional[UploadFile] = File(None), files: Optional[List[UploadFile]] = File(None), current_user: User = Depends(get_current_user)):
+    """Analyzes one or more visual references into a reusable, text-free scene style."""
+    candidates = list(files or []) or ([file] if file else [])
+    if not candidates:
+        raise HTTPException(status_code=400, detail="Ajoute au moins une image.")
+    images = []
+    for candidate in candidates:
+        ext = Path(candidate.filename or "").suffix.lower()
+        media_type = ALLOWED_STYLE_REFERENCE_EXTENSIONS.get(ext)
+        if not media_type:
+            raise HTTPException(status_code=400, detail=f"Format d'image non supporté pour {candidate.filename} (png, jpg, webp).")
+        contents = await candidate.read()
+        validate_uploaded_image(contents, ext, candidate.filename or "")
+        images.append((contents, media_type))
 
-    contents = await file.read()
-    validate_uploaded_image(contents, ext, file.filename or "")
-    from src.pipeline.vision import analyze_reference_image
+    from src.pipeline.vision import analyze_reference_images
     try:
-        style_prompt = analyze_reference_image(contents, media_type)
+        style_prompt = analyze_reference_images(images)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Analyse de l'image impossible : {e}")
 
