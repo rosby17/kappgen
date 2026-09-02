@@ -93,7 +93,11 @@ def evaluate_script_compliance(script: str, title: str, channel, previous_videos
     def add(code, label, state, message, penalty=0):
         nonlocal score
         score -= penalty
-        checks.append({"code": code, "label": label, "state": state, "message": message})
+        # A global score is useful at a glance, but it must not hide the
+        # reason behind it. Every control therefore carries its own clear
+        # confidence score for the publication review UI.
+        confidence = 100 if state == "pass" else max(60, 100 - penalty) if state == "warning" else max(0, 60 - penalty)
+        checks.append({"code": code, "label": label, "state": state, "message": message, "score": confidence})
 
     if len(words) < 80:
         add("script_depth", "Substance", "fail", f"Scénario insuffisant ({len(words)} mots).", 45)
