@@ -178,10 +178,11 @@ def run_video_pipeline(
     )
     
     # Check if FFmpeg has libass 'subtitles' filter; if not, overlay text directly onto images
-    has_libass = check_ffmpeg_filter("subtitles")
+    has_libass = check_ffmpeg_filter("ass") or check_ffmpeg_filter("subtitles")
     subtitled_image_paths = []
+    subtitles_enabled = channel_config.get("subtitle_style", {}).get("enabled", True)
     
-    if not has_libass:
+    if subtitles_enabled and not has_libass:
         logger.info("Applying direct subtitle burn onto image frames...")
         words = transcript_info.get("words", [])
         chunk_size = 6
@@ -320,6 +321,7 @@ def run_video_pipeline(
         subtitle_style=channel_config.get("subtitle_style"),
         scene_energy=scene_energy,
         editing_profile=editing_profile,
+        subtitles_preburned=subtitles_enabled and not has_libass,
     )
     
     logger.info(f"Pipeline successfully rendered video to {final_output_path}")

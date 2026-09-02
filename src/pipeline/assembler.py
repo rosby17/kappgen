@@ -1,6 +1,7 @@
 import math
 import os
 import subprocess
+import re
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from src.utils.logger import logger
@@ -119,7 +120,24 @@ def _overlay_xy_expr(x_percent: float, y_percent: float) -> tuple:
 def check_ffmpeg_filter(filter_name: str) -> bool:
     """Checks if a specific filter is supported by system ffmpeg."""
     res = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True)
-    return filter_name in res.stdout
+    if res.returncode != 0:
+        logger.warning(f"Unable to inspect FFmpeg filters: {res.stderr.strip()}")
+        return False
+    # Match the filter-name column, not an arbitrary occurrence in a filter
+    # description. A substring match can report a false positive and make the
+    # pipeline skip its Pillow fallback even though FFmpeg cannot burn ASS.
+    return re.search(rf"^\s*[.A-Z|]{{3}}\s+{re.escape(filter_name)}\s", res.stdout, re.MULTILINE) is not None
+
+
+def _ass_has_dialogue(subtitle_ass_path: Path) -> bool:
+    """Return whether an ASS file contains at least one renderable event."""
+    try:
+        return any(
+            line.lstrip().startswith("Dialogue:")
+            for line in subtitle_ass_path.read_text(encoding="utf-8-sig").splitlines()
+        )
+    except (OSError, UnicodeError):
+        return False
 
 def assemble_final_video(
     clip_paths: List[Path],
@@ -132,6 +150,7 @@ def assemble_final_video(
     subtitle_style: Optional[Dict[str, Any]] = None,
     scene_energy: Optional[List[float]] = None,
     editing_profile: Optional[Dict[str, Any]] = None,
+    subtitles_preburned: bool = False,
 ) -> Path:
     """
     Joins motion clips (crossfading between them when durations are known so
@@ -270,13 +289,28 @@ def assemble_final_video(
     # creator who wants the watermark or logo painted *under* the subtitles
     # instead of over them.
     subtitles_enabled = sub_style.get("enabled", True)
-    has_subtitles_filter = subtitles_enabled and check_ffmpeg_filter("subtitles")
+    if subtitles_enabled and not subtitles_preburned and not _ass_has_dialogue(subtitle_ass_path):
+        raise RuntimeError(
+            f"Sous-titres activés, mais le fichier ASS est absent ou ne contient aucune ligne: {subtitle_ass_path}"
+        )
+
+    # `ass` is purpose-built for ASS input. Keep `subtitles` as a compatible
+    # fallback for FFmpeg builds exposing only that libass entry point.
+    subtitle_filter_name = None
+    if subtitles_enabled and not subtitles_preburned:
+        if check_ffmpeg_filter("ass"):
+            subtitle_filter_name = "ass"
+        elif check_ffmpeg_filter("subtitles"):
+            subtitle_filter_name = "subtitles"
     subtitles_filter_str = None
-    if has_subtitles_filter:
+    if subtitle_filter_name:
         ass_path_escaped = str(subtitle_ass_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-        subtitles_filter_str = f"subtitles=filename='{ass_path_escaped}'"
-    elif subtitles_enabled:
-        logger.info("FFmpeg missing libass 'subtitles' filter; continuing video assembly without direct ASS filter burn.")
+        subtitles_filter_str = f"{subtitle_filter_name}=filename='{ass_path_escaped}'"
+    elif subtitles_enabled and not subtitles_preburned:
+        raise RuntimeError(
+            "Sous-titres activés, mais ce serveur FFmpeg ne possède ni le filtre 'ass' ni le filtre 'subtitles' (libass). "
+            "Rendu interrompu pour éviter de produire silencieusement un MP4 sans sous-titres."
+        )
 
     effects_vf_string = ",".join(video_filters) if video_filters else None
 
