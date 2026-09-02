@@ -305,6 +305,17 @@ def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll
     img_resp.raise_for_status()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(img_resp.content)
+    # Keep the provider provenance beside the downloaded asset so a later
+    # regeneration never loses the Easy Voice/Izivoice task and source URL.
+    try:
+        from datetime import datetime, timezone
+        output_path.with_suffix('.meta.json').write_text(json.dumps({
+            "provider": "izivoice", "model": IZIVOICE_IMAGE_MODEL_ID,
+            "task_id": data.get("task_id"), "source_url": image_url,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not persist Izivoice thumbnail provenance: %s", exc)
     return output_path
 
 
