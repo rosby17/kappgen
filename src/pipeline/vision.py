@@ -46,7 +46,7 @@ THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
     "Return ONLY valid JSON: {\"style_prompt\": \"dense comma-separated generation brief with "
     "all repeatable visual rules and explicit subject scale/grid\", \"text_side\": \"left or right\", "
     "\"analysis_summary\": \"one concise sentence explaining the shared visual grammar\", "
-    "\"character_anchor\": \"recurring named character or subject with age, face, hair, clothing and era; empty if none\"}."
+    "\"character_anchor\": \"only when the same main character clearly recurs: identify a recognizable public figure or describe a private character from the supplied portrait with age, face, hair, clothing and era; empty when recurrence is not reliable\"}."
 )
 
 
