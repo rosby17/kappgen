@@ -856,12 +856,19 @@ def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     video.output_size_bytes = size_bytes
 
 
+TRASH_ROOT = STORAGE_PATH / "trash"
+
+
 def purge_old_render_output(video: Video) -> None:
-    """Deletes a finished video's rendered output + source assets, keeping
-    the DB record (with purged_at set) so history/stats stay intact. Source
-    assets are always local (only the final output.mp4 ever goes to R2 —
-    see _finalize_output_storage), so those still get rmtree'd unconditionally;
-    the output itself is deleted from whichever backend actually holds it."""
+    """Archives a finished video's rendered output + source assets instead
+    of deleting them outright, keeping the DB record (with purged_at set) so
+    history/stats stay intact. The local video directory is moved wholesale
+    into storage/trash/{channel_id}/{video_id}/ — recoverable server-side,
+    not destroyed — one shared trash folder for every user by default, no
+    opt-in needed. Only the R2-hosted output.mp4 (when storage_backend is
+    "r2") is still actually deleted from R2 itself, since that's a paid
+    object store with its own separate lifecycle, not local disk this trash
+    folder is meant to declutter."""
     if video.storage_backend == "r2" and video.output_path:
         from src.utils import r2_storage
         object_key = r2_storage.object_key_from_url(video.output_path)
@@ -871,7 +878,12 @@ def purge_old_render_output(video: Video) -> None:
     channel_id = video.channel_id
     video_dir = STORAGE_PATH / "channels" / str(channel_id) / "videos" / str(video.id)
     if video_dir.exists():
-        shutil.rmtree(video_dir, ignore_errors=True)
+        trash_dir = TRASH_ROOT / str(channel_id)
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        destination = trash_dir / str(video.id)
+        if destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+        shutil.move(str(video_dir), str(destination))
 
 
 def purge_edit_assets(video: Video) -> None:
