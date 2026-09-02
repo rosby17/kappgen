@@ -93,14 +93,26 @@ def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str
     the video-overlay logo (branding.logo_path) — so a creator who connects
     their real YouTube channel gets a logo on their videos immediately,
     instead of the corner staying blank until they separately upload one
-    manually. Never overwrites a logo that's already set (whether uploaded
-    by hand or filled in by an earlier sync), mutates channel.branding
-    in place; caller is responsible for the db.commit()."""
+    manually. Never overwrites a logo a creator uploaded by hand
+    (branding.logo_source == "manual", set by the direct /logo upload
+    endpoint) — but DOES refresh one this same function filled in earlier
+    (logo_source == "youtube_auto") whenever the YouTube avatar URL has
+    actually changed since. Without this, a channel connected before its
+    owner had gotten around to setting a real profile picture on YouTube
+    permanently kept whatever YouTube's own placeholder avatar looked like
+    at that moment (often a plain circle+initial), even after a real photo
+    was set later — this runs on every identity sync (every ~6h), so a
+    changed avatar catches up within one cycle instead of never.
+    Mutates channel.branding in place; caller is responsible for the
+    db.commit()."""
     if not thumbnail_url:
         return
     branding = dict(channel.branding or {})
     if branding.get("logo_path"):
-        return
+        if branding.get("logo_source") != "youtube_auto":
+            return  # a manually-uploaded logo is never touched
+        if branding.get("youtube_avatar_synced_url") == thumbnail_url:
+            return  # already synced to this exact avatar, nothing changed
     try:
         resp = httpx.get(thumbnail_url, timeout=15)
         resp.raise_for_status()
@@ -117,6 +129,8 @@ def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str
         old_logo.unlink(missing_ok=True)
     (channel_dir / f"logo{ext}").write_bytes(contents)
     branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
+    branding["logo_source"] = "youtube_auto"
+    branding["youtube_avatar_synced_url"] = thumbnail_url
     channel.branding = branding
 
 
@@ -1004,6 +1018,10 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), cur
 
     branding = dict(channel.branding or {})
     branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
+    # Marks this as a deliberate creator choice — _fill_logo_from_youtube_avatar
+    # never overwrites a "manual" logo, even when the YouTube avatar changes later.
+    branding["logo_source"] = "manual"
+    branding.pop("youtube_avatar_synced_url", None)
     channel.branding = branding
 
     db.commit()
