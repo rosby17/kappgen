@@ -42,7 +42,13 @@ def _check_anthropic():
         client.messages.count_tokens(model="claude-sonnet-5", messages=[{"role": "user", "content": "ping"}])
         return {"configured": True, "status": "ok", "detail": "Clé valide. Aucun solde consultable via l'API Anthropic."}
     except Exception as exc:
-        return {"configured": True, "status": "error", "detail": f"Clé invalide ou compte à problème : {exc}"}
+        import anthropic
+        # Anthropic reports "credit balance too low" as a plain 400
+        # (BadRequestError), not a dedicated status code — text match is the
+        # only reliable signal, alongside the real RateLimitError (429).
+        if isinstance(exc, anthropic.RateLimitError) or "credit balance" in str(exc).lower() or "insufficient" in str(exc).lower():
+            return {"configured": True, "status": "quota_exhausted", "detail": f"Clé valide mais solde/quota insuffisant : {exc}"}
+        return {"configured": True, "status": "error", "detail": f"Clé invalide, révoquée, ou service injoignable : {exc}"}
 
 
 def _check_openai():
@@ -50,12 +56,14 @@ def _check_openai():
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
     try:
         resp = httpx.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}, timeout=PROBE_TIMEOUT)
+        if resp.status_code in (402, 429):
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/quota insuffisant sur le compte OpenAI."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide. Le solde/quota nécessite une clé Admin d'organisation, différente de celle-ci."}
     except httpx.HTTPStatusError as exc:
-        return {"configured": True, "status": "error", "detail": f"Erreur OpenAI ({exc.response.status_code})."}
+        return {"configured": True, "status": "error", "detail": f"Erreur OpenAI ({exc.response.status_code}) — service injoignable ou en panne."}
     except Exception as exc:
         return {"configured": True, "status": "error", "detail": f"OpenAI injoignable : {exc}"}
 
@@ -70,14 +78,14 @@ def _check_deepseek():
             json={"model": "deepseek-v4-flash", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
             timeout=PROBE_TIMEOUT,
         )
-        if resp.status_code == 402:
-            return {"configured": True, "status": "error", "detail": "Clé valide mais solde insuffisant sur le compte DeepSeek — à recharger sur platform.deepseek.com."}
+        if resp.status_code in (402, 429):
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde insuffisant sur le compte DeepSeek — à recharger sur platform.deepseek.com."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide et compte crédité."}
     except httpx.HTTPStatusError as exc:
-        return {"configured": True, "status": "error", "detail": f"Erreur DeepSeek ({exc.response.status_code})."}
+        return {"configured": True, "status": "error", "detail": f"Erreur DeepSeek ({exc.response.status_code}) — service injoignable ou en panne."}
     except Exception as exc:
         return {"configured": True, "status": "error", "detail": f"DeepSeek injoignable : {exc}"}
 
@@ -92,12 +100,14 @@ def _check_groq():
             json={"model": "openai/gpt-oss-120b", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
             timeout=PROBE_TIMEOUT,
         )
+        if resp.status_code in (402, 429):
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais quota/solde insuffisant sur le compte Groq."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide. Gratuit."}
     except httpx.HTTPStatusError as exc:
-        return {"configured": True, "status": "error", "detail": f"Erreur Groq ({exc.response.status_code})."}
+        return {"configured": True, "status": "error", "detail": f"Erreur Groq ({exc.response.status_code}) — service injoignable ou en panne."}
     except Exception as exc:
         return {"configured": True, "status": "error", "detail": f"Groq injoignable : {exc}"}
 
@@ -113,8 +123,10 @@ def _check_izivoice():
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé partagée configurée (les utilisateurs peuvent connecter la leur individuellement)."}
     try:
         resp = httpx.get(f"{IZIVOICE_BASE_URL}/voices", headers={"Authorization": f"Bearer {IZIVOICE_API_KEY}"}, params={"page": 0, "page_size": 1}, timeout=PROBE_TIMEOUT)
+        if resp.status_code in (402, 429):
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/quota insuffisant sur le compte Izivoice."}
         if resp.status_code in (401, 403):
-            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide. Izivoice n'expose aucun solde consultable via l'API."}
     except Exception as exc:
