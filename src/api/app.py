@@ -1,5 +1,5 @@
 from fastapi import Depends, FastAPI
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.docs import get_redoc_html
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -107,15 +107,28 @@ KAPPGEN_FAVICON = "https://kappgen.com/assets/logo/favicon-32.png"
 
 @app.get("/docs", include_in_schema=False)
 def swagger_docs() -> HTMLResponse:
-    return get_swagger_ui_html(
-        openapi_url=app.openapi_url,
-        title="KappGen API · Documentation",
-        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
-        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
-        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
-        swagger_favicon_url=KAPPGEN_FAVICON,
-        swagger_ui_parameters=app.swagger_ui_parameters,
-    )
+    # Scalar provides the modern, searchable reference experience used by
+    # contemporary API products while reading the same OpenAPI contract.
+    return HTMLResponse(f'''<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KappGen API · Documentation</title><link rel="icon" href="{KAPPGEN_FAVICON}">
+<style>html,body{{margin:0;background:#080d15;color:#e8f3ff}}#app{{min-height:100vh}}</style></head>
+<body><div id="app"></div>
+<script type="text/javascript">var configuration={{
+  spec: {{url: '{app.openapi_url}'}},
+  theme: 'purple',
+  darkMode: true,
+  hideModels: false,
+  hideDownloadButton: false,
+  hideClientButton: false,
+  showSidebar: true,
+  hideTestRequestButton: false,
+  metaData: {{title: 'KappGen API', description: 'API de création, montage et publication vidéo'}},
+  customCss: `:root {{ --scalar-color-1: #e8f3ff; --scalar-color-accent: #00c2ff; --scalar-background-1: #080d15; --scalar-background-2: #0e1724; --scalar-background-3: #141f2f; --scalar-border-color: #263750; }} .sidebar {{ border-right: 1px solid #263750; }} .t-doc__header {{ background: linear-gradient(135deg,#0d1b2b,#0a111d); }}`
+}};</script>
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+<script>Scalar.createApiReference('#app', configuration)</script>
+</body></html>''')
 
 @app.get("/redoc", include_in_schema=False)
 def redoc_docs() -> HTMLResponse:
