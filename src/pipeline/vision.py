@@ -45,7 +45,8 @@ THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION = (
     "to match each new video's idea. Do not include typography in the generated artwork. "
     "Return ONLY valid JSON: {\"style_prompt\": \"dense comma-separated generation brief with "
     "all repeatable visual rules and explicit subject scale/grid\", \"text_side\": \"left or right\", "
-    "\"analysis_summary\": \"one concise sentence explaining the shared visual grammar\"}."
+    "\"analysis_summary\": \"one concise sentence explaining the shared visual grammar\", "
+    "\"character_anchor\": \"recurring named character or subject with age, face, hair, clothing and era; empty if none\"}."
 )
 
 
@@ -284,6 +285,7 @@ def analyze_thumbnail_reference_profile(images: list) -> dict:
         raise ValueError("Moodboard analysis returned no style_prompt")
     if data.get("text_side") not in ("left", "right"):
         data["text_side"] = None
+    data["character_anchor"] = str(data.get("character_anchor") or "").strip()[:600]
     return data
 
 

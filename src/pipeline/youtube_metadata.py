@@ -263,9 +263,11 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
     if text_side not in ("left", "right"):
         text_side = "left"
     subject_side = "right" if text_side == "left" else "left"
+    character_anchor = (thumbnail_style.get("character_anchor") or "").strip()
+    character_clause = (f"RECURRING CHARACTER ANCHOR: {character_anchor}. Preserve this same recognizable character identity in every thumbnail; change only pose, gesture, expression and action to fit the new topic. " if character_anchor else "Preserve any recurring character identity visible in the supplied references across thumbnails. ")
     return (
         f"Premium YouTube thumbnail key art for the idea: {text}. Niche: {niche or 'general'}. "
-        f"Art direction: {style_prompt or 'editorial cinematic poster, rich tactile detail, bold controlled palette'}. "
+        f"Art direction: {style_prompt or 'editorial cinematic poster, rich tactile detail, bold controlled palette'}. {character_clause}"
         f"COMPOSITION: reserve the {text_side} 42 percent for a readable headline while keeping it visually alive with controlled texture, "
         f"light and atmospheric detail; place the main subject on the {subject_side}, occupying 55 to 75 percent of the full frame height, "
         f"tight close-up or dramatic medium close-up, face/eyes or the key object clearly readable at phone size, expressive gesture, "

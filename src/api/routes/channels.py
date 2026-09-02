@@ -1465,6 +1465,7 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
         "style_prompt": profile["style_prompt"],
         "text_side": profile.get("text_side") or previous.get("text_side"),
         "analysis_summary": profile.get("analysis_summary"),
+        "character_anchor": profile.get("character_anchor") or previous.get("character_anchor"),
     })
     channel.thumbnail_style = previous
     db.commit()
