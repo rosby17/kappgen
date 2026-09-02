@@ -451,14 +451,11 @@ class Video(Base):
     # separate from `title` (the full YouTube title) because the title is
     # often too long/verbose to render legibly on a 1280x720 thumbnail.
     thumbnail_text = Column(String(255), nullable=True)
-    # Set when the channel's publish_mode is "scheduled" — the worker leaves
-    # this video alone until this time, then publishes it automatically.
+    # Set for recurring automatic/scheduled publication — the worker leaves
+    # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)
-    # Human approval gate for publish_mode "scheduled": the render finishes
-    # ahead of the publish date specifically so the creator has time to watch
-    # and approve it — run_scheduled_publishes() never fires unless this is
-    # True, no matter how long scheduled_publish_at has passed. Irrelevant for
-    # publish_mode "auto" (publishes immediately, no gate) or "manual".
+    # Human approval gate used only when the compliance result is orange.
+    # Green is allowed automatically at its slot; red remains blocked.
     approved_for_publish = Column(Boolean, nullable=False, default=False)
     youtube_compliance_report = Column(JSON, nullable=True)
     youtube_compliance_history = Column(JSON, nullable=True)

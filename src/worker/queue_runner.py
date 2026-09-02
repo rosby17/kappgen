@@ -262,11 +262,11 @@ def process_single_queued_video() -> bool:
                 logger.warning(f"Could not pre-generate thumbnail for music video {video.id}: {e}")
 
             if channel.youtube_refresh_token:
-                if channel.publish_mode == "auto":
-                    try_publish_to_youtube(db, channel, video, output_mp4)
-                elif channel.publish_mode == "scheduled":
+                if channel.publish_mode in ("auto", "scheduled"):
                     video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
-                    video.approved_for_publish = True
+                    # Green compliance can publish without intervention.
+                    # Orange remains blocked until a creator explicitly approves it.
+                    video.approved_for_publish = False
                     db.commit()
 
             return True
@@ -369,20 +369,11 @@ def process_single_queued_video() -> bool:
         # the *script* was auto-generated. A failure here never fails the
         # render — the video stays available in NicheCut either way.
         if channel.youtube_refresh_token:
-            if channel.publish_mode == "auto":
-                try_publish_to_youtube(db, channel, video, output_mp4)
-            elif channel.publish_mode == "scheduled":
+            if channel.publish_mode in ("auto", "scheduled"):
                 video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
-                # Pre-approved by default: "scheduled" means the creator picked
-                # a delay (publish N days after render, not instantly), not
-                # that they also want to click "Approuver" on every single
-                # video before it's allowed to go out — that used to leave
-                # videos silently stuck past their scheduled time until
-                # someone noticed and approved them by hand. The "Annuler"
-                # button in NicheCut still lets a creator pull a specific
-                # video out of the queue before its scheduled time if they
-                # want to review it first.
-                video.approved_for_publish = True
+                # Approval is only consumed by the orange compliance path.
+                # Green videos publish automatically when their slot arrives.
+                video.approved_for_publish = False
                 db.commit()
                 logger.info(f"Video {video.id} scheduled to publish at {video.scheduled_publish_at} (channel {channel.id}).")
             # "manual": leave the video as-is — the creator downloads it or
@@ -476,11 +467,9 @@ SCHEDULED_PUBLISH_CHECK_INTERVAL_SECONDS = 300  # every 5 min is plenty for a da
 
 def run_scheduled_publishes():
     """Publishes any video whose channel is in publish_mode='scheduled', whose
-    scheduled_publish_at has arrived, AND that the creator has approved. The
-    whole point of "scheduled" is the video renders ahead of time so there's
-    a review window before it goes live — a video sitting unapproved past its
-    scheduled_publish_at is left alone, not silently skipped or force-published;
-    it publishes the moment the creator approves it, whenever that is."""
+    scheduled_publish_at has arrived. The compliance gate decides whether it
+    can leave automatically (green), needs explicit approval (orange), or must
+    remain blocked (red)."""
     db = SessionLocal()
     try:
         due = (
@@ -489,12 +478,11 @@ def run_scheduled_publishes():
             .filter(Video.youtube_video_id.is_(None))
             .filter(Video.scheduled_publish_at.isnot(None))
             .filter(Video.scheduled_publish_at <= datetime.utcnow())
-            .filter(Video.approved_for_publish.is_(True))
             .all()
         )
         for video in due:
             channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
-            if not channel or channel.publish_mode != "scheduled" or not channel.youtube_refresh_token:
+            if not channel or channel.publish_mode not in ("auto", "scheduled") or not channel.youtube_refresh_token:
                 continue
             if not video.output_path:
                 continue
