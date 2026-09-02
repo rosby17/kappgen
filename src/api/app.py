@@ -19,9 +19,39 @@ from src.utils.auth import get_current_admin
 init_error_tracking("api")
 
 app = FastAPI(
-    title="KappGen SaaS API",
-    description="Automated long-form video pipeline for YouTube niche channels.",
-    version="1.0.0"
+    title="KappGen API",
+    summary="Create, render and publish branded YouTube videos.",
+    description="""## KappGen developer API
+
+The KappGen API powers channel configuration, media libraries, video
+generation and optional YouTube publication. All resources belong to the
+authenticated account. Use an API key from **KappGen → Paramètres → API**
+for server-to-server integrations; never expose a key in browser code.
+
+### Lifecycle
+Create a channel, upload its visual assets, submit a script or audio file,
+then poll the video resource until it reaches `done` or `failed`. YouTube
+publication is always opt-in and remains subject to the channel owner's
+settings and review controls.
+
+The interactive examples below use the current `/api` endpoints. Files and
+generated media are returned as short-lived URLs where applicable.
+""",
+    version="1.1.0",
+    openapi_tags=[
+        {"name": "auth", "description": "Account session and authentication."},
+        {"name": "channels", "description": "YouTube channels and visual configuration."},
+        {"name": "videos", "description": "Submit, monitor, edit and publish videos."},
+        {"name": "folders", "description": "Organize generated videos."},
+        {"name": "api-keys", "description": "Create and revoke integration keys."},
+        {"name": "billing", "description": "Plans, credits and purchase history."},
+    ],
+    contact={"name": "KappGen support", "email": "contact@kappgen.com", "url": "https://kappgen.com"},
+    license_info={"name": "KappGen API Terms", "url": "https://kappgen.com/terms"},
+    servers=[{"url": "https://api.kappgen.com", "description": "Production"}],
+    docs_url="/docs",
+    redoc_url="/redoc",
+    swagger_ui_parameters={"persistAuthorization": True, "displayRequestDuration": True, "filter": True, "tryItOutEnabled": True},
 )
 
 # CORS: only KappGen's own origins (+ localhost for dev) may send credentialed
@@ -79,17 +109,19 @@ app.include_router(videos.router)
 app.include_router(folders.router)
 app.include_router(api_keys.router)
 app.include_router(billing.router)
-app.include_router(admin.router)
+# Admin operations remain available to the back-office, but are intentionally
+# excluded from the public OpenAPI contract and interactive documentation.
+app.include_router(admin.router, include_in_schema=False)
 
 @app.on_event("startup")
 def on_startup():
     init_db()
 
-@app.get("/api/health")
+@app.get("/api/health", include_in_schema=False)
 def health_check():
     return {"status": "ok", "app": "KappGen Video Pipeline MVP"}
 
-@app.get("/api/db-status")
+@app.get("/api/db-status", include_in_schema=False)
 def get_db_status(admin=Depends(get_current_admin)):
     # Was publicly reachable — leaked the DB engine, host and table names to
     # anyone, unauthenticated. Confirmed live before this fix.
