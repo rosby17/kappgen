@@ -459,6 +459,17 @@ def generate_voiceover(
                         "stability": (voice_settings or {}).get("stability", 0.8),
                         "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
                         "style": (voice_settings or {}).get("style", 0.0),
+                        # Izivoice's own studio always sends these three on every
+                        # generation (confirmed by reading its deployed client
+                        # bundle) — pitch/volume neutral, and use_speaker_boost
+                        # true. We were silently omitting all three, which can
+                        # make Izivoice fall back to different server-side
+                        # defaults (notably speaker boost off) and produce an
+                        # audibly thinner/less faithful clone than what the same
+                        # voice sounds like in Izivoice's own app.
+                        "pitch": (voice_settings or {}).get("pitch", 0),
+                        "volume": (voice_settings or {}).get("volume", 1),
+                        "use_speaker_boost": (voice_settings or {}).get("use_speaker_boost", True),
                     },
                     timeout=30.0
                 )
