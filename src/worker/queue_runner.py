@@ -594,6 +594,13 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     elif meta.get("thumbnail_text"):
         video.thumbnail_text = meta["thumbnail_text"]
         db.commit()
+    # Channel-level publication defaults are appended consistently to every
+    # video; per-video AI metadata remains the primary title/description.
+    default_description = (channel.youtube_default_description or "").strip()
+    if default_description:
+        meta["description"] = (meta.get("description") or "").strip() + "\n\n" + default_description
+    default_tags = list(channel.youtube_default_tags or [])
+    meta["tags"] = list(dict.fromkeys([*(meta.get("tags") or []), *default_tags]))[:500]
     # Usually already sitting on disk — generated right after the render
     # finished, alongside the title/description. Only regenerate here if
     # that earlier pass failed for some reason.
@@ -615,6 +622,8 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         video_id = youtube_publisher.publish_video_for_channel(
             channel, output_mp4, meta["title"], meta["description"],
             thumbnail_path=thumbnail_path, tags=meta.get("tags"),
+            privacy_status=channel.youtube_privacy_status or "public",
+            category_id=channel.youtube_category_id or "22",
         )
         video.youtube_video_id = video_id
         video.youtube_published_at = datetime.utcnow()

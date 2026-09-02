@@ -155,6 +155,15 @@ class ChannelCreate(BaseModel):
     voice_settings: Optional[dict] = None
     publish_mode: str = "manual"  # "auto" | "scheduled" | "manual"
     youtube_made_for_kids: bool = False
+    youtube_default_description: Optional[str] = None
+    youtube_default_tags: List[str] = Field(default_factory=list)
+    youtube_category_id: str = "22"
+    youtube_privacy_status: str = "public"
+    youtube_contains_synthetic_media: bool = True
+    youtube_license: str = "youtube"
+    youtube_notify_subscribers: bool = True
+    youtube_embeddable: bool = True
+    youtube_public_stats_viewable: bool = True
     publish_time_mode: str = "range"  # "fixed" (publish_schedule_hour) | "range" (automation_window_*)
     publish_schedule_hour: int = 8
     publish_schedule_day_offset: int = 1
@@ -191,6 +200,15 @@ class ChannelUpdate(BaseModel):
     voice_settings: Optional[dict] = None
     publish_mode: Optional[str] = None
     youtube_made_for_kids: Optional[bool] = None
+    youtube_default_description: Optional[str] = None
+    youtube_default_tags: Optional[List[str]] = None
+    youtube_category_id: Optional[str] = None
+    youtube_privacy_status: Optional[str] = None
+    youtube_contains_synthetic_media: Optional[bool] = None
+    youtube_license: Optional[str] = None
+    youtube_notify_subscribers: Optional[bool] = None
+    youtube_embeddable: Optional[bool] = None
+    youtube_public_stats_viewable: Optional[bool] = None
     publish_time_mode: Optional[str] = None
     publish_schedule_hour: Optional[int] = None
     publish_schedule_day_offset: Optional[int] = None

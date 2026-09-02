@@ -596,6 +596,15 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         voice_settings=payload.voice_settings,
         publish_mode=payload.publish_mode or "manual",
         youtube_made_for_kids=bool(payload.youtube_made_for_kids),
+        youtube_default_description=payload.youtube_default_description,
+        youtube_default_tags=payload.youtube_default_tags or [],
+        youtube_category_id=payload.youtube_category_id or "22",
+        youtube_privacy_status=payload.youtube_privacy_status or "public",
+        youtube_contains_synthetic_media=bool(payload.youtube_contains_synthetic_media),
+        youtube_license=payload.youtube_license or "youtube",
+        youtube_notify_subscribers=bool(payload.youtube_notify_subscribers),
+        youtube_embeddable=bool(payload.youtube_embeddable),
+        youtube_public_stats_viewable=bool(payload.youtube_public_stats_viewable),
         publish_time_mode=payload.publish_time_mode or "range",
         publish_schedule_hour=payload.publish_schedule_hour,
         publish_schedule_day_offset=payload.publish_schedule_day_offset,
@@ -791,6 +800,16 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.publish_mode = payload.publish_mode
     if payload.youtube_made_for_kids is not None:
         channel.youtube_made_for_kids = payload.youtube_made_for_kids
+    for field in ("youtube_default_description", "youtube_category_id", "youtube_privacy_status", "youtube_license"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(channel, field, value)
+    if payload.youtube_default_tags is not None:
+        channel.youtube_default_tags = [str(tag).strip()[:100] for tag in payload.youtube_default_tags if str(tag).strip()][:30]
+    for field in ("youtube_contains_synthetic_media", "youtube_notify_subscribers", "youtube_embeddable", "youtube_public_stats_viewable"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(channel, field, value)
     if payload.publish_time_mode is not None:
         channel.publish_time_mode = payload.publish_time_mode
     if payload.publish_schedule_hour is not None:

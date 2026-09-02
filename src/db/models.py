@@ -226,6 +226,15 @@ class Channel(Base):
     #   posts it themselves, or publishes on demand from NicheCut.
     publish_mode = Column(String(20), nullable=False, default="manual")
     youtube_made_for_kids = Column(Boolean, nullable=False, default=False)
+    youtube_default_description = Column(Text, nullable=True)
+    youtube_default_tags = Column(JSON, nullable=False, default=list)
+    youtube_category_id = Column(String(10), nullable=False, default="22")
+    youtube_privacy_status = Column(String(20), nullable=False, default="public")
+    youtube_contains_synthetic_media = Column(Boolean, nullable=False, default=True)
+    youtube_license = Column(String(20), nullable=False, default="youtube")
+    youtube_notify_subscribers = Column(Boolean, nullable=False, default=True)
+    youtube_embeddable = Column(Boolean, nullable=False, default=True)
+    youtube_public_stats_viewable = Column(Boolean, nullable=False, default=True)
     # "fixed": always publish_schedule_hour, exactly. "range" (default): a
     # randomized time inside automation_window_start/end_hour — those columns
     # always have a non-null default (7/11), so without this flag the worker
@@ -320,6 +329,15 @@ class Channel(Base):
             "voice_settings": self.voice_settings or {"speed": 0.845, "stability": 0.8, "similarity_boost": 0.9, "style": 0.0},
             "publish_mode": self.publish_mode or "manual",
             "youtube_made_for_kids": bool(self.youtube_made_for_kids),
+            "youtube_default_description": self.youtube_default_description,
+            "youtube_default_tags": self.youtube_default_tags or [],
+            "youtube_category_id": self.youtube_category_id or "22",
+            "youtube_privacy_status": self.youtube_privacy_status or "public",
+            "youtube_contains_synthetic_media": bool(self.youtube_contains_synthetic_media),
+            "youtube_license": self.youtube_license or "youtube",
+            "youtube_notify_subscribers": bool(self.youtube_notify_subscribers),
+            "youtube_embeddable": bool(self.youtube_embeddable),
+            "youtube_public_stats_viewable": bool(self.youtube_public_stats_viewable),
             "publish_time_mode": self.publish_time_mode or "range",
             "publish_schedule_hour": self.publish_schedule_hour,
             "publish_schedule_day_offset": self.publish_schedule_day_offset,

@@ -140,6 +140,10 @@ def upload_video(
     tags: Optional[list] = None,
     contains_synthetic_media: bool = True,
     made_for_kids: bool = False,
+    license_name: str = "youtube",
+    notify_subscribers: bool = True,
+    embeddable: bool = True,
+    public_stats_viewable: bool = True,
 ) -> str:
     """
     Uploads a finished video file to the account behind access_token via
@@ -162,6 +166,9 @@ def upload_video(
             "privacyStatus": privacy_status,
             "selfDeclaredMadeForKids": made_for_kids,
             "containsSyntheticMedia": contains_synthetic_media,
+            "license": license_name,
+            "embeddable": embeddable,
+            "publicStatsViewable": public_stats_viewable,
         },
     }
     if tags:
@@ -169,7 +176,7 @@ def upload_video(
 
     init_resp = httpx.post(
         YOUTUBE_UPLOAD_URL,
-        params={"uploadType": "resumable", "part": "snippet,status"},
+        params={"uploadType": "resumable", "part": "snippet,status", "notifySubscribers": str(bool(notify_subscribers)).lower()},
         headers={
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json; charset=UTF-8",
@@ -221,6 +228,8 @@ def publish_video_for_channel(
     description: str = "",
     thumbnail_path: Optional[Path] = None,
     tags: Optional[list] = None,
+    privacy_status: str = "public",
+    category_id: str = "22",
 ) -> str:
     """High-level helper: refreshes the channel's token if needed, then uploads.
     Raises RuntimeError if the channel isn't connected or the token can't be refreshed."""
@@ -229,7 +238,14 @@ def publish_video_for_channel(
         raise RuntimeError("Chaîne non connectée à YouTube, ou jeton d'accès expiré/révoqué.")
     video_id = upload_video(
         access_token, video_path, title, description, tags=tags,
+        privacy_status=getattr(channel, "youtube_privacy_status", None) or privacy_status,
+        category_id=getattr(channel, "youtube_category_id", None) or category_id,
+        contains_synthetic_media=bool(getattr(channel, "youtube_contains_synthetic_media", True)),
         made_for_kids=bool(getattr(channel, "youtube_made_for_kids", False)),
+        license_name=getattr(channel, "youtube_license", None) or "youtube",
+        notify_subscribers=bool(getattr(channel, "youtube_notify_subscribers", True)),
+        embeddable=bool(getattr(channel, "youtube_embeddable", True)),
+        public_stats_viewable=bool(getattr(channel, "youtube_public_stats_viewable", True)),
     )
     if thumbnail_path and thumbnail_path.exists():
         try:
