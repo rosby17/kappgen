@@ -8,9 +8,12 @@ through this instead of calling `anthropic.Anthropic` directly, so an
 exhausted Anthropic account doesn't silently break the whole feature."""
 import httpx
 from typing import Optional
-from src.config import ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
+from src.config import (
+    ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY,
+)
 from src.utils.logger import logger
-from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, PRICING
+from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, PRICING
 
 # OpenRouter's own ":free" model catalog changes over time; this one has
 # stayed reliably available and free as of writing. Swap it if OpenRouter
@@ -123,6 +126,71 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     return text.strip(), cost_usd
 
 
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+
+
+def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY is not configured on the server.")
+    resp = httpx.post(
+        f"{DEEPSEEK_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+        json={"model": DEEPSEEK_MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("DeepSeek text generation returned no text content.")
+    usage = data.get("usage") or {}
+    in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+    cost_usd = estimate_deepseek_cost(in_tok, out_tok)
+    log_usage(
+        "deepseek", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+        cost_usd,
+        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+        meta={"model": DEEPSEEK_MODEL, "input_tokens": in_tok, "output_tokens": out_tok},
+    )
+    return text.strip(), cost_usd
+
+
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+
+def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not configured on the server.")
+    resp = httpx.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": GROQ_MODEL,
+            # gpt-oss is a reasoning model: it spends part of max_tokens on a hidden
+            # "reasoning" field before writing the actual answer, so give it headroom
+            # and keep the reasoning budget low to avoid burning tokens/latency on it.
+            "max_tokens": max(max_tokens, 300),
+            "reasoning_effort": "low",
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    if not text:
+        raise RuntimeError("Groq text generation returned no text content.")
+    usage = data.get("usage") or {}
+    in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+    log_usage(
+        "groq", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+        0.0,
+        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+        meta={"model": GROQ_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
+    )
+    return text.strip(), 0.0
+
+
 def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not configured on the server.")
@@ -164,13 +232,23 @@ def generate_text(
     cost_sink: Optional[list] = None,
     enable_web_search: bool = False,
 ) -> str:
-    """Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI.
-    Raises if every configured provider fails (or none are configured).
+    """Tries providers in order — by default Anthropic, DeepSeek, fal.ai
+    (Claude via OpenRouter), OpenAI, then Groq's free tier — falling through
+    to the next configured one on any failure. Raises only if every provider
+    in the chain fails (or none are configured).
 
-    The OpenRouter free-tier model is deliberately NOT in this chain — it's
+    Which provider goes FIRST is admin-controlled at runtime (see the
+    "Ressources" tab / src/utils/app_settings.ai_text_primary_provider) — a
+    manual switch for exactly this situation: an exhausted Anthropic balance
+    with no time to redeploy. The rest of the chain still runs as fallback
+    behind whichever one is chosen, in the default order above.
+
+    OpenRouter's free-tier model is deliberately NOT in this chain — it's
     unreliable enough (leaks its own chain-of-thought in English into the
     answer, ignores the requested language) that a clean failure + retry on
-    the next scheduled run beats silently publishing garbage text.
+    the next scheduled run beats silently publishing garbage text, and Groq's
+    free tier is both better quality and already in the chain as a genuinely
+    free fallback.
 
     `operation`/`user_id`/`channel_id`/`video_id` are purely for cost
     attribution (see src/utils/cost_tracking.py) — all optional, and a
@@ -182,17 +260,25 @@ def generate_text(
     to know the actual cost incurred to bill the creator for it.
 
     `enable_web_search` only applies to the Anthropic path (its server-side
-    web_search tool) — if that provider is unavailable and this falls back to
-    fal.ai/OpenAI, the call still succeeds, just without live search results."""
+    web_search tool) — every other provider ignores it; if Anthropic isn't
+    first (or isn't available) the call still succeeds, just without live
+    search results."""
     usage_ctx = {"operation": operation, "user_id": user_id, "channel_id": channel_id, "video_id": video_id}
+    providers = {
+        "anthropic": lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search),
+        "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx),
+        "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
+        "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),
+        "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
+    }
+    default_order = ["anthropic", "deepseek", "fal", "openai", "groq"]
+    from src.utils.app_settings import ai_text_primary_provider
+    primary = ai_text_primary_provider()
+    order = [primary] + [p for p in default_order if p != primary] if primary in providers else default_order
     last_exc = None
-    for name, fn in [
-        ("anthropic", lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search)),
-        ("fal.ai", lambda: _fal_complete(prompt, max_tokens, usage_ctx)),
-        ("openai", lambda: _openai_complete(prompt, max_tokens, usage_ctx)),
-    ]:
+    for name in order:
         try:
-            text, cost_usd = fn()
+            text, cost_usd = providers[name]()
             if cost_sink is not None:
                 cost_sink.append(cost_usd)
             return text

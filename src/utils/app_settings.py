@@ -42,3 +42,21 @@ def set_setting(key: str, value: str) -> None:
 
 def thumbnail_provider_mode() -> str:
     return get_setting(THUMBNAIL_PROVIDER_MODE_KEY, THUMBNAIL_PROVIDER_MODE_DEFAULT)
+
+
+# Which text-generation provider (see src/pipeline/ai_text.py) is tried
+# FIRST — "anthropic" | "deepseek" | "groq" | "openai" | "fal". The rest of
+# the configured providers still follow as automatic fallback in their usual
+# order if the chosen one fails or isn't configured; this only controls which
+# one goes first, so an admin can move off Claude the moment its balance runs
+# low without a redeploy — just a button in the "Ressources" tab.
+AI_TEXT_PRIMARY_PROVIDER_KEY = "ai_text_primary_provider"
+AI_TEXT_PRIMARY_PROVIDER_DEFAULT = "anthropic"
+
+
+def ai_text_primary_provider() -> str:
+    return get_setting(AI_TEXT_PRIMARY_PROVIDER_KEY, AI_TEXT_PRIMARY_PROVIDER_DEFAULT)
+
+
+def set_ai_text_primary_provider(name: str) -> None:
+    set_setting(AI_TEXT_PRIMARY_PROVIDER_KEY, name)

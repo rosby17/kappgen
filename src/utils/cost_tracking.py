@@ -32,6 +32,17 @@ PRICING = {
         "input_per_token": 2.5 / 1_000_000,
         "output_per_token": 10.0 / 1_000_000,
     },
+    "deepseek": {
+        # deepseek-v4-flash, off-peak cache-miss rate (DeepSeek's own
+        # published pricing) — the cheap/fast model, not deepseek-v4-pro.
+        "input_per_token": 0.22 / 1_000_000,
+        "output_per_token": 0.66 / 1_000_000,
+    },
+    "groq": {
+        # Free tier — no per-token cost to us.
+        "input_per_token": 0.0,
+        "output_per_token": 0.0,
+    },
     "fal_text": {
         # fal.ai's OpenRouter passthrough doesn't report token usage back to
         # us, so this is a flat per-request estimate rather than per-token.
@@ -61,6 +72,11 @@ def estimate_anthropic_cost(input_tokens: int, output_tokens: int) -> float:
 
 def estimate_openai_cost(input_tokens: int, output_tokens: int) -> float:
     p = PRICING["openai"]
+    return input_tokens * p["input_per_token"] + output_tokens * p["output_per_token"]
+
+
+def estimate_deepseek_cost(input_tokens: int, output_tokens: int) -> float:
+    p = PRICING["deepseek"]
     return input_tokens * p["input_per_token"] + output_tokens * p["output_per_token"]
 
 

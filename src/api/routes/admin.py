@@ -1222,3 +1222,41 @@ def set_thumbnail_provider_mode(payload: ThumbnailProviderModePayload, admin: Us
     from src.utils.app_settings import set_setting, THUMBNAIL_PROVIDER_MODE_KEY
     set_setting(THUMBNAIL_PROVIDER_MODE_KEY, payload.mode)
     return {"mode": payload.mode}
+
+
+# --- AI text-generation provider switch --------------------------------
+# Which of Anthropic/DeepSeek/fal.ai/OpenAI/Groq (see src/pipeline/ai_text.py)
+# is tried FIRST for every text-generation call (script writing, topic
+# selection, titles, thumbnail concepts, music style suggestions...). The
+# rest of the chain still runs as automatic fallback behind it. Built for
+# exactly this situation: an exhausted Anthropic balance with no time to
+# redeploy — flip to a configured provider from the "Ressources" tab and
+# every call picks it up immediately, no restart needed.
+AI_TEXT_PROVIDERS = ["anthropic", "deepseek", "fal", "openai", "groq"]
+
+
+@router.get("/settings/ai-text-provider")
+def get_ai_text_provider(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import ai_text_primary_provider
+    from src.config import ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, FAL_API_KEY, OPENAI_API_KEY, GROQ_API_KEY
+    configured = {
+        "anthropic": bool(ANTHROPIC_API_KEY),
+        "deepseek": bool(DEEPSEEK_API_KEY),
+        "fal": bool(FAL_API_KEY),
+        "openai": bool(OPENAI_API_KEY),
+        "groq": bool(GROQ_API_KEY),
+    }
+    return {"primary": ai_text_primary_provider(), "order": AI_TEXT_PROVIDERS, "configured": configured}
+
+
+class AiTextProviderPayload(BaseModel):
+    primary: str
+
+
+@router.patch("/settings/ai-text-provider")
+def set_ai_text_provider(payload: AiTextProviderPayload, admin: User = Depends(get_current_admin)):
+    if payload.primary not in AI_TEXT_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Fournisseur invalide.")
+    from src.utils.app_settings import set_ai_text_primary_provider
+    set_ai_text_primary_provider(payload.primary)
+    return {"primary": payload.primary}
