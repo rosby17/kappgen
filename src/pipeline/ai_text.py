@@ -6,6 +6,7 @@ all three paid providers are out of credits at once). Any Claude-driven text
 step (topic selection, script writing, niche detection, ...) should go
 through this instead of calling `anthropic.Anthropic` directly, so an
 exhausted Anthropic account doesn't silently break the whole feature."""
+import time
 import httpx
 from typing import Optional
 from src.config import (
@@ -221,6 +222,21 @@ def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
     return text.strip()
 
 
+# Free tiers meter per minute, so a 429 is worth waiting out once or twice
+# before giving up on an otherwise working provider.
+_RATE_LIMIT_RETRIES = 2
+_RATE_LIMIT_BACKOFF_SECONDS = 20
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    text = str(exc).lower()
+    # An exhausted balance also surfaces as 429 on OpenAI (insufficient_quota);
+    # that one must NOT be retried — no amount of waiting adds credit.
+    if "insufficient_quota" in text or "credit_balance_exhausted" in text or "no credits remaining" in text:
+        return False
+    return "429" in text or "too many requests" in text or "rate limit" in text
+
+
 # Single source of truth for "can this deployment do AI text at all?".
 # Feature guards used to each hardcode `ANTHROPIC_API_KEY or FAL_API_KEY or
 # OPENAI_API_KEY`, a list frozen before DeepSeek and Groq existed here: a
@@ -289,12 +305,24 @@ def generate_text(
     order = [pid for pid in ordered_ids("text") if pid in providers]
     last_exc = None
     for name in order:
-        try:
-            text, cost_usd = providers[name]()
-            if cost_sink is not None:
-                cost_sink.append(cost_usd)
-            return text
-        except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a fallback chain
-            logger.warning(f"[ai_text] provider '{name}' failed, trying next: {exc}")
-            last_exc = exc
+        # A 429 means "you're going too fast", not "this provider is dead" —
+        # free tiers meter per minute. Falling straight through to the next
+        # provider wasted the working one: a 6-part script generated its first
+        # five parts on Groq, hit the per-minute cap on the last, and the whole
+        # run was abandoned even though a short wait would have finished it.
+        for attempt in range(_RATE_LIMIT_RETRIES + 1):
+            try:
+                text, cost_usd = providers[name]()
+                if cost_sink is not None:
+                    cost_sink.append(cost_usd)
+                return text
+            except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a fallback chain
+                last_exc = exc
+                if _is_rate_limited(exc) and attempt < _RATE_LIMIT_RETRIES:
+                    delay = _RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
+                    logger.warning(f"[ai_text] provider '{name}' rate-limited, retrying in {delay}s (attempt {attempt + 1}/{_RATE_LIMIT_RETRIES})...")
+                    time.sleep(delay)
+                    continue
+                logger.warning(f"[ai_text] provider '{name}' failed, trying next: {exc}")
+                break
     raise RuntimeError(f"All AI providers failed for this request. Last error: {last_exc}")
