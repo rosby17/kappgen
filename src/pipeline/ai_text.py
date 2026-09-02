@@ -6,6 +6,7 @@ all three paid providers are out of credits at once). Any Claude-driven text
 step (topic selection, script writing, niche detection, ...) should go
 through this instead of calling `anthropic.Anthropic` directly, so an
 exhausted Anthropic account doesn't silently break the whole feature."""
+import re
 import time
 import httpx
 from typing import Optional
@@ -171,14 +172,28 @@ def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             # "reasoning" field before writing the actual answer, so give it headroom
             # and keep the reasoning budget low to avoid burning tokens/latency on it.
             "max_tokens": max(max_tokens, 300),
-            "reasoning_effort": "low",
+            # ...but only gpt-oss accepts that parameter. Sending it to
+            # groq/compound is a hard 400, which made that model unusable
+            # here even though it answers fine without it.
+            **({"reasoning_effort": "low"} if GROQ_MODEL.startswith("openai/gpt-oss") else {}),
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=120.0,
     )
     resp.raise_for_status()
     data = resp.json()
-    text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+    message = ((data.get("choices") or [{}])[0]).get("message") or {}
+    text = message.get("content")
+    # Qwen-style models put their chain of thought in the answer itself,
+    # wrapped in <think>…</think>; left in, it gets spoken by the voiceover.
+    # Some also return the visible answer empty and everything in a separate
+    # "reasoning" field — falling back to it keeps the model usable instead of
+    # failing the whole part.
+    if text:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if not text:
+        reasoning = (message.get("reasoning") or "").strip()
+        text = re.sub(r"<think>.*?</think>", "", reasoning, flags=re.DOTALL).strip()
     if not text:
         raise RuntimeError("Groq text generation returned no text content.")
     usage = data.get("usage") or {}
