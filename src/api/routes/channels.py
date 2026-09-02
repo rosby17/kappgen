@@ -1753,12 +1753,19 @@ def get_library_overview(current_user: User = Depends(get_current_user), db: Ses
         if library_dir.is_dir():
             image_count = len([f for f in library_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS])
         tracks = list((channel.music_preference or {}).get("tracks") or [])
+        branding = channel.branding or {}
         overview.append({
             "channel_id": channel.id,
             "channel_name": channel.name,
             "niche": channel.niche,
             "image_count": image_count,
             "music_track_count": len(tracks),
+            # The library is a channel list too, so expose the same visual
+            # identity used by the rest of the app instead of forcing the UI
+            # to invent an initials-only placeholder.
+            "avatar_path": branding.get("avatar_path"),
+            "logo_path": branding.get("logo_path"),
+            "youtube_channel_thumbnail_url": channel.youtube_channel_thumbnail_url,
         })
     return {"channels": overview}
 
