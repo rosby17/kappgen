@@ -18,6 +18,7 @@ from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
 from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluate_script_compliance, build_compliance_dossier
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
+from src.utils.logger import logger
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render, estimate_video_cost_credits
 from src.utils.rate_limit import rate_limit
@@ -532,24 +533,39 @@ def _append_compliance_event(video: Video, event: str, details: Optional[dict] =
     video.youtube_compliance_history = history[-50:]
 
 
+_TRUST_SCORE_BACKFILL_MAX_PER_REQUEST = 3
+
+
 def _backfill_trust_scores(db: Session, videos: List[Video]) -> None:
     """Give finished legacy videos the same automatic Trust Score as newly
     rendered videos. The video list is the first place creators return to,
-    so it should never make them click merely to initialise an analysis."""
+    so it should never make them click merely to initialise an analysis.
+
+    Capped to a handful per request — this reads and SHA-256-hashes every
+    source visual asset on disk per video (see _visual_asset_hashes), which
+    is expensive. Doing this for every legacy video with no v2 report on
+    every single GET /videos call (unbounded, synchronous, inside a request
+    holding a DB connection) exhausted the connection pool and hung the API
+    the first time this shipped, since EVERY existing "done" video across
+    every user lacked a v2 report at once. It still fully backfills over
+    time — just a few videos per page load instead of everything at once."""
     missing = [video for video in videos if video.status == VideoStatus.DONE.value and (not video.youtube_compliance_report or (video.youtube_compliance_report or {}).get("version", 1) < 2)]
     if not missing:
         return
-    for video in missing:
-        previous = (
-            db.query(Video)
-            .filter(Video.channel_id == video.channel_id, Video.id != video.id)
-            .order_by(Video.created_at.desc())
-            .limit(30)
-            .all()
-        )
-        report = evaluate_youtube_compliance(video, video.channel, previous)
-        video.youtube_compliance_report = report
-        _append_compliance_event(video, "trust_score_backfilled", {"score": report["score"], "status": report["status"]})
+    for video in missing[:_TRUST_SCORE_BACKFILL_MAX_PER_REQUEST]:
+        try:
+            previous = (
+                db.query(Video)
+                .filter(Video.channel_id == video.channel_id, Video.id != video.id)
+                .order_by(Video.created_at.desc())
+                .limit(30)
+                .all()
+            )
+            report = evaluate_youtube_compliance(video, video.channel, previous)
+            video.youtube_compliance_report = report
+            _append_compliance_event(video, "trust_score_backfilled", {"score": report["score"], "status": report["status"]})
+        except Exception as e:
+            logger.warning(f"Trust Score backfill failed for video {video.id}: {e}")
     db.commit()
 
 
