@@ -63,12 +63,15 @@ def _fallback_metadata(video, channel) -> dict:
     raw_title = (video.title or video.script_text or "Nouvelle vidéo").strip().splitlines()[0]
     title = re.sub(r"\s+", " ", raw_title)[:100]
     niche = (channel.niche or "").strip()
+    # No KappGen mention here: this text is published on the creator's own
+    # channel, under their own brand — the tool that produced the video has no
+    # business signing it.
     description = (
         f"{title}\n\n"
-        f"Une vidéo originale de {channel.name}, créée avec KappGen.\n\n"
+        f"Une vidéo originale de {channel.name}.\n\n"
         f"Abonne-toi à la chaîne pour découvrir les prochaines vidéos."
     )
-    tags = [tag for tag in [niche, channel.name, "KappGen"] if tag]
+    tags = [tag for tag in [niche, channel.name] if tag]
     return {"title": title, "description": description, "tags": tags, "thumbnail_text": title[:55]}
 
 
@@ -94,6 +97,7 @@ def generate_metadata(video, channel) -> dict:
         prompt = f"""Tu es l'Agent éditorial KappGen. Prépare la publication YouTube de cette vidéo.
 Chaîne: {channel.name}. Niche: {channel.niche}. Langue du script à conserver.
 Le contenu doit être original, fidèle au script, sans clickbait trompeur et conforme aux règles YouTube.
+Ne mentionne jamais KappGen ni aucun outil de production dans le titre ou la description : le texte est publié sous la marque du créateur.
 Script: {script}
 
 Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),

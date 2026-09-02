@@ -4,7 +4,7 @@ import re
 import hashlib
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 SENSITIVE_NICHE_TERMS = {
@@ -97,7 +97,7 @@ def evaluate_script_compliance(script: str, title: str, channel, previous_videos
         # reason behind it. Every control therefore carries its own clear
         # confidence score for the publication review UI.
         confidence = 100 if state == "pass" else max(60, 100 - penalty) if state == "warning" else max(0, 60 - penalty)
-        checks.append({"code": code, "label": label, "state": state, "message": message, "score": confidence})
+        checks.append({"code": code, "label": label, "state": state, "message": message, "score": confidence, "fix": check_fix(code, state)})
 
     if len(words) < 80:
         add("script_depth", "Substance", "fail", f"Script insuffisant ({len(words)} mots).", 45)
@@ -299,6 +299,58 @@ def build_compliance_dossier(video, channel) -> dict:
     }
 
 
+# What a creator can actually DO about a check that isn't at 100 — surfaced as
+# a real button in the Trust Score panel instead of leaving them with a
+# diagnosis and no next step. "wizard" opens that channel's pipeline editor
+# straight at the step holding the setting involved; "metadata" opens the
+# title/description improver; "relaunch" re-renders.
+_CHECK_FIXES = {
+    "script_depth":         {"action": "wizard", "step": 2, "label": "Ajuster la structure du script", "hint": "Augmente la longueur cible des parties du script, puis relance la vidéo."},
+    "internal_repetition":  {"action": "wizard", "step": 2, "label": "Ajuster la structure du script", "hint": "Réduis les redites en variant les parties, puis relance la vidéo."},
+    "metadata_title":       {"action": "metadata", "label": "Améliorer avec KappGen", "hint": "Un titre plus précis et non trompeur remonte ce contrôle."},
+    "title_quality":        {"action": "metadata", "label": "Améliorer avec KappGen", "hint": "Un titre plus précis et non trompeur remonte ce contrôle."},
+    "metadata_description": {"action": "metadata", "label": "Améliorer avec KappGen", "hint": "Une description plus complète remonte ce contrôle."},
+    "sources":              {"action": "metadata", "label": "Ajouter des sources", "hint": "Ajoute au moins un lien source dans la description."},
+    "visual_diversity":     {"action": "wizard", "step": 4, "label": "Augmenter le nombre de visuels", "hint": "Monte le nombre d'images uniques dans l'étape Visuels : plus de visuels pour la même durée resserre le rythme et supprime l'effet diaporama. Relance ensuite la vidéo."},
+    "visual_originality":   {"action": "wizard", "step": 4, "label": "Varier les visuels", "hint": "Ajoute des images à la bibliothèque ou augmente le nombre d'images uniques, puis relance la vidéo."},
+    "music_rights":         {"action": "wizard", "step": 5, "label": "Changer la source musicale", "hint": "Passe sur une musique générée ou sur tes propres pistes pour lever le doute sur les droits."},
+    "audio_rights":         {"action": "wizard", "step": 5, "label": "Vérifier la source audio", "hint": "Déclare la provenance de l'audio importé."},
+    "voice_pacing":         {"action": "wizard", "step": 3, "label": "Ajuster la vitesse de la voix", "hint": "Corrige la vitesse dans l'étape Voix off, puis relance la vidéo."},
+    "made_for_kids":        {"action": "wizard", "step": 8, "label": "Vérifier l'audience", "hint": "Contrôle le paramètre d'audience dans l'étape Publication."},
+    "render_integrity":     {"action": "relaunch", "label": "Relancer le rendu", "hint": "Le rendu final n'est pas exploitable : relance la génération."},
+}
+
+# Checks that are informational by design and can never reach 100: they mark a
+# topic YouTube expects a human to have looked at. Saying so plainly is more
+# useful than a button that changes nothing — the only way to "clear" them
+# would be to misdeclare the channel's subject.
+_STRUCTURAL_WHY = (
+    "Ce contrôle reste en vigilance tant que la chaîne traite un sujet encadré "
+    "(santé, finance, psychologie, actualité, faits divers, contenu enfants). "
+    "Il ne peut pas atteindre 100 : il rappelle simplement qu'une relecture humaine est attendue."
+)
+_STRUCTURAL_CHECKS = {"niche_profile", "sensitive_topic"}
+
+
+def check_fix(code: str, state: str) -> Optional[dict]:
+    """The actionable fix for one check, or a structural explanation when no
+    creator action can change it."""
+    if state == "pass":
+        return None
+    if code in _STRUCTURAL_CHECKS:
+        return {"action": "none", "why": _STRUCTURAL_WHY}
+    if code == "community_guidelines":
+        # A detected risk term is fixable (rewrite); the niche-review warning is not.
+        if state == "fail":
+            return {"action": "wizard", "step": 2, "label": "Réviser le script", "hint": "Retire ou reformule le passage signalé, puis relance la vidéo."}
+        return {"action": "none", "why": _STRUCTURAL_WHY}
+    if code == "dangerous_claim":
+        return {"action": "wizard", "step": 2, "label": "Réviser le script", "hint": "Reformule les promesses absolues (guérison, gain garanti) en formulations prudentes, puis relance la vidéo."}
+    if code == "originality":
+        return {"action": "wizard", "step": 2, "label": "Varier le sujet", "hint": "Ce sujet ressemble trop à une vidéo déjà publiée : change d'angle avant de republier."}
+    return _CHECK_FIXES.get(code)
+
+
 def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) -> dict:
     """Deterministic pre-publication guardrail; no claim of YouTube approval."""
     score = 100
@@ -320,7 +372,7 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
     def add(code, label, state, message, penalty=0):
         nonlocal score
         score -= penalty
-        checks.append({"code": code, "label": label, "state": state, "message": message})
+        checks.append({"code": code, "label": label, "state": state, "message": message, "fix": check_fix(code, state)})
 
     if unverified_audio:
         add("script_depth", "Contenu parlé", "warning", "Audio non vérifiable automatiquement : validation humaine obligatoire.", 20)
