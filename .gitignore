@@ -19,6 +19,9 @@ storage/test_phase0_output/
 !storage/uploads/.gitkeep
 !storage/channels/.gitkeep
 
+# Downloaded stock-footage cache (re-fetched from Pexels on demand, not source)
+assets/stock_video_cache/
+
 # Frontend
 frontend/node_modules/
 

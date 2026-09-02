@@ -127,6 +127,12 @@ HUGGINGFACE_API_KEYS = [
 # Extra text-generation-only fallback (see src/pipeline/ai_text.py) — not
 # used by vision.py, which stays on the three providers above.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+# Pexels' free video API (see src/pipeline/stock_video.py) — real stock footage
+# as an automatic visual source, so a scene can be actual motion instead of a
+# Ken Burns pan over a still. Free with a key (200 req/hour, 20 000/month) and
+# never charges the creator any KappGen credits. Unset simply disables the
+# stock-footage source; every other visual source keeps working.
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 # Low-cost/free text-generation providers, both OpenAI-compatible — see
 # src/pipeline/ai_text.py. Neither is required; the admin picks which
 # configured provider goes first via the "Ressources" tab (falls back

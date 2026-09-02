@@ -204,7 +204,49 @@ def run_video_pipeline(
             visual_paths[i] = broll_paths[(i // 3) % len(broll_paths)]
             visual_types[i] = "video"
         logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
-    
+
+    # Free stock footage (Pexels) fills the scenes the creator's own clips
+    # don't cover — real motion instead of a Ken Burns pan over a still,
+    # which is the clearest visual difference between an automated montage
+    # and a hand-cut one. Rides along with the "community" source rather than
+    # being its own toggle: both are the same promise to the creator ("free
+    # visuals I don't have to provide myself"), and stock keeps that promise
+    # even for a niche whose shared pool is still empty. Costs the creator
+    # nothing (see stock_video.py) and is entirely best-effort: no key, no
+    # match, or a failed download simply leaves that scene on its image.
+    if "community" in enabled_sources:
+        from src.config import PEXELS_API_KEY
+        if not PEXELS_API_KEY:
+            logger.info("Stock footage enabled for this channel but PEXELS_API_KEY is unset; scenes stay on images.")
+        else:
+            from src.pipeline.scene_director import build_stock_search_queries
+            from src.pipeline.stock_video import fetch_stock_clips
+            # Only scenes still without footage are worth a query/download.
+            open_indices = [i for i in range(len(segments)) if visual_types[i] != "video"]
+            if open_indices:
+                queries = build_stock_search_queries(
+                    segment_texts=[prompts[i] if i < len(prompts) else "" for i in open_indices],
+                    niche=channel_config.get("niche", ""),
+                )
+                if queries:
+                    progress("Recherche de séquences vidéo", 45)
+                    clips = fetch_stock_clips(queries)
+                    for position, scene_index in enumerate(open_indices):
+                        clip_path = clips.get(position)
+                        if clip_path:
+                            visual_paths[scene_index] = clip_path
+                            visual_types[scene_index] = "video"
+                    if clips:
+                        logger.info(f"Stock footage: {len(clips)} scene(s) filled from Pexels.")
+                        # Pexels' API terms require crediting the platform and
+                        # recommend crediting the videographer — persisted here
+                        # so the publisher can append real credits to the
+                        # description (see youtube_metadata.stock_credits_block).
+                        from src.pipeline.stock_video import collect_attributions
+                        credits = collect_attributions(list(clips.values()))
+                        if credits:
+                            (source_dir / "stock_credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
+
     # 5. Generate Subtitles ASS file
     logger.info("Step 4/7: Formatting ASS subtitles...")
     progress("Création des sous-titres", 55)

@@ -143,7 +143,11 @@ def build_video_clip(
     same 1920x1080 canvas as image scenes. Audio from the B-roll is discarded;
     the narration/mix remains the single authoritative audio track.
     """
-    filter_graph = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps={}:format=yuv420p".format(fps)
+    # `format` is its own filter, not an option of `fps` — chaining it with ":"
+    # made ffmpeg reject the whole graph ("Option not found"), which failed
+    # every single video scene (creator B-roll included) before any output
+    # was written.
+    filter_graph = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps={},format=yuv420p".format(fps)
     cmd = [
         "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(video_path),
         "-t", f"{duration:.3f}", "-vf", filter_graph,

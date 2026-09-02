@@ -72,3 +72,51 @@ The scene_prompts array MUST have exactly {len(segment_texts)} entries, in order
     except Exception as e:
         logger.warning(f"Scene director failed, falling back to raw narration text as image prompts: {e}")
         return None
+
+
+def build_stock_search_queries(
+    segment_texts: List[str],
+    niche: str = "",
+) -> Optional[List[str]]:
+    """Turns each scene's narration into a short ENGLISH stock-footage search
+    query (Pexels indexes in English, and searches by concrete filmable
+    subject — "snowy forest aerial", not "the fragility of the human soul").
+
+    Deliberately a separate, cheap call rather than an extra field on
+    build_scene_prompts: image prompts and footage queries want opposite
+    things (dense stylistic description vs. two or three plain searchable
+    nouns), and keeping them apart means enabling stock footage can't
+    regress the image path if this call fails — it just returns None and
+    every scene stays on its image.
+    """
+    if not (ANTHROPIC_API_KEY or FAL_API_KEY or OPENAI_API_KEY) or not segment_texts:
+        return None
+
+    try:
+        numbered_segments = "\n".join(f"{i+1}. {t.strip() or '(silence/transition)'}" for i, t in enumerate(segment_texts))
+        instruction = f"""You pick stock-footage search queries for a faceless YouTube narration video (niche: {niche or "general"}).
+
+Each scene below plays under this narration:
+{numbered_segments}
+
+For EACH of the {len(segment_texts)} scenes, write ONE English stock-video search query (2-4 words) naming a concrete, filmable subject that fits what's being narrated — the kind of thing a stock library actually has footage of (places, weather, nature, cities, machines, hands, crowds, objects, work, travel).
+
+Rules:
+- Concrete and visual only. Never abstract concepts, emotions, metaphors or proper nouns of people.
+- No words that would put text on screen (no "sign", "book page", "newspaper", "screen").
+- Vary the queries so consecutive scenes don't return the same footage.
+
+Respond with ONLY this JSON object, no other text:
+{{"queries": ["query for scene 1", "query for scene 2", ...]}}
+The queries array MUST have exactly {len(segment_texts)} entries, in order."""
+
+        raw_text = generate_text(instruction, max_tokens=1500, model=SCENE_DIRECTOR_MODEL, operation='stock_query_direction')
+        data = _extract_json(raw_text)
+        queries = data.get("queries")
+        if not isinstance(queries, list) or len(queries) != len(segment_texts):
+            logger.warning(f"Stock-query director returned {len(queries) if isinstance(queries, list) else 'no'} queries for {len(segment_texts)} scenes; ignoring.")
+            return None
+        return [str(q).strip() for q in queries]
+    except Exception as e:
+        logger.warning(f"Stock-query director failed, no stock footage will be fetched: {e}")
+        return None
