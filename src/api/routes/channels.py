@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 import random
 import json
 import re
+import hashlib
 import shutil
 import subprocess
 import time
@@ -36,6 +37,14 @@ ALLOWED_LIBRARY_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 ALLOWED_BROLL_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 MAX_BROLL_UPLOAD_BYTES = 250 * 1024 * 1024  # 250 MB per creator clip
+
+
+class VoiceSettingsPreviewRequest(BaseModel):
+    """The four controls exposed in the voice step, used for a short TTS test."""
+    speed: float = 0.845
+    stability: float = 0.8
+    similarity_boost: float = 0.9
+    style: float = 0.0
 
 # <script> tags and inline event-handler attributes (onload=, onclick=, ...) —
 # an SVG opened directly (not just used as <img src>) executes any script it
@@ -93,14 +102,26 @@ def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str
     the video-overlay logo (branding.logo_path) — so a creator who connects
     their real YouTube channel gets a logo on their videos immediately,
     instead of the corner staying blank until they separately upload one
-    manually. Never overwrites a logo that's already set (whether uploaded
-    by hand or filled in by an earlier sync), mutates channel.branding
-    in place; caller is responsible for the db.commit()."""
+    manually. Never overwrites a logo a creator uploaded by hand
+    (branding.logo_source == "manual", set by the direct /logo upload
+    endpoint) — but DOES refresh one this same function filled in earlier
+    (logo_source == "youtube_auto") whenever the YouTube avatar URL has
+    actually changed since. Without this, a channel connected before its
+    owner had gotten around to setting a real profile picture on YouTube
+    permanently kept whatever YouTube's own placeholder avatar looked like
+    at that moment (often a plain circle+initial), even after a real photo
+    was set later — this runs on every identity sync (every ~6h), so a
+    changed avatar catches up within one cycle instead of never.
+    Mutates channel.branding in place; caller is responsible for the
+    db.commit()."""
     if not thumbnail_url:
         return
     branding = dict(channel.branding or {})
     if branding.get("logo_path"):
-        return
+        if branding.get("logo_source") != "youtube_auto":
+            return  # a manually-uploaded logo is never touched
+        if branding.get("youtube_avatar_synced_url") == thumbnail_url:
+            return  # already synced to this exact avatar, nothing changed
     try:
         resp = httpx.get(thumbnail_url, timeout=15)
         resp.raise_for_status()
@@ -117,6 +138,8 @@ def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str
         old_logo.unlink(missing_ok=True)
     (channel_dir / f"logo{ext}").write_bytes(contents)
     branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
+    branding["logo_source"] = "youtube_auto"
+    branding["youtube_avatar_synced_url"] = thumbnail_url
     channel.branding = branding
 
 
@@ -415,12 +438,18 @@ def delete_my_cloned_voice(voice_id: str, current_user: User = Depends(get_curre
 
 
 @router.get("/voice/{voice_id}/preview")
-def get_voice_preview(voice_id: str, current_user: User = Depends(get_current_user)):
+def get_voice_preview(voice_id: str, variant: Optional[str] = None, current_user: User = Depends(get_current_user)):
     """Serves the short sample generated right after cloning (see
     _run_clone_job) — Izivoice's /clone itself never returns one."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
         raise HTTPException(status_code=404, detail="Aperçu introuvable.")
-    preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
+    # A settings-aware preview is a separate cached file.  Keeping the
+    # original no-query URL intact means previews generated after cloning and
+    # the voice picker keep working exactly as before.
+    if variant and not re.fullmatch(r"[a-f0-9]{16}", variant):
+        raise HTTPException(status_code=404, detail="Aperçu introuvable.")
+    suffix = f"_{variant}" if variant else ""
+    preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}{suffix}.mp3"
     if not preview_path.exists():
         raise HTTPException(status_code=404, detail="Aperçu introuvable.")
     return FileResponse(preview_path, media_type="audio/mpeg")
@@ -457,6 +486,51 @@ def generate_voice_preview(voice_id: str, current_user: User = Depends(get_curre
             logger.warning(f"On-demand voice preview generation failed for {voice_id}: {exc}")
             raise HTTPException(status_code=502, detail="Impossible de générer l'aperçu pour cette voix.")
     return {"preview_url": f"/channels/voice/{voice_id}/preview"}
+
+
+@router.post("/voice/{voice_id}/preview/settings")
+def generate_voice_settings_preview(
+    voice_id: str,
+    payload: VoiceSettingsPreviewRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a short sample with the exact controls selected in the wizard.
+
+    The result is cached by voice + settings, so clicking preview twice without
+    changing a control does not trigger another Izivoice generation.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
+        raise HTTPException(status_code=400, detail="Identifiant de voix invalide.")
+    api_key = izivoice_key_for_user(current_user)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Connecte d'abord ton compte Izivoice dans les paramètres.")
+
+    settings = {
+        "speed": round(min(1.5, max(0.5, payload.speed)), 2),
+        "stability": round(min(1.0, max(0.0, payload.stability)), 2),
+        "similarity_boost": round(min(1.0, max(0.0, payload.similarity_boost)), 2),
+        "style": round(min(1.0, max(0.0, payload.style)), 2),
+    }
+    variant = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16]
+    preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}_{variant}.mp3"
+    if not preview_path.exists():
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        from src.pipeline.voiceover import generate_voiceover
+        try:
+            # A preview must stay quick and must not pay for an unnecessary
+            # second transcription pass just to obtain subtitle timings.
+            generate_voiceover(
+                VOICE_PREVIEW_TEXT,
+                preview_path,
+                voice_id=voice_id,
+                api_key=api_key,
+                voice_settings=settings,
+                transcribe=False,
+            )
+        except Exception as exc:
+            logger.warning(f"Voice settings preview generation failed for {voice_id}: {exc}")
+            raise HTTPException(status_code=502, detail="Impossible de générer l'aperçu avec ces réglages.")
+    return {"preview_url": f"/channels/voice/{voice_id}/preview?variant={variant}"}
 
 def _write_library_image(dest_path: Path, ext: str, contents: bytes) -> None:
     """Writes an uploaded image's bytes to disk, converting HEIC/HEIF (the
@@ -1042,6 +1116,10 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), cur
 
     branding = dict(channel.branding or {})
     branding["logo_path"] = f"channels/{channel.id}/logo{ext}"
+    # Marks this as a deliberate creator choice — _fill_logo_from_youtube_avatar
+    # never overwrites a "manual" logo, even when the YouTube avatar changes later.
+    branding["logo_source"] = "manual"
+    branding.pop("youtube_avatar_synced_url", None)
     channel.branding = branding
 
     db.commit()
