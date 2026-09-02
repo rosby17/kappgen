@@ -30,7 +30,9 @@ from src.pipeline.image_pool import get_image_pool
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
 TASK_POLL_TIMEOUT_SECONDS = 90  # fail fast to a fallback image rather than stalling the whole render
-IZIVOICE_IMAGE_MODEL_ID = "bytedance-seedream-4.5"
+# Izivoice exposes OpenAI's GPT Image 2 directly. Use it for the Izivoice
+# path so thumbnail generations do not silently run through Seedream.
+IZIVOICE_IMAGE_MODEL_ID = "gpt-image-2"
 
 
 def _izivoice_headers() -> Dict[str, str]:
