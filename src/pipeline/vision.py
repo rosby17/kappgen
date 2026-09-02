@@ -112,7 +112,7 @@ def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     # window, which turns an ordinary provider delay into a misleading
     # browser-level "Failed to fetch". Keep each fallback short enough that
     # the route can return a normal JSON error instead.
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=25.0)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
     content = []
     for image_bytes, media_type in images:
         content.append({
@@ -127,7 +127,11 @@ def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
 
     response = client.messages.create(
         model="claude-opus-5",
-        max_tokens=400,
+        # Enough room for the full JSON contract (style brief + character
+        # anchor + typography + summary). At the old 400 the answer was cut
+        # mid-sentence, json.loads failed, and the raw truncated blob was
+        # stored as the style prompt.
+        max_tokens=2000,
         messages=[{"role": "user", "content": content}],
     )
 
@@ -156,7 +160,7 @@ def _analyze_many_with_fal(images: list, instruction: str) -> str:
             "prompt": instruction,
             "model": "anthropic/claude-sonnet-4.5",
         },
-        timeout=25.0,
+        timeout=60.0,
     )
     resp.raise_for_status()
     output = (resp.json() or {}).get("output")
@@ -179,10 +183,10 @@ def _analyze_many_with_openai(images: list, instruction: str) -> str:
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
         json={
             "model": "gpt-4o",
-            "max_tokens": 400,
+            "max_tokens": 2000,
             "messages": [{"role": "user", "content": content}],
         },
-        timeout=25.0,
+        timeout=60.0,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -339,8 +343,29 @@ def analyze_thumbnail_reference_profile(images: list) -> dict:
         data = json.loads(cleaned)
     except ValueError:
         # A model that ignored the JSON contract still gives usable art
-        # direction — keep it rather than failing the whole upload.
-        return {"style_prompt": raw.strip(), "text_side": None, "character_anchor": "", "typography_style": "", "analysis_summary": None}
+        # direction — keep it rather than failing the whole upload. But a
+        # response that merely got CUT OFF mid-JSON must not be stored raw:
+        # that stored a literal '{ "style_prompt": "...' blob as the channel's
+        # style brief, braces and key names included, which then went straight
+        # into every image prompt. Salvage the fields we can still read.
+        salvaged = {}
+        for key in ("style_prompt", "character_anchor", "typography_style", "analysis_summary"):
+            match = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)', cleaned)
+            if match:
+                try:
+                    salvaged[key] = json.loads(f'"{match.group(1)}"')
+                except ValueError:
+                    salvaged[key] = match.group(1)
+        if not str(salvaged.get("style_prompt") or "").strip():
+            salvaged["style_prompt"] = raw.strip()
+        side = re.search(r'"text_side"\s*:\s*"(left|right)"', cleaned)
+        return {
+            "style_prompt": salvaged["style_prompt"].strip(),
+            "text_side": side.group(1) if side else None,
+            "character_anchor": str(salvaged.get("character_anchor") or "").strip()[:600],
+            "typography_style": str(salvaged.get("typography_style") or "").strip()[:600],
+            "analysis_summary": salvaged.get("analysis_summary"),
+        }
     if not str(data.get("style_prompt") or "").strip():
         raise ValueError("Reference analysis returned no style_prompt")
     if data.get("text_side") not in ("left", "right"):
