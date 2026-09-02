@@ -1,4 +1,5 @@
 import re
+import hashlib
 from difflib import SequenceMatcher
 from typing import Iterable
 
@@ -49,6 +50,41 @@ def detect_niche_profile(channel) -> tuple[str, dict] | tuple[None, None]:
         if any(term in niche for term in profile["terms"]):
             return key, profile
     return None, None
+
+
+def build_compliance_dossier(video, channel) -> dict:
+    """Snapshot of the evidence KappGen actually knows for this video."""
+    script = video.script_text or ""
+    description = video.youtube_description or ""
+    image_style = getattr(channel, "image_style", None) or {}
+    music = getattr(channel, "music_preference", None) or {}
+    enabled_sources = image_style.get("sources") or ([image_style.get("source")] if image_style.get("source") else [])
+    source_urls = re.findall(r"https?://[^\s)\]]+", description)
+    return {
+        "version": 1,
+        "video_id": getattr(video, "id", None),
+        "content": {
+            "title": video.title or "",
+            "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
+            "script_word_count": len(re.findall(r"\b[\wÀ-ÿ'-]+\b", script)),
+            "description_source_urls": source_urls,
+        },
+        "media": {
+            "visual_sources": [source for source in enabled_sources if source],
+            "visual_style_prompt_present": bool(image_style.get("style_prompt")),
+            "music_mode": music.get("mode"),
+            "music_tracks": [str(track).split("/")[-1] for track in (music.get("tracks") or [])],
+            "voice_id": getattr(video, "voice_id", None) or getattr(channel, "voice_id", None),
+        },
+        "youtube_declarations": {
+            "contains_synthetic_media": True,
+            "made_for_kids": bool(getattr(channel, "youtube_made_for_kids", False)),
+        },
+        "compliance_report": getattr(video, "youtube_compliance_report", None),
+        "audit_history": list(getattr(video, "youtube_compliance_history", None) or []),
+        "reviewed_at": getattr(video, "youtube_compliance_reviewed_at", None).isoformat() if getattr(video, "youtube_compliance_reviewed_at", None) else None,
+        "reviewed_by": getattr(video, "youtube_compliance_reviewed_by", None),
+    }
 
 
 def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) -> dict:

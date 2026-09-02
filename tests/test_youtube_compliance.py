@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from src.pipeline.youtube_compliance import evaluate_youtube_compliance
+from src.pipeline.youtube_compliance import evaluate_youtube_compliance, build_compliance_dossier
 
 
 def video(script, title="Un titre YouTube suffisamment précis", description="Une description complète " * 8, id="new"):
@@ -54,3 +54,21 @@ def test_source_link_is_recognised_for_history():
     report = evaluate_youtube_compliance(item, channel("Histoire"), [])
     source_check = next(check for check in report["checks"] if check["code"] == "sources")
     assert source_check["state"] == "pass"
+
+
+def test_traceability_dossier_records_known_provenance():
+    item = video("contenu original " * 400, description="Source https://example.org/report")
+    item.voice_id = "voice-123"
+    item.youtube_compliance_report = {"score": 92, "status": "green"}
+    item.youtube_compliance_history = [{"event": "check_completed"}]
+    item.youtube_compliance_reviewed_at = None
+    item.youtube_compliance_reviewed_by = None
+    ch = channel()
+    ch.image_style = {"sources": ["ai_generated", "library"], "style_prompt": "documentaire"}
+    ch.music_preference = {"mode": "library", "tracks": ["channels/x/music/track.mp3"]}
+    ch.voice_id = None
+    dossier = build_compliance_dossier(item, ch)
+    assert dossier["content"]["description_source_urls"] == ["https://example.org/report"]
+    assert dossier["media"]["visual_sources"] == ["ai_generated", "library"]
+    assert dossier["media"]["music_tracks"] == ["track.mp3"]
+    assert dossier["youtube_declarations"]["contains_synthetic_media"] is True

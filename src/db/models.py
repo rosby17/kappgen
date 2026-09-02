@@ -443,6 +443,9 @@ class Video(Base):
     # publish_mode "auto" (publishes immediately, no gate) or "manual".
     approved_for_publish = Column(Boolean, nullable=False, default=False)
     youtube_compliance_report = Column(JSON, nullable=True)
+    youtube_compliance_history = Column(JSON, nullable=True)
+    youtube_compliance_reviewed_at = Column(DateTime, nullable=True)
+    youtube_compliance_reviewed_by = Column(String(36), nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -482,6 +485,9 @@ class Video(Base):
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "youtube_compliance_report": self.youtube_compliance_report,
+            "youtube_compliance_history": self.youtube_compliance_history or [],
+            "youtube_compliance_reviewed_at": self.youtube_compliance_reviewed_at.isoformat() if self.youtube_compliance_reviewed_at else None,
+            "youtube_compliance_reviewed_by": self.youtube_compliance_reviewed_by,
             "downloaded_at": self.downloaded_at.isoformat() if self.downloaded_at else None,
             "can_undo": bool(self.edit_history),
         }

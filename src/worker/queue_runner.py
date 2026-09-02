@@ -562,6 +562,12 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     )
     compliance = evaluate_youtube_compliance(video, channel, previous)
     video.youtube_compliance_report = compliance
+    audit_history = list(video.youtube_compliance_history or [])
+    audit_history.append({
+        "at": datetime.utcnow().isoformat(), "event": "automatic_check_completed",
+        "details": {"score": compliance["score"], "status": compliance["status"]},
+    })
+    video.youtube_compliance_history = audit_history[-50:]
     if not compliance["can_human_publish"] or (compliance["requires_human_review"] and not video.approved_for_publish):
         video.youtube_publish_error = "Publication suspendue par le Contrôle YouTube KappGen."
         video.progress_stage = "Validation YouTube requise"
@@ -614,6 +620,12 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         video.youtube_published_at = datetime.utcnow()
         video.youtube_publish_error = None
         video.progress_stage = "Vidéo publiée sur YouTube"
+        audit_history = list(video.youtube_compliance_history or [])
+        audit_history.append({
+            "at": datetime.utcnow().isoformat(), "event": "youtube_published",
+            "details": {"youtube_video_id": video_id, "score": compliance["score"]},
+        })
+        video.youtube_compliance_history = audit_history[-50:]
         db.commit()
         logger.info(f"Auto-published video {video.id} to YouTube (channel {channel.id}) as {video_id}.")
     except Exception as e:

@@ -16,7 +16,7 @@ from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
-from src.pipeline.youtube_compliance import evaluate_youtube_compliance
+from src.pipeline.youtube_compliance import evaluate_youtube_compliance, build_compliance_dossier
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render, estimate_video_cost_credits
@@ -493,15 +493,32 @@ def _refresh_compliance_report(db: Session, video: Video) -> dict:
         .all()
     )
     report = evaluate_youtube_compliance(video, video.channel, previous)
+    previous_report = video.youtube_compliance_report or {}
     video.youtube_compliance_report = report
+    if previous_report.get("score") != report.get("score") or previous_report.get("status") != report.get("status"):
+        _append_compliance_event(video, "check_completed", {"score": report["score"], "status": report["status"]})
     db.commit()
     return report
+
+
+def _append_compliance_event(video: Video, event: str, details: Optional[dict] = None) -> None:
+    history = list(video.youtube_compliance_history or [])
+    history.append({"at": datetime.utcnow().isoformat(), "event": event, "details": details or {}})
+    video.youtube_compliance_history = history[-50:]
 
 
 @router.get("/{video_id}/youtube/compliance")
 def get_youtube_compliance(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
     return _refresh_compliance_report(db, video)
+
+
+@router.get("/{video_id}/youtube/compliance/dossier")
+def get_youtube_compliance_dossier(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    _refresh_compliance_report(db, video)
+    db.refresh(video)
+    return build_compliance_dossier(video, video.channel)
 
 
 class CompliancePublishRequest(BaseModel):
@@ -546,11 +563,20 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
 
     report = _refresh_compliance_report(db, video)
     if not report["can_human_publish"]:
+        _append_compliance_event(video, "publish_blocked", {"score": report["score"], "status": report["status"]})
+        db.commit()
         raise HTTPException(status_code=409, detail={"code": "youtube_compliance_blocked", "message": "Le contrôle YouTube bloque cette publication.", "report": report})
     if report["requires_human_review"] and not (payload and payload.confirm_human_review):
+        _append_compliance_event(video, "human_review_required", {"score": report["score"]})
+        db.commit()
         raise HTTPException(status_code=409, detail={"code": "youtube_compliance_review_required", "message": "Une validation humaine est requise.", "report": report})
     if report["requires_human_review"]:
         video.approved_for_publish = True
+        video.youtube_compliance_reviewed_at = datetime.utcnow()
+        video.youtube_compliance_reviewed_by = current_user.id
+        _append_compliance_event(video, "human_review_confirmed", {"user_id": current_user.id, "score": report["score"]})
+    else:
+        _append_compliance_event(video, "publish_authorized", {"score": report["score"], "mode": "manual"})
 
     video.youtube_publish_error = None
     video.progress_stage = "Préparation de la publication YouTube"
