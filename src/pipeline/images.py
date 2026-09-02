@@ -469,7 +469,10 @@ def generate_thumbnail_image(
     (youtube_metadata.py) then falls through to its own video-frame-grab
     fallback, same as the per-scene body images already do, so a thumbnail
     never silently costs money beyond what the admin explicitly opted into."""
-    order = provider_order if provider_order is not None else ["huggingface"]
+    # Thumbnails are deliberately locked to Izivoice's direct GPT Image 2
+    # endpoint. Provider settings for scene artwork must never downgrade this
+    # highest-value asset to FLUX or a different model.
+    order = ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths),
@@ -478,8 +481,6 @@ def generate_thumbnail_image(
     labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice"}
     last_exc: Optional[Exception] = None
     for name in order:
-        if name == "huggingface" and reference_image_paths:
-            continue  # text-to-image only, can't condition on a reference image
         try:
             return funcs[name]()
         except Exception as exc:
