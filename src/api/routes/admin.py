@@ -527,11 +527,9 @@ def admin_list_orders(admin: User = Depends(get_current_admin), db: Session = De
 # admin overview below even before anyone has uploaded anything into it.
 KNOWN_NICHES = [
     "Philosophie", "Philosophie Stoïcienne", "Philosophie de Machiavel", "Philosophie de Napoleon Hill",
-    "Stoïcisme", "Prière", "Méditation", "Bouddhisme", "Islam",
-    "Mythologie", "Histoires Antiques", "Histoire Européenne", "Histoire",
-    "Développement Personnel", "Motivation", "Récits Captivants", "Psychologie de Carl Jung", "Finance", "Business",
-    "Santé & Bien-être", "Football", "Sport", "Science", "Faits Divers", "True Crime", "Voyage", "Cuisine",
-    "Astuces Maison",
+    "Prière", "Bouddhisme", "Islam", "Méditation", "Motivation", "Développement Personnel",
+    "Psychologie de Carl Jung", "Astuces Maison", "Business", "Cuisine", "Finance", "Faits Divers",
+    "Football", "Histoire Africaine", "Histoire Européenne", "Santé & Bien-être", "Science", "Astronomie & Espace",
 ]
 
 
