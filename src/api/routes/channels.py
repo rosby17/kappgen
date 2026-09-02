@@ -1,4 +1,5 @@
 from pathlib import Path
+from functools import lru_cache
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
@@ -10,6 +11,7 @@ import random
 import json
 import re
 import shutil
+import subprocess
 import time
 import uuid
 import httpx
@@ -469,6 +471,42 @@ def list_niches(db: Session = Depends(get_db)):
     """
     rows = db.query(Channel.niche).distinct().order_by(Channel.niche).all()
     return [r[0] for r in rows if r[0]]
+
+
+@lru_cache(maxsize=1)
+def _installed_font_families() -> tuple[str, ...]:
+    """Return the real family names known by the render container.
+
+    The picker is deliberately backed by fontconfig rather than a large
+    hard-coded list: every displayed family can therefore be resolved by the
+    same renderer that burns the subtitles into the finished video.
+    """
+    try:
+        result = subprocess.run(
+            ["fc-list", "--format=%{family}\n"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"Could not enumerate installed fonts: {exc}")
+        return ()
+
+    families: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        # fontconfig may return several aliases for one face, comma-separated.
+        for raw_name in line.split(","):
+            name = re.sub(r"\s+", " ", raw_name).strip()
+            if name and not name.startswith("."):
+                families.setdefault(name.casefold(), name)
+    return tuple(sorted(families.values(), key=str.casefold))
+
+
+@router.get("/fonts")
+def list_render_fonts():
+    """Font families actually available to subtitle rendering."""
+    return {"fonts": list(_installed_font_families())}
 
 
 def _suggest_niche_for_channel(db: Session, title: str, description: str) -> Optional[str]:

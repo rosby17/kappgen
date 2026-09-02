@@ -14,13 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-comfortaa \
     fonts-cabin \
     fonts-noto-core \
+    fonts-noto-extra \
+    fonts-noto-cjk \
+    fonts-noto-cjk-extra \
+    fonts-noto-ui-core \
+    fonts-noto-ui-extra \
     fonts-comic-neue \
-    # Extra display/script/serif families for the subtitle font picker — every
-    # package below was downloaded and its .ttf/.otf name table was actually
-    # read (fontTools) to confirm the real family name before it went in this
-    # list, since Debian's fonts-* package names don't always match the font
-    # inside (e.g. fonts-lobster is a mislabeled duplicate of Lobster Two —
-    # deliberately left out).
+    # Extra display/script/serif families for the subtitle font picker. The
+    # API reads their real family names from fontconfig after installation,
+    # so Debian package names never leak into the user-facing catalogue.
     fonts-b612 \
     fonts-cabinsketch \
     fonts-cantarell \
@@ -43,6 +45,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-lobstertwo \
     fonts-manrope \
     fonts-montserrat \
+    fonts-cinzel \
+    fonts-playfair-display \
+    fonts-raleway \
+    fonts-oxygen \
+    fonts-ubuntu \
+    fonts-freefont-ttf \
+    fonts-urw-base35 \
+    fonts-texgyre \
+    fonts-firacode \
+    fonts-hack \
+    fonts-inconsolata \
+    fonts-jetbrains-mono \
     fonts-national-park \
     fonts-play \
     fonts-quattrocento \
