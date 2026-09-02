@@ -926,3 +926,30 @@ class CreditTransaction(Base):
             "description": self.description,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class ApiCreditPot(Base):
+    """Credits purchased specifically for external API usage.
+
+    Kept in separate tables from the dashboard wallet so API consumption can
+    never spend the creator's regular interface credits.
+    """
+    __tablename__ = "api_credit_pots"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    amount = Column(Integer, nullable=False)
+    original_amount = Column(Integer, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApiCreditTransaction(Base):
+    """Audit trail for API-wallet purchases, debits, refunds and adjustments."""
+    __tablename__ = "api_credit_transactions"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    amount = Column(Integer, nullable=False)
+    transaction_type = Column(String(30), nullable=False)
+    description = Column(Text, nullable=True)
+    request_id = Column(String(80), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
