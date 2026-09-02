@@ -18,10 +18,12 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
     fade_in = min(max(0.0, float(settings.get("fade_in_seconds", 2.0))), duration / 2)
     fade_out = min(max(0.0, float(settings.get("fade_out_seconds", 3.0))), duration / 2)
     fade_out_start = max(0.0, duration - fade_out)
+    # Only split the narration when sidechain ducking will consume the second
+    # branch. FFmpeg rejects an unconnected asplit output when ducking is off.
+    voice_input = "[0:a]highpass=f=70,loudnorm=I=-15:TP=-1.2:LRA=11"
+    ducking_enabled = settings.get("auto_ducking", True)
     parts = [
-        # The narration is normalized once and then kept at unity gain. One
-        # branch drives music ducking; the other receives voice-only effects.
-        "[0:a]highpass=f=70,loudnorm=I=-15:TP=-1.2:LRA=11,asplit=2[voice_fx][voice_sc]",
+        voice_input + (",asplit=2[voice_fx][voice_sc]" if ducking_enabled else "[voice_fx]"),
         f"[1:a]aloop=loop=-1:size=2e+09,atrim=duration={duration:.3f},asetpts=N/SR/TB,"
         f"afade=t=in:st=0:d={fade_in:.3f},afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}[music0]",
     ]
@@ -29,7 +31,7 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
     parts.append(f"[music0]volume={volume:.3f}[music_level]")
     music_current = "music_level"
 
-    if settings.get("auto_ducking", True):
+    if ducking_enabled:
         amount = _unit(settings.get("ducking_amount"), 0.70)
         ratio = 2.0 + amount * 10.0
         release = 220 + amount * 380
