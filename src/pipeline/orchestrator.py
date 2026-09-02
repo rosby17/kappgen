@@ -72,7 +72,7 @@ def run_video_pipeline(
             # the filename-derived title), so transcribe via Izivoice speech-to-text
             # to get accurate subtitle text and word-level timing. This is billable
             # (Izivoice STT credits) — callers can opt out via transcribe_audio=False.
-            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré", api_key=izivoice_api_key)
+            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré", api_key=izivoice_api_key, user_id=channel_config.get("user_id"))
         else:
             # Skips the paid STT call entirely — subtitles fall back to the video's
             # title evenly spread over the audio's duration (same fallback already

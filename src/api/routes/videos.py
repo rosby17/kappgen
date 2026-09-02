@@ -16,7 +16,7 @@ from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
-from src.pipeline.youtube_compliance import evaluate_youtube_compliance, build_compliance_dossier
+from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluate_script_compliance, build_compliance_dossier
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render, estimate_video_cost_credits
@@ -120,6 +120,9 @@ async def submit_video_subject(
     script_text: Optional[str] = Form(""),
     audio_files: Optional[List[UploadFile]] = File(None),
     transcribe_audio: bool = Form(True),
+    audio_rights_confirmed: bool = Form(False),
+    audio_source_type: Optional[str] = Form(None),
+    force_script_render: bool = Form(False),
     voice_id: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
@@ -162,6 +165,14 @@ async def submit_video_subject(
                 status_code=403,
                 detail="La transcription automatique (IA) n'est pas incluse dans ton abonnement actuel. Désactive-la pour utiliser le titre du fichier comme sous-titre, ou passe à un palier supérieur.",
             )
+    if input_type == "audio" and not audio_rights_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmez que vous possédez les droits nécessaires sur l’audio et la voix avant de continuer.",
+        )
+    allowed_audio_sources = {"personal", "licensed", "cloned", "third_party", "music"}
+    if input_type == "audio" and audio_source_type not in allowed_audio_sources:
+        raise HTTPException(status_code=400, detail="Indiquez la provenance de l’audio importé.")
 
     can_render, reason = user_can_render(db, current_user)
     if not can_render:
@@ -237,10 +248,13 @@ async def submit_video_subject(
                 title=auto_title,
                 script_text=auto_title,
                 input_type="audio",
+                creation_source="audio",
                 audio_input_path=str(dest_file),
                 status=VideoStatus.QUEUED.value,
                 estimated_duration_seconds=estimated_duration,
                 transcribe_audio=transcribe_audio,
+                audio_rights_confirmed=True,
+                audio_source_type=audio_source_type,
                 voice_id=voice_id.strip() if voice_id else channel.voice_id,
             )
             db.add(video)
@@ -256,10 +270,9 @@ async def submit_video_subject(
         if not (script_text and script_text.strip()):
             raise HTTPException(status_code=400, detail="Veuillez saisir un texte de script pour la génération TTS.")
 
-        # Stop near-duplicate manual submissions before they consume credits
-        # or enter the render queue. This complements the post-render report;
-        # originality must be enforced at creation time, not only publication.
-        from src.pipeline.youtube_compliance import text_similarity
+        # Full script preflight happens before credits are estimated or the
+        # video enters the render queue. Red stops here; orange is preserved
+        # on the row so it will require human approval before publication.
         history = (
             db.query(Video)
             .filter(Video.channel_id == channel.id)
@@ -267,16 +280,12 @@ async def submit_video_subject(
             .limit(30)
             .all()
         )
-        closest = max(
-            ((text_similarity(script_text, old.script_text or ""), old) for old in history),
-            default=(0.0, None), key=lambda item: item[0],
-        )
-        if closest[0] >= 0.72:
+        script_report = evaluate_script_compliance(script_text, explicit_title or "", channel, history)
+        if not script_report["can_render"] and not force_script_render:
             raise HTTPException(status_code=409, detail={
-                "code": "script_too_similar",
-                "message": f"Ce scénario ressemble à {round(closest[0] * 100)} % à une ancienne vidéo. Réécrivez son angle, ses exemples et sa structure avant de le générer.",
-                "similar_video_id": closest[1].id if closest[1] else None,
-                "similar_title": closest[1].title if closest[1] else None,
+                "code": "script_compliance_blocked",
+                "message": script_report["blockers"][0] if script_report["blockers"] else "Ce scénario doit être corrigé avant le rendu.",
+                "report": script_report,
             })
             
         # Rough speech-rate estimate (~150 wpm) so the queue can prioritize
@@ -306,11 +315,26 @@ async def submit_video_subject(
             title=explicit_title,
             script_text=script_text.strip(),
             input_type="text",
+            creation_source="script",
             audio_input_path=None,
             status=VideoStatus.QUEUED.value,
             estimated_duration_seconds=estimated_duration,
             transcribe_audio=transcribe_audio,
             voice_id=voice_id.strip() if voice_id else channel.voice_id,
+            approved_for_publish=False,
+            script_compliance_overridden=bool(force_script_render and not script_report["can_render"]),
+            script_compliance_overridden_at=datetime.utcnow() if force_script_render and not script_report["can_render"] else None,
+            script_compliance_overridden_by=current_user.id if force_script_render and not script_report["can_render"] else None,
+            youtube_compliance_report=script_report,
+            youtube_compliance_history=[{
+                "at": datetime.utcnow().isoformat(),
+                "event": "script_preflight_completed",
+                "details": {"score": script_report["score"], "status": script_report["status"]},
+            }] + ([{
+                "at": datetime.utcnow().isoformat(),
+                "event": "script_render_forced",
+                "details": {"user_id": current_user.id, "score": script_report["score"]},
+            }] if force_script_render and not script_report["can_render"] else []),
         )
         db.add(video)
         db.commit()
@@ -523,6 +547,33 @@ def get_youtube_compliance_dossier(video_id: str, current_user: User = Depends(g
 
 class CompliancePublishRequest(BaseModel):
     confirm_human_review: bool = False
+    force_publish: bool = False
+
+
+class ComplianceOverrideRequest(BaseModel):
+    confirm_risk: bool = False
+
+
+@router.post("/{video_id}/script-compliance/override")
+def override_script_compliance(video_id: str, payload: ComplianceOverrideRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    report = video.youtube_compliance_report or {}
+    if not payload.confirm_risk:
+        raise HTTPException(status_code=400, detail="Vous devez confirmer le risque avant de forcer le montage.")
+    if report.get("phase") not in {"script_preflight", "audio_preflight"} or report.get("can_render", True):
+        raise HTTPException(status_code=409, detail="Cette vidéo n’est pas bloquée par le contrôle avant montage.")
+    video.script_compliance_overridden = True
+    video.script_compliance_overridden_at = datetime.utcnow()
+    video.script_compliance_overridden_by = current_user.id
+    video.publication_compliance_overridden = False
+    video.status = VideoStatus.QUEUED.value
+    video.error_message = None
+    video.progress_stage = "Montage forcé par le créateur"
+    video.progress_percent = 0
+    _append_compliance_event(video, "script_render_forced", {"user_id": current_user.id, "score": report.get("score")})
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
 
 
 @router.post("/{video_id}/youtube/publish")
@@ -562,15 +613,24 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
 
     report = _refresh_compliance_report(db, video)
-    if not report["can_human_publish"]:
+    force_publish = bool(payload and payload.force_publish)
+    if not report["can_human_publish"] and not force_publish:
         _append_compliance_event(video, "publish_blocked", {"score": report["score"], "status": report["status"]})
         db.commit()
         raise HTTPException(status_code=409, detail={"code": "youtube_compliance_blocked", "message": "Le contrôle YouTube bloque cette publication.", "report": report})
-    if report["requires_human_review"] and not (payload and payload.confirm_human_review):
+    if (report["requires_human_review"] or force_publish) and not (payload and payload.confirm_human_review):
         _append_compliance_event(video, "human_review_required", {"score": report["score"]})
         db.commit()
         raise HTTPException(status_code=409, detail={"code": "youtube_compliance_review_required", "message": "Une validation humaine est requise.", "report": report})
-    if report["requires_human_review"]:
+    if force_publish:
+        video.publication_compliance_overridden = True
+        video.publication_compliance_overridden_at = datetime.utcnow()
+        video.publication_compliance_overridden_by = current_user.id
+        video.approved_for_publish = True
+        video.youtube_compliance_reviewed_at = datetime.utcnow()
+        video.youtube_compliance_reviewed_by = current_user.id
+        _append_compliance_event(video, "publication_forced", {"user_id": current_user.id, "score": report["score"], "status": report["status"]})
+    elif report["requires_human_review"]:
         video.approved_for_publish = True
         video.youtube_compliance_reviewed_at = datetime.utcnow()
         video.youtube_compliance_reviewed_by = current_user.id
@@ -594,6 +654,13 @@ def update_youtube_metadata(video_id: str, payload: YoutubeMetadataUpdate, curre
     """Lets the creator review/edit the AI-proposed YouTube title (max 100
     chars, YouTube's own limit) and description before publishing."""
     video = _get_owned_video(db, video_id, current_user)
+    # A force decision only covers the exact title/description the creator
+    # reviewed. Editing either invalidates that decision and requires a fresh
+    # acknowledgement against the newly calculated report.
+    if payload.title is not None or payload.description is not None:
+        video.publication_compliance_overridden = False
+        video.publication_compliance_overridden_at = None
+        video.publication_compliance_overridden_by = None
     if payload.title is not None:
         title = payload.title.strip()
         if not title:

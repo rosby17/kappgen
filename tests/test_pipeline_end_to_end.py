@@ -151,7 +151,9 @@ def test_audio_upload_submission(tmp_path):
             data={
                 "channel_id": channel_id,
                 "input_type": "audio",
-                "script_text": "Audio préenregistré de test"
+                "script_text": "Audio préenregistré de test",
+                "audio_rights_confirmed": "true",
+                "audio_source_type": "personal",
             },
             files={"audio_files": ("test_voice.mp3", f, "audio/mpeg")}
         )
@@ -167,7 +169,7 @@ def test_audio_upload_submission(tmp_path):
     with open(corrupt_audio, "rb") as f:
         rejected = client.post(
             "/api/videos",
-            data={"channel_id": channel_id, "input_type": "audio"},
+            data={"channel_id": channel_id, "input_type": "audio", "audio_rights_confirmed": "true", "audio_source_type": "personal"},
             files={"audio_files": ("corrupt.mp3", f, "audio/mpeg")}
         )
     assert rejected.status_code == 400

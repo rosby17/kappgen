@@ -1,4 +1,5 @@
 import shutil
+import json
 import signal
 import threading
 import time
@@ -24,7 +25,7 @@ from src.pipeline import youtube_publisher
 from src.pipeline import youtube_metadata
 from src.config import STORAGE_PATH, AUTOMATION_LAUNCH_SPACING_SECONDS
 from src.utils.logger import logger
-from src.utils.ffmpeg_runner import get_audio_duration
+from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 
 # Tightened to 48h after the VPS disk filled up (200GB, rendered videos alone
 # were 84GB) and started failing deploys mid-build — every video, regardless
@@ -278,6 +279,62 @@ def process_single_queued_video() -> bool:
                 pre_audio_path = p
         if video.input_type == "audio" and pre_audio_path is None:
             raise ValueError("Le fichier audio source est introuvable sur le serveur. Veuillez créer une nouvelle vidéo et le renvoyer.")
+
+        if video.input_type == "audio" and (video.youtube_compliance_report or {}).get("phase") != "audio_preflight":
+            from src.pipeline.youtube_compliance import evaluate_audio_compliance
+            if not video.audio_rights_confirmed:
+                raise ValueError("Les droits sur l’audio et la voix doivent être confirmés avant le rendu.")
+
+            transcript_info = {"transcription_source": "fallback"}
+            if video.transcribe_audio:
+                from src.pipeline.voiceover import generate_transcript_for_audio
+                source_dir = video_dir / "source"
+                source_dir.mkdir(parents=True, exist_ok=True)
+                raw_vo_path = source_dir / "voiceover.mp3"
+                transcript_path = source_dir / "transcript.json"
+                if raw_vo_path.exists() and transcript_path.exists():
+                    transcript_info = json.loads(transcript_path.read_text(encoding="utf-8"))
+                else:
+                    video.progress_stage = "Transcription et contrôle de l’audio"
+                    video.progress_percent = 5
+                    db.commit()
+                    run_ffmpeg([
+                        "ffmpeg", "-y", "-i", str(pre_audio_path.resolve()),
+                        "-c:a", "libmp3lame", "-b:a", "192k", str(raw_vo_path),
+                    ])
+                    transcript_info = generate_transcript_for_audio(
+                        raw_vo_path,
+                        fallback_text=video.title or "Audio préenregistré",
+                        api_key=izivoice_api_key,
+                        user_id=channel.user_id,
+                    )
+                    transcript_path.write_text(json.dumps(transcript_info, ensure_ascii=False), encoding="utf-8")
+
+            previous_audio = (
+                db.query(Video)
+                .filter(Video.channel_id == channel.id, Video.id != video.id)
+                .order_by(Video.created_at.desc())
+                .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+                .all()
+            )
+            audio_report = evaluate_audio_compliance(
+                transcript_info, video.title or "", channel, previous_audio,
+                source_type=video.audio_source_type or "third_party",
+            )
+            if transcript_info.get("transcription_source") == "izivoice":
+                video.script_text = transcript_info.get("text") or video.script_text
+            video.youtube_compliance_report = audio_report
+            audit_history = list(video.youtube_compliance_history or [])
+            audit_history.append({
+                "at": datetime.utcnow().isoformat(),
+                "event": "audio_preflight_completed",
+                "details": {"score": audio_report["score"], "status": audio_report["status"]},
+            })
+            video.youtube_compliance_history = audit_history[-50:]
+            video.approved_for_publish = False
+            db.commit()
+            if not audio_report["can_render"]:
+                raise ValueError(audio_report["blockers"][0] if audio_report["blockers"] else "Audio bloqué par le contrôle de conformité.")
         # Final backstop, independent of how this row ended up queued: a
         # text-input video with no real script would otherwise render
         # "successfully" into a few seconds of near-silent audio, with the
@@ -288,6 +345,40 @@ def process_single_queued_video() -> bool:
         # for any path that doesn't, known or not.
         if video.input_type == "text" and len((video.script_text or "").strip()) < 40:
             raise ValueError("Le script de cette vidéo est vide ou trop court pour générer un rendu.")
+
+        if video.input_type == "text" and (video.youtube_compliance_report or {}).get("phase") != "script_preflight":
+            from src.pipeline.youtube_compliance import evaluate_script_compliance
+            previous_scripts = (
+                db.query(Video)
+                .filter(Video.channel_id == channel.id, Video.id != video.id)
+                .order_by(Video.created_at.desc())
+                .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+                .all()
+            )
+            script_report = evaluate_script_compliance(
+                video.script_text or "", video.title or "", channel, previous_scripts
+            )
+            video.youtube_compliance_report = script_report
+            audit_history = list(video.youtube_compliance_history or [])
+            audit_history.append({
+                "at": datetime.utcnow().isoformat(),
+                "event": "script_preflight_completed",
+                "details": {"score": script_report["score"], "status": script_report["status"]},
+            })
+            video.youtube_compliance_history = audit_history[-50:]
+            video.approved_for_publish = False
+            db.commit()
+            if not script_report["can_render"]:
+                raise ValueError(script_report["blockers"][0] if script_report["blockers"] else "Scénario bloqué par le contrôle de conformité.")
+
+        active_preflight = video.youtube_compliance_report or {}
+        if (
+            active_preflight.get("phase") in {"script_preflight", "audio_preflight"}
+            and not active_preflight.get("can_render", True)
+            and not video.script_compliance_overridden
+        ):
+            reasons = active_preflight.get("blockers") or ["Contenu bloqué par le contrôle avant montage."]
+            raise ValueError(reasons[0])
 
         # Execute render pipeline
         def update_progress(stage: str, percent: int):
@@ -556,7 +647,9 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         "details": {"score": compliance["score"], "status": compliance["status"]},
     })
     video.youtube_compliance_history = audit_history[-50:]
-    if not compliance["can_human_publish"] or (compliance["requires_human_review"] and not video.approved_for_publish):
+    hard_blocked = not compliance["can_human_publish"] and not video.publication_compliance_overridden
+    awaiting_review = compliance["requires_human_review"] and not video.approved_for_publish
+    if hard_blocked or awaiting_review:
         video.youtube_publish_error = "Publication suspendue par le Contrôle YouTube KappGen."
         video.progress_stage = "Validation YouTube requise"
         db.commit()
@@ -1004,6 +1097,7 @@ def _record_automation_failure(db, channel: Channel, message: str = SERVICE_UNAV
     db.add(Video(
         channel_id=channel.id,
         input_type="text",
+        creation_source="automatic",
         script_text="",
         status=VideoStatus.FAILED.value,
         error_message=message,
@@ -1097,6 +1191,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     video = Video(
         channel_id=channel.id,
         input_type="text",
+        creation_source="automatic",
         script_text="",
         status=VideoStatus.RENDERING.value,
         progress_stage="Recherche du sujet",
@@ -1126,6 +1221,31 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     )
     if not result:
         db.delete(video)
+        db.commit()
+        _record_automation_failure(db, channel)
+        return None
+
+    # The writing model is not trusted to approve its own output. Run the
+    # deterministic policy gate after text generation and before voice,
+    # imagery, music, or video rendering consume any further credits.
+    from src.pipeline.youtube_compliance import evaluate_script_compliance
+    script_report = evaluate_script_compliance(
+        result["script_text"], result["title"], channel, recent_video_history
+    )
+    video.title = result["title"]
+    video.script_text = result["script_text"]
+    video.youtube_compliance_report = script_report
+    video.youtube_compliance_history = [{
+        "at": datetime.utcnow().isoformat(),
+        "event": "script_preflight_completed",
+        "details": {"score": script_report["score"], "status": script_report["status"]},
+    }]
+    video.approved_for_publish = False
+    if not script_report["can_render"] and not video.script_compliance_overridden:
+        video.status = VideoStatus.FAILED.value
+        video.error_message = script_report["blockers"][0] if script_report["blockers"] else "Scénario bloqué par le contrôle de conformité."
+        video.progress_stage = "Scénario à corriger"
+        video.progress_percent = 0
         db.commit()
         _record_automation_failure(db, channel)
         return None
@@ -1161,8 +1281,6 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         db.commit()
         return None
 
-    video.title = result["title"]
-    video.script_text = result["script_text"]
     video.status = VideoStatus.QUEUED.value
     video.progress_stage = None
     video.progress_percent = 0
@@ -1217,6 +1335,7 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
         title=title,
         script_text="",
         input_type="text",
+        creation_source="automatic",
         status=VideoStatus.QUEUED.value,
         estimated_duration_seconds=target_duration_minutes * 60.0,
     )
@@ -1298,6 +1417,29 @@ def retry_auto_video_script_background(video_id: str):
             db.commit()
             return
 
+        from src.pipeline.youtube_compliance import evaluate_script_compliance
+        script_report = evaluate_script_compliance(
+            result["script_text"], result["title"], channel, recent_video_history
+        )
+        video.title = result["title"]
+        video.script_text = result["script_text"]
+        video.youtube_compliance_report = script_report
+        audit_history = list(video.youtube_compliance_history or [])
+        audit_history.append({
+            "at": datetime.utcnow().isoformat(),
+            "event": "script_preflight_completed",
+            "details": {"score": script_report["score"], "status": script_report["status"]},
+        })
+        video.youtube_compliance_history = audit_history[-50:]
+        video.approved_for_publish = False
+        if not script_report["can_render"] and not video.script_compliance_overridden:
+            video.status = VideoStatus.FAILED.value
+            video.error_message = script_report["blockers"][0] if script_report["blockers"] else "Scénario bloqué par le contrôle de conformité."
+            video.progress_stage = "Scénario à corriger"
+            video.progress_percent = 0
+            db.commit()
+            return
+
         from src.utils.billing import user_max_video_duration_seconds, debit_script_generation_cost
         tier_max_duration = user_max_video_duration_seconds(db, owner)
         effective_max_duration = MAX_VIDEO_DURATION_SECONDS if tier_max_duration is None else min(MAX_VIDEO_DURATION_SECONDS, tier_max_duration)
@@ -1309,8 +1451,6 @@ def retry_auto_video_script_background(video_id: str):
             db.commit()
             return
 
-        video.title = result["title"]
-        video.script_text = result["script_text"]
         video.estimated_duration_seconds = estimated_duration
         video.status = VideoStatus.QUEUED.value
         video.progress_stage = "En attente du moteur de rendu"

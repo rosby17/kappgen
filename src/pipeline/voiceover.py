@@ -367,10 +367,16 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
         all_words = synthetic_word_timings(full_text, total_duration)
 
     log_usage("izivoice_stt", "transcription", total_duration, "seconds", estimate_izivoice_stt_cost(total_duration), user_id=user_id)
-    return {"text": full_text, "duration": total_duration, "words": all_words}
+    return {
+        "text": full_text,
+        "duration": total_duration,
+        "words": all_words,
+        "transcription_source": "izivoice",
+        "transcription_partial": bool(failed_chunks),
+    }
 
 
-def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None) -> Dict[str, Any]:
+def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Public entrypoint used by the orchestrator for pre-recorded/uploaded audio:
     real transcription via Izivoice speech-to-text when configured, else a
@@ -382,18 +388,20 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
         return {
             "text": fallback_text or "Audio préenregistré",
             "duration": duration,
-            "words": synthetic_word_timings(fallback_text or "Audio préenregistré", duration)
+            "words": synthetic_word_timings(fallback_text or "Audio préenregistré", duration),
+            "transcription_source": "fallback",
         }
 
     try:
-        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key)
+        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key, user_id=user_id)
     except Exception as e:
         logger.warning(f"Izivoice speech-to-text failed ({e}). Falling back to synthetic subtitle timing.")
         duration = get_audio_duration(audio_path)
         return {
             "text": fallback_text or "Audio préenregistré",
             "duration": duration,
-            "words": synthetic_word_timings(fallback_text or "Audio préenregistré", duration)
+            "words": synthetic_word_timings(fallback_text or "Audio préenregistré", duration),
+            "transcription_source": "fallback",
         }
 
 

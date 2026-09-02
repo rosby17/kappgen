@@ -33,6 +33,22 @@ def test_sensitive_niche_requires_human_review():
     assert report["requires_human_review"] is True
 
 
+def test_untranscribed_uploaded_audio_remains_human_publishable():
+    item = video("Nom du fichier audio", title="Narration importée")
+    item.input_type = "audio"
+    item.transcribe_audio = False
+    item.audio_rights_confirmed = True
+    item.audio_source_type = "personal"
+    item.youtube_compliance_report = {
+        "phase": "audio_preflight",
+        "checks": [{"code": "audio_transcript", "state": "warning"}],
+    }
+    report = evaluate_youtube_compliance(item, channel(), [])
+    assert report["status"] == "orange"
+    assert report["can_human_publish"] is True
+    assert report["can_auto_publish"] is False
+
+
 def test_financial_guarantee_is_blocked():
     script = ("Cette méthode offre un profit garanti et un rendement garanti. " * 80)
     report = evaluate_youtube_compliance(video(script), channel("Finance et trading"), [])
