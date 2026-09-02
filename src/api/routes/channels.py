@@ -33,7 +33,9 @@ router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
+ALLOWED_BROLL_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
+MAX_BROLL_UPLOAD_BYTES = 250 * 1024 * 1024  # 250 MB per creator clip
 
 # <script> tags and inline event-handler attributes (onload=, onclick=, ...) —
 # an SVG opened directly (not just used as <img src>) executes any script it
@@ -1754,6 +1756,8 @@ def get_library_overview(current_user: User = Depends(get_current_user), db: Ses
             image_count = len([f for f in library_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS])
         tracks = list((channel.music_preference or {}).get("tracks") or [])
         branding = channel.branding or {}
+        broll_dir = STORAGE_PATH / "channels" / channel.id / "broll"
+        broll_count = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS]) if broll_dir.is_dir() else 0
         overview.append({
             "channel_id": channel.id,
             "channel_name": channel.name,
@@ -1766,6 +1770,7 @@ def get_library_overview(current_user: User = Depends(get_current_user), db: Ses
             "avatar_path": branding.get("avatar_path"),
             "logo_path": branding.get("logo_path"),
             "youtube_channel_thumbnail_url": channel.youtube_channel_thumbnail_url,
+            "broll_count": broll_count,
         })
     return {"channels": overview}
 

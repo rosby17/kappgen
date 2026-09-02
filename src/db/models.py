@@ -854,8 +854,14 @@ class CommunityLibraryFolder(Base):
 
 class CommunityLibraryImagePlacement(Base):
     """Admin-only virtual classification for individual collaborative images.
-    The source file remains in its channel library; only its collaborative
-    niche changes."""
+    The source file remains in its channel library (channel_id + filename is
+    always its real, physical location — never changes); only where it's
+    displayed/pooled changes. `niche` reassigns which niche's pool the image
+    feeds. `target_channel_id`, when set, additionally folds it into a
+    SPECIFIC other channel's folder when browsing that niche in the admin
+    library (used by "Fusionner avec…" — merging channel A into channel B
+    shows A's images under B's folder, without moving any files), instead of
+    it showing under its own origin channel."""
     __tablename__ = "community_library_image_placements"
     __table_args__ = (UniqueConstraint("channel_id", "filename", name="uq_community_image_channel_filename"),)
 
@@ -863,6 +869,7 @@ class CommunityLibraryImagePlacement(Base):
     channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, index=True)
     filename = Column(String(512), nullable=False)
     niche = Column(String(255), nullable=False, index=True)
+    target_channel_id = Column(String(36), ForeignKey("channels.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -559,6 +559,24 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
         .filter(Channel.image_style.isnot(None))
         .all()
     )
+
+    # "Fusionner avec…" (target_channel_id) folds some of a channel's images
+    # into a different channel's folder — adjust counts accordingly instead
+    # of just trusting each channel's own image_style/CommunityLibraryFolder
+    # count, which still reflects its OWN physical files regardless of where
+    # they're now displayed.
+    merged_placements = (
+        db.query(CommunityLibraryImagePlacement)
+        .filter(CommunityLibraryImagePlacement.target_channel_id.isnot(None))
+        .all()
+    )
+    merged_out_count: dict = {}  # channel_id -> count of its own images now shown elsewhere
+    merged_in_by_target: dict = {}  # target_channel_id -> {niche: count}
+    for p in merged_placements:
+        merged_out_count[p.channel_id] = merged_out_count.get(p.channel_id, 0) + 1
+        by_niche = merged_in_by_target.setdefault(p.target_channel_id, {})
+        by_niche[p.niche] = by_niche.get(p.niche, 0) + 1
+
     for channel in channels_with_library:
         shared = shared_by_channel.get(channel.id)
         # image_style.library_image_count only reflects a manual upload
@@ -577,6 +595,9 @@ def admin_community_library_overview(admin: User = Depends(get_current_admin), d
             int((channel.image_style or {}).get("library_image_count") or 0),
             shared.image_count if shared else 0,
         )
+        count = max(0, count - merged_out_count.get(channel.id, 0))
+        incoming_count = sum(merged_in_by_target.get(channel.id, {}).values())
+        count += incoming_count
         if count <= 0:
             continue
         grand_total += count
@@ -779,23 +800,38 @@ def admin_channel_library_images(
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
     library_dir = STORAGE_PATH / "channels" / channel_id / "library"
-    if not library_dir.is_dir():
-        return {"filenames": [], "total": 0, "offset": max(0, offset), "has_more": False}
     raw_filenames = sorted(
         item.name for item in library_dir.iterdir()
         if item.is_file() and item.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS
-    )
-    placements = {
-        row.filename: row.niche
+    ) if library_dir.is_dir() else []
+    own_placements = {
+        row.filename: row
         for row in db.query(CommunityLibraryImagePlacement).filter(
             CommunityLibraryImagePlacement.channel_id == channel_id
         ).all()
     }
     default_niche = channel.niche or "Sans niche"
-    all_filenames = [
+    # Own images, minus any merged OUT into a different channel's folder
+    # (target_channel_id set to someone else) — those show up under that
+    # channel instead, not here, once merged.
+    own_filenames = [
         filename for filename in raw_filenames
-        if not niche or placements.get(filename, default_niche) == niche
+        if not (own_placements.get(filename) and own_placements[filename].target_channel_id and own_placements[filename].target_channel_id != channel_id)
+        and (not niche or (own_placements.get(filename).niche if filename in own_placements else default_niche) == niche)
     ]
+    # Images merged IN from other channels via "Fusionner avec…" — shown
+    # here (their real file still lives under the origin channel; see
+    # admin_channel_library_image_file's fallback resolution below), so
+    # merging two folders in the same niche actually changes what this
+    # folder shows instead of being an invisible no-op.
+    incoming = (
+        db.query(CommunityLibraryImagePlacement)
+        .filter(CommunityLibraryImagePlacement.target_channel_id == channel_id)
+        .all()
+    )
+    incoming_filenames = [row.filename for row in incoming if not niche or row.niche == niche]
+
+    all_filenames = own_filenames + incoming_filenames
     offset = max(0, offset)
     limit = max(1, min(limit, 120))
     filenames = all_filenames[offset:offset + limit]
@@ -861,30 +897,57 @@ def admin_niche_library_images(
     }
 
 
+def _resolve_library_image_path(db: Session, channel_id: str, filename: str):
+    """Resolves (real_channel_id, absolute_path) for an image browsed under
+    `channel_id`'s folder. Usually that's just where it physically lives —
+    but browsing a channel now also shows images "Fusionner avec…"'d in from
+    OTHER channels (see admin_channel_library_images), whose real file still
+    lives under its own origin channel. Falls back to that origin via the
+    placement row (target_channel_id == channel_id) when the direct path
+    doesn't exist, so viewing/deleting a merged-in image still works."""
+    from src.config import STORAGE_PATH
+    direct_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    direct_path = (direct_dir / filename).resolve()
+    if direct_path.parent == direct_dir and direct_path.is_file():
+        return channel_id, direct_path
+
+    placement = db.query(CommunityLibraryImagePlacement).filter(
+        CommunityLibraryImagePlacement.target_channel_id == channel_id,
+        CommunityLibraryImagePlacement.filename == filename,
+    ).first()
+    if placement:
+        origin_dir = (STORAGE_PATH / "channels" / placement.channel_id / "library").resolve()
+        origin_path = (origin_dir / filename).resolve()
+        if origin_path.parent == origin_dir and origin_path.is_file():
+            return placement.channel_id, origin_path
+    return None, None
+
+
 @router.get("/channel-library/{channel_id}/images/{filename}")
 def admin_channel_library_image_file(channel_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     from fastapi.responses import FileResponse
-    from src.config import STORAGE_PATH
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
-    candidate = (library_dir / filename).resolve()
-    if candidate.parent != library_dir or not candidate.is_file():
+    _, candidate = _resolve_library_image_path(db, channel_id, filename)
+    if not candidate:
         raise HTTPException(status_code=404, detail="Image introuvable.")
     return FileResponse(candidate)
 
 
 @router.delete("/channel-library/{channel_id}/images/{filename}")
 def admin_delete_channel_library_image(channel_id: str, filename: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    from src.config import STORAGE_PATH
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
-    candidate = (library_dir / filename).resolve()
-    if candidate.parent != library_dir or not candidate.is_file():
+    real_channel_id, candidate = _resolve_library_image_path(db, channel_id, filename)
+    if not candidate:
         raise HTTPException(status_code=404, detail="Image introuvable.")
+    if real_channel_id != channel_id:
+        # Merged-in image — delete/decrement against the real owning
+        # channel, not the folder it was browsed under.
+        channel_id = real_channel_id
+        channel = db.query(Channel).filter(Channel.id == channel_id).first()
     candidate.unlink()
     db.query(CommunityLibraryImagePlacement).filter(
         CommunityLibraryImagePlacement.channel_id == channel_id,
@@ -1023,6 +1086,7 @@ def admin_move_channel_library(
 
 class AdminMergeFolderPayload(BaseModel):
     niche: str
+    target_channel_id: Optional[str] = None
 
 
 @router.put("/channel-library/{channel_id}/merge")
@@ -1038,15 +1102,31 @@ def admin_merge_channel_library(
     client having to enumerate filenames first (that endpoint's own preview
     list caps at 24, nowhere near enough for a folder of hundreds). No files
     are copied or relocated — this channel's images still live in its own
-    folder, just now counted under the target niche alongside whatever
-    other channel(s) already feed it, which is exactly what "merging into
-    one niche pool" means in this design (see the module docstring above)."""
+    folder.
+
+    Without target_channel_id: images are just counted under the target
+    niche's overall pool (the folder-card overview), same as before.
+
+    With target_channel_id: additionally folds every image into that SPECIFIC
+    channel's folder when browsing the niche — e.g. merging channel A into
+    channel B (both already in Prière) actually changes what you see when
+    you open B's folder, instead of silently doing nothing because A was
+    already counted under "Prière" either way (the bug this fixes: choosing
+    a niche a channel is already in was a visible no-op)."""
     target_niche = payload.niche.strip()
     if target_niche not in KNOWN_NICHES:
         raise HTTPException(status_code=400, detail="Niche de destination invalide.")
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+
+    target_channel_id = (payload.target_channel_id or "").strip() or None
+    if target_channel_id:
+        if target_channel_id == channel_id:
+            raise HTTPException(status_code=400, detail="Impossible de fusionner une chaîne avec elle-même.")
+        target_channel = db.query(Channel).filter(Channel.id == target_channel_id).first()
+        if not target_channel:
+            raise HTTPException(status_code=404, detail="Chaîne de destination introuvable.")
 
     from src.config import STORAGE_PATH
     from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
@@ -1064,10 +1144,11 @@ def admin_merge_channel_library(
         placement = existing_placements.get(filename)
         if placement:
             placement.niche = target_niche
+            placement.target_channel_id = target_channel_id
         else:
-            db.add(CommunityLibraryImagePlacement(channel_id=channel_id, filename=filename, niche=target_niche))
+            db.add(CommunityLibraryImagePlacement(channel_id=channel_id, filename=filename, niche=target_niche, target_channel_id=target_channel_id))
     db.commit()
-    return {"merged": True, "channel_id": channel.id, "channel_name": channel.name, "niche": target_niche, "image_count": len(filenames)}
+    return {"merged": True, "channel_id": channel.id, "channel_name": channel.name, "niche": target_niche, "target_channel_id": target_channel_id, "image_count": len(filenames)}
 
 
 @router.post("/channel-library/{channel_id}/force-share")

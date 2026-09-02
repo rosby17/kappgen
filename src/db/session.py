@@ -196,6 +196,22 @@ def init_db():
                     logger.info(f"Migrating voice_clone_jobs table: adding {col_name} column.")
                     conn.execute(text(ddl))
 
+    if "community_library_image_placements" in inspector.get_table_names():
+        # target_channel_id: added so "Fusionner avec…" can fold one
+        # channel's images into a SPECIFIC other channel's folder, not just
+        # retag them with a niche name (which was a no-op when the source
+        # channel was already in that niche — the actual bug report this
+        # fixes).
+        existing_clip_columns = {col["name"] for col in inspector.get_columns("community_library_image_placements")}
+        clip_migrations = {
+            "target_channel_id": "ALTER TABLE community_library_image_placements ADD COLUMN target_channel_id VARCHAR(36)",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in clip_migrations.items():
+                if col_name not in existing_clip_columns:
+                    logger.info(f"Migrating community_library_image_placements table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
     if "folders" in inspector.get_table_names():
         existing_folder_columns = {col["name"] for col in inspector.get_columns("folders")}
         folder_migrations = {
