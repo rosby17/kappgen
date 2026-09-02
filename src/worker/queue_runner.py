@@ -455,6 +455,28 @@ def process_single_queued_video() -> bool:
         except Exception as e:
             logger.warning(f"Could not pre-generate thumbnail for video {video.id}: {e}")
 
+        # A Trust Score is part of the finished video, not something the
+        # creator has to remember to request. Run this final, post-render
+        # audit after metadata and thumbnail preparation so every completed
+        # card can display a meaningful score immediately.
+        try:
+            from src.pipeline.youtube_compliance import evaluate_youtube_compliance
+            previous = (
+                db.query(Video)
+                .filter(Video.channel_id == video.channel_id, Video.id != video.id)
+                .order_by(Video.created_at.desc())
+                .limit(30)
+                .all()
+            )
+            compliance = evaluate_youtube_compliance(video, channel, previous)
+            video.youtube_compliance_report = compliance
+            history = list(video.youtube_compliance_history or [])
+            history.append({"at": datetime.utcnow().isoformat(), "event": "trust_score_completed", "details": {"score": compliance["score"], "status": compliance["status"]}})
+            video.youtube_compliance_history = history[-50:]
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Could not calculate Trust Score for video {video.id}: {e}")
+
         # How this finished video actually reaches YouTube is always the
         # creator's own choice (channel.publish_mode), independent of whether
         # the *script* was auto-generated. A failure here never fails the
@@ -964,7 +986,7 @@ def warn_expiring_videos():
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(Video.purged_at.is_(None))
-            .filter(Video.extended_retention.is_(False))
+            .filter(or_(Video.extended_retention.is_(False), Video.retention_until <= datetime.utcnow()))
             .filter(Video.output_path.isnot(None))
             .filter(Video.expiry_warning_sent_at.is_(None))
             .filter(Video.finished_at.isnot(None))
@@ -1023,7 +1045,7 @@ def purge_old_videos_and_uploads():
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(Video.purged_at.is_(None))
-            .filter(Video.extended_retention.is_(False))
+            .filter(or_(Video.extended_retention.is_(False), Video.retention_until <= datetime.utcnow()))
             .filter(Video.finished_at.isnot(None))
             .filter(Video.finished_at < cutoff)
             .filter(or_(Video.downloaded_at.isnot(None), Video.youtube_published_at.isnot(None)))

@@ -405,6 +405,9 @@ class Video(Base):
     # feature ("garde tes vidéos plus longtemps") — no credit/subscription
     # gate wired up yet, billing comes later; this only sets up the mechanism.
     extended_retention = Column(Boolean, nullable=False, default=False)
+    # The first 48h are included. Extra storage is purchased per day and has
+    # an explicit expiry; it is never an unlimited free retention flag.
+    retention_until = Column(DateTime, nullable=True)
     source_assets_path = Column(String(512), nullable=True)
     error_message = Column(Text, nullable=True)
     duration_seconds = Column(Float, nullable=True)
@@ -500,6 +503,7 @@ class Video(Base):
             "output_path": self.output_path,
             "storage_backend": self.storage_backend or "local",
             "extended_retention": self.extended_retention,
+            "retention_until": self.retention_until.isoformat() if self.retention_until else None,
             "source_assets_path": self.source_assets_path,
             "error_message": self.error_message,
             "duration_seconds": self.duration_seconds,

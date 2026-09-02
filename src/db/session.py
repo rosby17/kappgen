@@ -60,6 +60,7 @@ def init_db():
             "storage_backend": "ALTER TABLE videos ADD COLUMN storage_backend VARCHAR(10) DEFAULT 'local' NOT NULL",
             "output_size_bytes": "ALTER TABLE videos ADD COLUMN output_size_bytes INTEGER",
             "extended_retention": "ALTER TABLE videos ADD COLUMN extended_retention BOOLEAN DEFAULT FALSE NOT NULL",
+            "retention_until": "ALTER TABLE videos ADD COLUMN retention_until TIMESTAMP",
             "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
             "edit_history": "ALTER TABLE videos ADD COLUMN edit_history JSON",

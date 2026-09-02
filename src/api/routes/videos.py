@@ -805,6 +805,7 @@ class VideoUpdate(BaseModel):
     clear_folder: bool = False
     approved_for_publish: Optional[bool] = None
     extended_retention: Optional[bool] = None
+    retention_days: Optional[int] = None
 
 @router.patch("/{video_id}")
 def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -819,11 +820,28 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
     if payload.approved_for_publish is not None:
         video.approved_for_publish = payload.approved_for_publish
 
-    if payload.extended_retention is not None:
-        # No credit/subscription gate yet — billed later (see Video.extended_retention).
-        video.extended_retention = payload.extended_retention
-        if payload.extended_retention:
-            video.purged_at = None
+    if payload.retention_days is not None:
+        from datetime import timedelta
+        from src.utils.billing import debit_credits, get_credit_balance
+        allowed_days = {1, 2, 3, 7, 30}
+        if payload.retention_days not in allowed_days:
+            raise HTTPException(status_code=400, detail="Choisissez 1, 2, 3, 7 ou 30 jours de conservation.")
+        if video.purged_at or not video.output_path:
+            raise HTTPException(status_code=409, detail="Cette vidéo a déjà été supprimée du stockage.")
+        cost = payload.retention_days * 1000
+        if not debit_credits(db, current_user, cost, f"Conservation vidéo +{payload.retention_days} jour(s)", video_id=video.id):
+            raise HTTPException(status_code=402, detail=f"Crédits insuffisants : {cost} crédits requis, {get_credit_balance(db, current_user)} disponibles.")
+        default_expiry = (video.finished_at or datetime.utcnow()) + timedelta(hours=48)
+        base = max(default_expiry, video.retention_until or default_expiry, datetime.utcnow())
+        video.retention_until = base + timedelta(days=payload.retention_days)
+        video.extended_retention = True
+        video.purged_at = None
+
+    if payload.extended_retention is False:
+        # Cancelling prevents future purchases; credits already consumed are
+        # not refundable and the normal 48-hour deletion rule applies again.
+        video.extended_retention = False
+        video.retention_until = None
 
     if payload.clear_folder:
         video.folder_id = None
