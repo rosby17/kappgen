@@ -23,6 +23,8 @@ TEXT_FREE_IMAGE_RULE = (
 
 def text_free_image_prompt(prompt: str) -> str:
     """Append the non-negotiable no-writing rule without exceeding API limits."""
+    if "[[ALLOW_TEXT]]" in (prompt or ""):
+        return (prompt or "").replace("[[ALLOW_TEXT]]", "").strip()[:4000]
     suffix = f", {TEXT_FREE_IMAGE_RULE}"
     return f"{(prompt or '').strip()[:4000 - len(suffix)]}{suffix}"
 from src.utils.cost_tracking import log_usage, estimate_image_cost

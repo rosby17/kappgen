@@ -274,7 +274,9 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
         f"foreground props, tactile costume/skin/material detail and a layered environment that reward a second look, while keeping one unmistakable focal point. "
         f"LIGHT AND FINISH: sculpted key light on the face, deep blacks, luminous highlights, rich texture, crisp subject separation, "
         f"premium editorial poster finish, intentional color grading, sharp important details, nuanced background storytelling, no bland stock-photo staging. "
-        f"16:9 landscape, edge-to-edge artwork. Absolutely no text, letters, words, captions, typography, logos or watermark in the generated art."
+        f"16:9 landscape, edge-to-edge artwork. [[ALLOW_TEXT]] Add the exact headline “{text}” in the reserved {text_side} area, "
+        f"large bold condensed uppercase editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene, "
+        f"no other words, no logo, no watermark."
     )
 
 
@@ -354,10 +356,12 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
     image = None
+    ai_success = False
     if channel is not None:
         try:
             ai_path = _generate_ai_thumbnail_background(text, channel, destination, video_id=video_id)
             image = Image.open(ai_path).convert("RGB")
+            ai_success = True
         except Exception as exc:
             logger.warning(f"AI thumbnail background generation failed, falling back to a video frame: {exc}")
     if image is None:
@@ -380,6 +384,8 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     # unsharp pass restores the crisp, poster-like micro-contrast visible in
     # strong competitor thumbnails without creating halos around typography.
     image = image.filter(ImageFilter.UnsharpMask(radius=1.4, percent=125, threshold=3))
+    # GPT Image 2 owns the typography for AI thumbnails. The overlay remains
+    # only for legacy/frame fallback images, where no text was generated.
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -460,6 +466,12 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
         rel = (row - gradient_top) / max(1, gradient_bottom - gradient_top)
         alpha = int(120 * (1 - abs(rel - 0.5) * 1.6))
         draw.line([(0, row), (1280, row)], fill=(2, 8, 18, max(0, alpha)))
+
+    if ai_success:
+        result = image.convert("RGB")
+        result.save(destination, "JPEG", quality=92, optimize=True)
+        destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
+        return destination
 
     y = top
     for index, line in enumerate(lines):
