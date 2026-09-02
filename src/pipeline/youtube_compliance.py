@@ -376,6 +376,22 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
     else:
         add("niche_profile", "Profil éditorial", "pass", "Profil général : contrôles standards appliqués.")
 
+    combined = _normalise(f"{title} {script}")
+    # Community-policy signal, deliberately kept separate from the niche
+    # label: a general channel can still carry content that merits review.
+    community_risk_terms = (
+        "appel à la haine", "incitation à la haine", "attaque ciblée", "harcèle", "harcelez",
+        "comment fabriquer une arme", "comment tuer", "suicide sans aide", "terrorisme glorifié",
+    )
+    community_match = next((term for term in community_risk_terms if term in combined), None)
+    if community_match:
+        add("community_guidelines", "Règlement de la communauté", "fail", f"Signal sensible détecté : « {community_match} ».", 35)
+        blockers.append("Revoyez le contenu au regard du règlement de la communauté YouTube.")
+    elif profile and profile["review"]:
+        add("community_guidelines", "Règlement de la communauté", "warning", "Sujet sensible : validation humaine requise avant publication.", 8)
+    else:
+        add("community_guidelines", "Règlement de la communauté", "pass", "Aucun signal évident de contenu contraire aux règles détecté.")
+
     if profile and profile["sources"]:
         source_urls = re.findall(r"https?://[^\s)\]]+", description)
         if source_urls:
@@ -390,7 +406,6 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
             add("audio_rights", "Droits audio", "fail", "Les droits sur l’audio et la voix ne sont pas confirmés.", 40)
             blockers.append("Confirmez les droits nécessaires sur l’audio et la voix.")
 
-    combined = _normalise(f"{title} {script}")
     dangerous_claims = {
         "health": ("guérit à coup sûr", "guerit a coup sur", "remplace votre médecin", "remplace votre medecin", "guaranteed cure"),
         "finance": ("profit garanti", "rendement garanti", "sans aucun risque", "guaranteed profit", "risk free return"),
@@ -455,11 +470,21 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
         elif visual_hashes:
             add("visual_originality", "Originalité visuelle", "pass", f"Faible réutilisation visuelle ({round(max_visual_overlap * 100)} %).")
 
+        music_pref = getattr(channel, "music_preference", None) or {}
+        if not music_pref.get("enabled", True):
+            add("music_rights", "Musique et droits", "pass", "Aucune musique de fond ajoutée au montage.")
+        elif music_pref.get("mode") == "ai_generate":
+            add("music_rights", "Musique et droits", "pass", "Musique instrumentale générée pour la vidéo par KappGen.")
+        elif music_pref.get("tracks"):
+            add("music_rights", "Musique et droits", "warning", "Musique importée : vérifiez que vous détenez bien les droits d’utilisation.", 8)
+        else:
+            add("music_rights", "Musique et droits", "pass", "Piste d’ambiance synthétique KappGen, sans extrait commercial détecté.")
+
     add("synthetic_disclosure", "Déclaration IA", "pass", "KappGen déclare le contenu synthétique lors de l’envoi à YouTube.")
     score = max(0, min(100, score))
     status = "green" if score >= 80 and not blockers and not sensitive else "orange" if score >= 60 and not blockers else "red"
     return {
-        "version": 1,
+        "version": 2,
         "score": score,
         "status": status,
         "requires_human_review": status == "orange",

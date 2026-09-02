@@ -536,7 +536,7 @@ def _backfill_trust_scores(db: Session, videos: List[Video]) -> None:
     """Give finished legacy videos the same automatic Trust Score as newly
     rendered videos. The video list is the first place creators return to,
     so it should never make them click merely to initialise an analysis."""
-    missing = [video for video in videos if video.status == VideoStatus.DONE.value and not video.youtube_compliance_report]
+    missing = [video for video in videos if video.status == VideoStatus.DONE.value and (not video.youtube_compliance_report or (video.youtube_compliance_report or {}).get("version", 1) < 2)]
     if not missing:
         return
     for video in missing:
