@@ -903,6 +903,49 @@ def admin_delete_channel_library_image(channel_id: str, filename: str, admin: Us
     return {"deleted": True, "image_count": new_count}
 
 
+@router.delete("/channel-library/{channel_id}/uploaded-images")
+def admin_delete_uploaded_channel_library_images(channel_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Deletes every manually-uploaded image in this channel's library,
+    keeping only AI-generated ones. Manual uploads are always named
+    img_<index>_<hash>.<ext> (save_valid_library_images in channels.py);
+    AI-generated scene art auto-copied into the library is always named
+    generated_<n>.<ext> (_persist_generated_images_to_channel_library in
+    images.py) — so "not generated_*" reliably means "was uploaded by a
+    creator", not AI-produced stock art. Exists because a creator's own
+    uploads can carry off-topic or low-quality photos into a niche's shared
+    community pool; this is the one-click way to clear that out."""
+    from src.config import STORAGE_PATH
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    if not library_dir.is_dir():
+        return {"deleted": 0, "image_count": 0}
+
+    to_delete = [f.name for f in library_dir.iterdir() if f.is_file() and not f.name.startswith("generated_")]
+    deleted = 0
+    for name in to_delete:
+        try:
+            (library_dir / name).unlink()
+            deleted += 1
+        except OSError:
+            continue
+
+    db.query(CommunityLibraryImagePlacement).filter(
+        CommunityLibraryImagePlacement.channel_id == channel_id,
+        CommunityLibraryImagePlacement.filename.in_(to_delete),
+    ).delete(synchronize_session=False)
+    remaining = len([f for f in library_dir.iterdir() if f.is_file()])
+    image_style = dict(channel.image_style or {})
+    image_style["library_image_count"] = remaining
+    channel.image_style = image_style
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if folder:
+        folder.image_count = remaining
+    db.commit()
+    return {"deleted": deleted, "image_count": remaining}
+
+
 class AdminForceSharePayload(BaseModel):
     status: str = "approved"  # what to set the folder's curation status to
 
