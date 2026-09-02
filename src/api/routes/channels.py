@@ -300,7 +300,7 @@ def clone_voice_status(job_id: str, current_user: User = Depends(get_current_use
     return job.to_dict()
 
 
-@router.get("/voice/clone/mine")
+@router.get("/my-cloned-voices")
 def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Every voice this user has successfully cloned, ever — read from
     VoiceCloneJob (server-side, permanent) instead of the "Mes voix clonées"
