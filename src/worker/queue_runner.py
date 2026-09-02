@@ -551,6 +551,24 @@ def run_youtube_identity_sync():
 
 
 def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path) -> None:
+    from src.pipeline.youtube_compliance import evaluate_youtube_compliance
+
+    previous = (
+        db.query(Video)
+        .filter(Video.channel_id == video.channel_id, Video.id != video.id)
+        .order_by(Video.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    compliance = evaluate_youtube_compliance(video, channel, previous)
+    video.youtube_compliance_report = compliance
+    if not compliance["can_human_publish"] or (compliance["requires_human_review"] and not video.approved_for_publish):
+        video.youtube_publish_error = "Publication suspendue par le Contrôle YouTube KappGen."
+        video.progress_stage = "Validation YouTube requise"
+        db.commit()
+        logger.warning("YouTube compliance blocked video %s (score=%s, status=%s).", video.id, compliance["score"], compliance["status"])
+        return
+
     # video.status is already DONE at this point — progress_stage is reused
     # purely as a visible "what's happening now" signal so the client sees
     # this extra step too, not just the render itself.

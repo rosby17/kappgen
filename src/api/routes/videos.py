@@ -16,6 +16,7 @@ from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
 from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
+from src.pipeline.youtube_compliance import evaluate_youtube_compliance
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render, estimate_video_cost_credits
@@ -460,8 +461,32 @@ def _publish_video_background(video_id: str) -> None:
         db.close()
 
 
+def _refresh_compliance_report(db: Session, video: Video) -> dict:
+    previous = (
+        db.query(Video)
+        .filter(Video.channel_id == video.channel_id, Video.id != video.id)
+        .order_by(Video.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    report = evaluate_youtube_compliance(video, video.channel, previous)
+    video.youtube_compliance_report = report
+    db.commit()
+    return report
+
+
+@router.get("/{video_id}/youtube/compliance")
+def get_youtube_compliance(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = _get_owned_video(db, video_id, current_user)
+    return _refresh_compliance_report(db, video)
+
+
+class CompliancePublishRequest(BaseModel):
+    confirm_human_review: bool = False
+
+
 @router.post("/{video_id}/youtube/publish")
-def publish_video_to_youtube(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishRequest] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Kicks off publishing in the background and returns immediately — the
     actual YouTube upload can take minutes, and the creator shouldn't have to
     sit on a blocking modal for it. Progress is surfaced the same way as
@@ -495,6 +520,14 @@ def publish_video_to_youtube(video_id: str, current_user: User = Depends(get_cur
     video_path = STORAGE_PATH / video.output_path
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+
+    report = _refresh_compliance_report(db, video)
+    if not report["can_human_publish"]:
+        raise HTTPException(status_code=409, detail={"code": "youtube_compliance_blocked", "message": "Le contrôle YouTube bloque cette publication.", "report": report})
+    if report["requires_human_review"] and not (payload and payload.confirm_human_review):
+        raise HTTPException(status_code=409, detail={"code": "youtube_compliance_review_required", "message": "Une validation humaine est requise.", "report": report})
+    if report["requires_human_review"]:
+        video.approved_for_publish = True
 
     video.youtube_publish_error = None
     video.progress_stage = "Préparation de la publication YouTube"

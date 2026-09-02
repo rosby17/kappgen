@@ -440,6 +440,7 @@ class Video(Base):
     # True, no matter how long scheduled_publish_at has passed. Irrelevant for
     # publish_mode "auto" (publishes immediately, no gate) or "manual".
     approved_for_publish = Column(Boolean, nullable=False, default=False)
+    youtube_compliance_report = Column(JSON, nullable=True)
 
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
@@ -478,6 +479,7 @@ class Video(Base):
             "thumbnail_text": self.thumbnail_text,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
+            "youtube_compliance_report": self.youtube_compliance_report,
             "downloaded_at": self.downloaded_at.isoformat() if self.downloaded_at else None,
             "can_undo": bool(self.edit_history),
         }

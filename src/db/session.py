@@ -67,6 +67,7 @@ def init_db():
             "youtube_description": "ALTER TABLE videos ADD COLUMN youtube_description TEXT",
             "scheduled_publish_at": "ALTER TABLE videos ADD COLUMN scheduled_publish_at TIMESTAMP",
             "approved_for_publish": "ALTER TABLE videos ADD COLUMN approved_for_publish BOOLEAN DEFAULT FALSE NOT NULL",
+            "youtube_compliance_report": "ALTER TABLE videos ADD COLUMN youtube_compliance_report JSON",
             "thumbnail_text": "ALTER TABLE videos ADD COLUMN thumbnail_text VARCHAR(255)",
             "expiry_warning_sent_at": "ALTER TABLE videos ADD COLUMN expiry_warning_sent_at TIMESTAMP",
             "downloaded_at": "ALTER TABLE videos ADD COLUMN downloaded_at TIMESTAMP",
