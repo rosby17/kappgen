@@ -1198,30 +1198,40 @@ def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin),
 
 
 # --- Global image-generation provider switches ------------------------------
-# Admin-controlled, no redeploy needed — lets the operator flip thumbnail
-# generation between "100% gratuit" (Hugging Face only, no credit ever spent,
-# no paid provider ever called) and "gratuit puis payant" (current default:
-# free tier tried first, falls through to fal.ai then Izivoice, each spending
-# credits/money) at any moment — e.g. switch to free-only the moment a paid
-# provider's balance runs low, switch back once it's topped up.
+# Admin-controlled, no redeploy needed — lets the operator pick which
+# thumbnail image providers are used and in what priority order: Hugging
+# Face (free), fal.ai (paid, best fidelity to a reference image), Izivoice
+# (paid). A provider left out of the order is never called — including only
+# "huggingface" keeps thumbnails 100% free; adding fal/izivoice is an
+# explicit opt-in to spend money on them, in whichever order is chosen.
+
+THUMBNAIL_IMAGE_PROVIDERS = ["huggingface", "fal", "izivoice"]
+
 
 @router.get("/settings/thumbnail-provider-mode")
 def get_thumbnail_provider_mode(admin: User = Depends(get_current_admin)):
-    from src.utils.app_settings import thumbnail_provider_mode
-    return {"mode": thumbnail_provider_mode()}
+    from src.utils.app_settings import thumbnail_provider_order
+    from src.config import FAL_API_KEY, IZIVOICE_API_KEY
+    configured = {"huggingface": True, "fal": bool(FAL_API_KEY), "izivoice": bool(IZIVOICE_API_KEY)}
+    order = thumbnail_provider_order()
+    return {"order": order, "available": THUMBNAIL_IMAGE_PROVIDERS, "configured": configured}
 
 
-class ThumbnailProviderModePayload(BaseModel):
-    mode: str  # "free_only" | "free_then_paid"
+class ThumbnailProviderOrderPayload(BaseModel):
+    order: List[str]
 
 
 @router.patch("/settings/thumbnail-provider-mode")
-def set_thumbnail_provider_mode(payload: ThumbnailProviderModePayload, admin: User = Depends(get_current_admin)):
-    if payload.mode not in ("free_only", "free_then_paid"):
-        raise HTTPException(status_code=400, detail="Mode invalide.")
-    from src.utils.app_settings import set_setting, THUMBNAIL_PROVIDER_MODE_KEY
-    set_setting(THUMBNAIL_PROVIDER_MODE_KEY, payload.mode)
-    return {"mode": payload.mode}
+def set_thumbnail_provider_mode(payload: ThumbnailProviderOrderPayload, admin: User = Depends(get_current_admin)):
+    cleaned = []
+    for p in payload.order:
+        if p not in THUMBNAIL_IMAGE_PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
+        if p not in cleaned:
+            cleaned.append(p)
+    from src.utils.app_settings import set_thumbnail_provider_order
+    set_thumbnail_provider_order(cleaned)
+    return {"order": cleaned}
 
 
 # --- AI text-generation provider switch --------------------------------

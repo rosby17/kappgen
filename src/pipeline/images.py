@@ -448,37 +448,39 @@ def generate_thumbnail_image(
     output_path: Path,
     client: httpx.Client,
     reference_image_paths: Optional[List[Path]] = None,
-    allow_paid_fallback: bool = True,
+    provider_order: Optional[List[str]] = None,
 ) -> Path:
-    """Thumbnail-specific image generation. Order: Hugging Face FLUX.1-schnell
-    (free — but only when there's no reference image to condition on, since
-    this endpoint is text-to-image only) -> fal.ai's gpt-image-2 (best visual
-    fidelity to reference images, first paid option) -> Izivoice
-    (generate_ai_image), falling through on any error — a missing/invalid
-    key, an exhausted free quota, a 402/429, or anything else.
+    """Thumbnail-specific image generation, trying providers in
+    `provider_order` (admin-controlled — see src/utils/app_settings.py's
+    thumbnail_provider_order, set from the "Ressources" tab) and falling
+    through on any error — a missing/invalid key, an exhausted free quota, a
+    402/429, or anything else. Defaults to Hugging Face alone (free, no
+    provider left out generates any cost) if no order is given.
 
-    `allow_paid_fallback=False` (see src/utils/app_settings.py's admin-controlled
-    thumbnail_provider_mode) skips straight past both paid providers on a free-tier
-    failure, raising instead — the caller (youtube_metadata.py) then falls
-    through to its own video-frame-grab fallback, same as the per-scene body
-    images already do, so a thumbnail never silently costs money in this mode."""
-    if not reference_image_paths:
+    Hugging Face's FLUX.1-schnell endpoint is text-to-image only, so it's
+    skipped whenever reference images are given to condition on — those
+    need fal.ai's gpt-image-2 (best fidelity to a reference) or Izivoice.
+    If every provider in the order is skipped or fails, raises — the caller
+    (youtube_metadata.py) then falls through to its own video-frame-grab
+    fallback, same as the per-scene body images already do, so a thumbnail
+    never silently costs money beyond what the admin explicitly opted into."""
+    order = provider_order if provider_order is not None else ["huggingface"]
+    funcs = {
+        "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
+        "fal": lambda: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths),
+        "izivoice": lambda: generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths),
+    }
+    labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice"}
+    last_exc: Optional[Exception] = None
+    for name in order:
+        if name == "huggingface" and reference_image_paths:
+            continue  # text-to-image only, can't condition on a reference image
         try:
-            return _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail")
+            return funcs[name]()
         except Exception as exc:
-            if not allow_paid_fallback:
-                raise
-            logger.warning(f"Hugging Face (FLUX.1-schnell) thumbnail generation failed, falling back to fal.ai: {exc}")
-    elif not allow_paid_fallback:
-        # A reference image needs image-conditioning, which the free HF path
-        # doesn't support (text-to-image only) — free-only mode has no
-        # provider left to try in this case.
-        raise RuntimeError("Free-only thumbnail mode can't use a reference image (no free provider supports image conditioning).")
-    try:
-        return _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths)
-    except Exception as exc:
-        logger.warning(f"fal.ai gpt-image-2 thumbnail generation failed, falling back to Izivoice: {exc}")
-        return generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths)
+            logger.warning(f"{labels.get(name, name)} thumbnail generation failed, trying next provider: {exc}")
+            last_exc = exc
+    raise RuntimeError(f"All thumbnail providers in the configured order failed or were skipped. Last error: {last_exc}")
 
 
 def fetch_or_generate_images(

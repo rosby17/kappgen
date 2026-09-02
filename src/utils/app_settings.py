@@ -9,14 +9,18 @@ from typing import List, Optional
 from src.db.session import SessionLocal
 from src.db.models import AppSetting
 
-# "free_only" — thumbnails are generated exclusively via the free Hugging
-# Face path; on failure, no paid provider is ever called (falls through to
-# generate_thumbnail's own video-frame-grab fallback instead), same
-# guarantee the per-scene body images already have.
-# "free_then_paid" — current default behavior: free tier tried first, then
-# fal.ai, then Izivoice on failure (each attempt spending real money/credits).
-THUMBNAIL_PROVIDER_MODE_KEY = "thumbnail_provider_mode"
-THUMBNAIL_PROVIDER_MODE_DEFAULT = "free_only"
+# Admin-defined priority order for thumbnail image providers — "huggingface"
+# (free), "fal" (paid, best fidelity to reference images), "izivoice" (paid).
+# A provider left out of the order is simply never tried — unlike the AI-text
+# chain, there's no "everything still reachable" fallback here, because
+# including fal/izivoice at all is itself the admin's explicit opt-in to
+# spend money; leaving them out keeps the old "free_only" guarantee (no paid
+# provider ever touched, same as the per-scene body images). Default is
+# Hugging Face alone, preserving that free-only guarantee until an admin
+# explicitly adds a paid provider to the order from the "Ressources" tab.
+THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
+THUMBNAIL_PROVIDERS_ALL = ["huggingface", "fal", "izivoice"]
+THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["huggingface"]
 
 
 def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -41,8 +45,19 @@ def set_setting(key: str, value: str) -> None:
         db.close()
 
 
-def thumbnail_provider_mode() -> str:
-    return get_setting(THUMBNAIL_PROVIDER_MODE_KEY, THUMBNAIL_PROVIDER_MODE_DEFAULT)
+def thumbnail_provider_order() -> List[str]:
+    raw = get_setting(THUMBNAIL_PROVIDER_ORDER_KEY, None)
+    if raw is None:
+        return list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+    try:
+        order = json.loads(raw)
+        return [p for p in order if p in THUMBNAIL_PROVIDERS_ALL] if isinstance(order, list) else list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+    except (ValueError, TypeError):
+        return list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+
+
+def set_thumbnail_provider_order(order: List[str]) -> None:
+    set_setting(THUMBNAIL_PROVIDER_ORDER_KEY, json.dumps(order))
 
 
 # Admin-defined priority order for text-generation providers (see
