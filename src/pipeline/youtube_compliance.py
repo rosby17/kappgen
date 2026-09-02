@@ -338,8 +338,10 @@ def evaluate_youtube_compliance(video, channel, previous_videos: Iterable = ()) 
     else:
         add("metadata_title", "Titre", "pass", "Titre exploitable et relisible avant publication.")
 
-    if len(description.strip()) < 80:
-        add("metadata_description", "Description", "warning", "Description absente ou trop courte.", 8)
+    if not description.strip():
+        add("metadata_description", "Description", "warning", "Description vide — aucune description n'a été renseignée.", 8)
+    elif len(description.strip()) < 80:
+        add("metadata_description", "Description", "warning", f"Description trop courte ({len(description.strip())} caractères).", 8)
     else:
         add("metadata_description", "Description", "pass", "Description suffisamment renseignée.")
 

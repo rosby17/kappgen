@@ -656,10 +656,11 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
         _append_compliance_event(video, "publish_blocked", {"score": report["score"], "status": report["status"]})
         db.commit()
         raise HTTPException(status_code=409, detail={"code": "youtube_compliance_blocked", "message": "Le contrôle YouTube bloque cette publication.", "report": report})
-    if (report["requires_human_review"] or force_publish) and not (payload and payload.confirm_human_review):
-        _append_compliance_event(video, "human_review_required", {"score": report["score"]})
-        db.commit()
-        raise HTTPException(status_code=409, detail={"code": "youtube_compliance_review_required", "message": "Une validation humaine est requise.", "report": report})
+    # Orange (requires_human_review) no longer needs a separate confirmation
+    # tick before publishing — the score and its breakdown are already shown
+    # right there in the same modal, and re-confirming a video already
+    # reviewed once was pure friction. Only a genuinely blocked (red) video
+    # still needs an explicit force_publish choice, right above.
     if force_publish:
         video.publication_compliance_overridden = True
         video.publication_compliance_overridden_at = datetime.utcnow()
