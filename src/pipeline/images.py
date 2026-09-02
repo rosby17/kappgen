@@ -179,7 +179,29 @@ def _persist_generated_images_to_channel_library(
             ))
         db.commit()
     except Exception as e:
-        logger.warning(f"Could not sync CommunityLibraryFolder for channel {channel_id}: {e}")
+        # Confirmed live: this has silently failed for at least one channel
+        # (53 real generated_*.png files on disk, zero DB record of any of
+        # them) — most likely two renders' background threads racing to
+        # INSERT this channel's very first folder row at once, the loser's
+        # commit failing here and just... never being retried. The image
+        # files themselves are already safely copied above regardless (that
+        # part isn't in this try), so on any failure here — a race or
+        # anything else — fall back to a fresh query-and-update instead of
+        # only logging and moving on: if the row now exists (the other
+        # thread's insert landed first), update its count; still failing
+        # after that is genuinely unexpected and worth an ERROR log, not a
+        # warning that reads as routine.
+        db.rollback()
+        try:
+            folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+            if folder:
+                folder.image_count = total
+                folder.niche = niche or folder.niche
+                db.commit()
+            else:
+                logger.error(f"Could not sync CommunityLibraryFolder for channel {channel_id} (no existing row to fall back to): {e}")
+        except Exception as retry_exc:
+            logger.error(f"CommunityLibraryFolder sync retry also failed for channel {channel_id}: {retry_exc}")
     finally:
         db.close()
 

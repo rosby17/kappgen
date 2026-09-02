@@ -531,6 +531,7 @@ KNOWN_NICHES = [
     "Mythologie", "Histoires Antiques", "Histoire Africaine", "Histoire Européenne", "Histoire",
     "Développement Personnel", "Motivation", "Récits Captivants", "Psychologie", "Finance", "Business",
     "Santé & Bien-être", "Football", "Sport", "Science", "Faits Divers", "True Crime", "Voyage", "Cuisine",
+    "Astuces Maison",
 ]
 
 
@@ -632,6 +633,49 @@ def admin_list_community_library(
         query = query.filter(CommunityLibraryFolder.status == status_filter)
     folders = query.order_by(CommunityLibraryFolder.niche.asc(), CommunityLibraryFolder.created_at.desc()).limit(500).all()
     return [f.to_dict() for f in folders]
+
+
+@router.post("/community-library/resync/{channel_id}")
+def admin_resync_community_library_folder(channel_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Recomputes a channel's CommunityLibraryFolder row from what's actually
+    on disk and upserts it — a repair tool for the drift this niche folders
+    can silently fall into: _persist_generated_images_to_channel_library
+    copies each freshly-generated image to disk first, then syncs the DB row
+    in a separate try/except that only logs on failure (never surfaced to a
+    creator or retried) — a single failed commit there (e.g. two renders'
+    background threads racing to INSERT the very first row for a channel at
+    once) leaves every image after that point uncounted, and the whole niche
+    silently invisible in the overview (admin_community_library_overview
+    skips any channel whose count comes back <=0). Confirmed live: a channel
+    with 53 real generated_*.png files on disk had zero DB record of any of
+    them. Safe to call anytime — always resets to the true file count,
+    never guesses or accumulates."""
+    from src.config import STORAGE_PATH
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    library_dir = STORAGE_PATH / "channels" / channel_id / "library"
+    real_count = len([f for f in library_dir.iterdir() if f.is_file()]) if library_dir.is_dir() else 0
+    folder = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).first()
+    if real_count <= 0:
+        return {"channel_id": channel_id, "image_count": 0, "folder_id": folder.id if folder else None, "changed": False}
+    if folder:
+        changed = folder.image_count != real_count
+        folder.image_count = real_count
+        folder.niche = channel.niche or folder.niche
+    else:
+        changed = True
+        folder = CommunityLibraryFolder(
+            channel_id=channel_id,
+            user_id=channel.user_id,
+            niche=channel.niche or "General",
+            image_count=real_count,
+            status="approved",
+        )
+        db.add(folder)
+    db.commit()
+    db.refresh(folder)
+    return {"channel_id": channel_id, "image_count": real_count, "folder_id": folder.id, "changed": changed}
 
 
 @router.get("/community-library/{folder_id}/images")
