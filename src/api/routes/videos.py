@@ -369,7 +369,10 @@ def _get_owned_video(db: Session, video_id: str, current_user: User) -> Video:
     video = db.query(Video).join(Channel, Video.channel_id == Channel.id).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    if video.channel.user_id != current_user.id:
+    # Admin video operations (the admin dashboard's kebab menu) intentionally
+    # span every creator's channel; regular users remain restricted to their
+    # own channels.
+    if video.channel.user_id != current_user.id and not getattr(current_user, "is_admin", False):
         raise HTTPException(status_code=403, detail="Accès refusé.")
     return video
 
