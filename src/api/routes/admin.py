@@ -394,6 +394,14 @@ def admin_list_videos(q: Optional[str] = None, status_filter: Optional[str] = No
         data["total_credits"] = (
             -sum(t.amount for t in _video_cost_transactions(db, v, owner.id)) if owner else 0
         )
+        # A video costing 0 KappGen credits usually isn't a billing gap — see
+        # debit_izivoice_usage: a creator who connected their own Izivoice key
+        # is charged nothing here because they're already paying Izivoice
+        # directly for that call (avoids double-billing them). Surfaced
+        # explicitly so "0 credits" in this list reads as "billed via their
+        # own key" instead of looking like every render silently slipped
+        # through free.
+        data["owner_has_own_izivoice_key"] = bool(owner and owner.izivoice_api_key_encrypted)
         result.append(data)
     return result
 
