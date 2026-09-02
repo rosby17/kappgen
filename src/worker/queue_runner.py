@@ -161,16 +161,18 @@ def process_single_queued_video() -> bool:
         # The future is joined below just before the completed video is exposed.
         thumbnail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="thumbnail")
         thumbnail_destination = video_dir / "thumbnail.jpg"
+        thumbnail_enabled = bool((channel.image_style or {}).get("generate_thumbnail_with_ai", False))
         thumbnail_future = thumbnail_executor.submit(
             youtube_metadata.generate_thumbnail,
-            video_dir / "__thumbnail_source__.mp4",
-            thumbnail_destination,
+            video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
             video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-            channel,
-            video.id,
-        )
+            channel, video.id,
+        ) if thumbnail_enabled else None
 
         def await_parallel_thumbnail():
+            if thumbnail_future is None:
+                thumbnail_executor.shutdown(wait=False, cancel_futures=True)
+                return None
             try:
                 result = thumbnail_future.result()
                 logger.info("Parallel GPT Image 2 thumbnail ready for video %s", video.id)
