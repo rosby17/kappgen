@@ -16,6 +16,19 @@ from src.pipeline.audio_mixer import mix_audio_tracks
 from src.pipeline.assembler import assemble_final_video, check_ffmpeg_filter
 from src.pipeline.editing_direction import resolve_editing_profile
 
+
+def _media_checkpoint_is_valid(path: Path, expected_duration: float, tolerance: float = 0.75) -> bool:
+    """Whether a completed media artifact can safely be reused after restart.
+
+    Existence alone is insufficient: SIGKILL can leave a partially-written MP4
+    or MP3 behind. ffprobe must be able to read it and its duration must remain
+    close to the scene duration before it is accepted as a checkpoint.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    actual_duration = get_audio_duration(path)
+    return actual_duration > 0 and abs(actual_duration - expected_duration) <= tolerance
+
 def run_video_pipeline(
     channel_config: Dict[str, Any],
     script_text: str,
@@ -218,11 +231,19 @@ def run_video_pipeline(
     clip_paths = [clips_dir / f"clip_{i+1:03d}.mp4" for i in range(len(segments))]
     from src.config import MAX_CLIP_RENDER_WORKERS
     max_clip_workers = max(1, MAX_CLIP_RENDER_WORKERS)
+    missing_clip_indices = [
+        i for i, seg in enumerate(segments)
+        if not _media_checkpoint_is_valid(clip_paths[i], seg["duration"])
+    ]
+    missing_clip_index_set = set(missing_clip_indices)
+    reused_clip_count = len(clip_paths) - len(missing_clip_indices)
+    if reused_clip_count:
+        logger.info(f"Resume checkpoint: reusing {reused_clip_count}/{len(clip_paths)} completed scene clip(s).")
     with ThreadPoolExecutor(max_workers=max_clip_workers) as pool:
         futures = [
             pool.submit(
                 build_image_clip,
-                image_path=img_path,
+                image_path=subtitled_image_paths[i],
                 output_clip_path=clip_paths[i],
                 duration=seg["duration"],
                 zoom_min_pct=zoom_min,
@@ -231,7 +252,8 @@ def run_video_pipeline(
                 scene_index=i,
                 editing_profile=editing_profile,
             )
-            for i, (seg, img_path) in enumerate(zip(segments, subtitled_image_paths))
+            for i, seg in enumerate(segments)
+            if i in missing_clip_index_set
         ]
         for f in futures:
             f.result()  # surface the first exception instead of silently dropping it
@@ -254,8 +276,15 @@ def run_video_pipeline(
         ]
         _run_ffmpeg_trim(cmd)
 
+    missing_audio_indices = [
+        i for i, seg in enumerate(segments)
+        if not _media_checkpoint_is_valid(audio_segment_paths[i], seg["duration"])
+    ]
+    reused_audio_count = len(audio_segment_paths) - len(missing_audio_indices)
+    if reused_audio_count:
+        logger.info(f"Resume checkpoint: reusing {reused_audio_count}/{len(audio_segment_paths)} completed audio segment(s).")
     with ThreadPoolExecutor(max_workers=max_clip_workers) as pool:
-        futures = [pool.submit(_trim_segment, i, seg) for i, seg in enumerate(segments)]
+        futures = [pool.submit(_trim_segment, i, segments[i]) for i in missing_audio_indices]
         for f in futures:
             f.result()
 
@@ -288,7 +317,9 @@ def run_video_pipeline(
     music_pref = channel_config.get("music_preference", {})
     mixed_audio_path = source_dir / "mixed_audio.mp3"
     
-    if music_pref.get("enabled", True):
+    if _media_checkpoint_is_valid(mixed_audio_path, total_duration, tolerance=2.0):
+        logger.info("Resume checkpoint: reusing completed mixed audio track.")
+    elif music_pref.get("enabled", True):
         music_track = get_background_music_track(
             music_pref=music_pref,
             duration=total_duration,

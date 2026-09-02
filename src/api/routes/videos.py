@@ -822,6 +822,11 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
         # failed twice, seconds after each retry, while the AI call was
         # still in flight or had already failed silently in the background).
         video.status = VideoStatus.RENDERING.value
+        # A manual retry starts a new interruption budget. Without this reset,
+        # a video that already reached the automatic-restart ceiling fails
+        # immediately on the very next server restart, making the Retry button
+        # effectively useless.
+        video.restart_count = 0
         video.error_message = None
         video.progress_stage = "Régénération du script…"
         video.progress_percent = 0
@@ -831,6 +836,7 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
         return video.to_dict()
 
     video.status = VideoStatus.QUEUED.value
+    video.restart_count = 0
     video.error_message = None
     video.progress_stage = "En attente du moteur de rendu"
     video.progress_percent = 0
