@@ -1292,6 +1292,14 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         video.progress_percent = percent
         db.commit()
 
+    def _on_title_picked(title: str) -> None:
+        # Saved the moment the topic is chosen, well before the script
+        # itself is written, so "Mes Vidéos" shows the real title instead of
+        # a generic placeholder for the entire (often multi-minute) writing
+        # phase that follows.
+        video.title = title
+        db.commit()
+
     result = generate_daily_script(
         niche=channel.niche,
         recent_titles=recent_titles,
@@ -1302,6 +1310,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         use_web_trends=bool(channel.use_web_trends),
         on_progress=_on_script_progress,
         recent_scripts=recent_scripts,
+        on_title=_on_title_picked,
     )
     if not result:
         db.delete(video)
@@ -1484,6 +1493,10 @@ def retry_auto_video_script_background(video_id: str):
             channel.automation_style_prompt,
         ])) or None
 
+        def _on_title_picked(title: str) -> None:
+            video.title = title
+            db.commit()
+
         result = generate_daily_script(
             niche=channel.niche,
             recent_titles=recent_titles,
@@ -1493,6 +1506,7 @@ def retry_auto_video_script_background(video_id: str):
             topic_examples=channel.topic_examples,
             use_web_trends=bool(channel.use_web_trends),
             recent_scripts=recent_scripts,
+            on_title=_on_title_picked,
         )
         if not result:
             video.status = VideoStatus.FAILED.value

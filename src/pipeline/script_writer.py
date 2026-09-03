@@ -245,6 +245,7 @@ def generate_daily_script(
     use_web_trends: bool = False,
     on_progress: Optional[callable] = None,
     recent_scripts: Optional[List[str]] = None,
+    on_title: Optional[callable] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -287,6 +288,13 @@ def generate_daily_script(
         )
         if not title:
             return None
+        # The title is picked before a single word of the script is written —
+        # surface it immediately (e.g. so the caller can save it to the video
+        # row right away) instead of only once the whole script finishes,
+        # which left "Sujet pris en charge par KappGen" showing in the UI for
+        # the entire, often much longer, writing phase.
+        if on_title:
+            on_title(title)
         if on_progress:
             on_progress("Rédaction du script", 8)
 
