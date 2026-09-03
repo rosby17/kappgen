@@ -1382,6 +1382,26 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
     db.refresh(video)
     return video.to_dict()
 
+def _extract_video_frame(video_source: Path, thumb_path: Path) -> Path:
+    """Grabs (and caches) a single frame out of a video file as a jpg —
+    shared by every place that needs a still to show for something that's
+    actually a video clip (a video-slot scene, or an in-progress Ken Burns
+    clip — see both call sites below)."""
+    if not video_source.exists():
+        raise HTTPException(status_code=404, detail="Le fichier source est introuvable.")
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    if not thumb_path.exists() or thumb_path.stat().st_mtime < video_source.stat().st_mtime:
+        try:
+            run_ffmpeg([
+                "ffmpeg", "-y", "-ss", "0.3", "-i", str(video_source),
+                "-frames:v", "1", "-q:v", "3", str(thumb_path),
+            ])
+        except Exception as e:
+            logger.warning(f"Frame extraction failed for {video_source}: {e}")
+            raise HTTPException(status_code=404, detail="Aperçu indisponible.")
+    return thumb_path
+
+
 def _resolve_scene_thumbnail(video: Video, scene: Dict[str, Any]) -> Path:
     """A real image file to show for this scene's thumbnail.
 
@@ -1401,24 +1421,10 @@ def _resolve_scene_thumbnail(video: Video, scene: Dict[str, Any]) -> Path:
     visual_path = scene.get("visual_path")
     if not visual_path:
         raise HTTPException(status_code=404, detail="Aucune image pour cette scène.")
-    video_source = Path(visual_path)
-    if not video_source.exists():
-        raise HTTPException(status_code=404, detail="Le fichier source de cette scène est introuvable.")
-
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     thumbs_dir = video_dir / "source" / "thumbnails"
-    thumbs_dir.mkdir(parents=True, exist_ok=True)
     thumb_path = thumbs_dir / f"scene_{scene.get('index', 0)}.jpg"
-    if not thumb_path.exists() or thumb_path.stat().st_mtime < video_source.stat().st_mtime:
-        try:
-            run_ffmpeg([
-                "ffmpeg", "-y", "-ss", "0.3", "-i", str(video_source),
-                "-frames:v", "1", "-q:v", "3", str(thumb_path),
-            ])
-        except Exception as e:
-            logger.warning(f"Scene thumbnail extraction failed for video {video.id} scene {scene.get('index')}: {e}")
-            raise HTTPException(status_code=404, detail="Aperçu indisponible pour cette scène.")
-    return thumb_path
+    return _extract_video_frame(Path(visual_path), thumb_path)
 
 
 def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
@@ -1473,8 +1479,34 @@ def get_video_production_progress(video_id: str, current_user: User = Depends(ge
         except Exception:
             scenes = []
 
-    # scenes.json is written after clips are built. During visual generation,
-    # show the image files that already exist so the gallery grows live.
+    # scenes.json is written only after every clip is built (Step 6/7) — but
+    # clips themselves are written one by one, in parallel, during Step 5/7
+    # ("Animation des scènes"). Without this, a video-B-roll/mixed channel
+    # (whose scenes never touch images_dir at all — see the fallback below)
+    # showed a completely empty gallery through that whole stage, worse than
+    # the placeholder text ("la galerie se remplira au fur et à mesure")
+    # actually promised. Each clip already IS the real per-scene visual
+    # (Ken Burns pan/zoom applied), so a frame grabbed from it previews
+    # accurately for image-slot and video-slot scenes alike.
+    if not scenes:
+        clips_dir = source_dir / "clips"
+        if clips_dir.exists():
+            clip_files = sorted(
+                (p for p in clips_dir.iterdir() if p.is_file() and re.match(r"^clip_(\d+)\.mp4$", p.name)),
+                key=lambda p: int(re.match(r"^clip_(\d+)\.mp4$", p.name).group(1)),
+            )
+            for clip_path in clip_files:
+                clip_number = int(re.match(r"^clip_(\d+)\.mp4$", clip_path.name).group(1))
+                scenes.append({
+                    "index": clip_number - 1,
+                    "text": "",
+                    "visual_type": "video",
+                    "image_url": f"/videos/{video.id}/production-clip-thumbnail/{clip_number - 1}",
+                })
+
+    # Before clip-building even starts, show the raw fetched image files as
+    # they land (image-slot channels only — a video-slot scene has nothing
+    # here until its clip exists, covered above instead).
     if not scenes:
         images_dir = source_dir / "images"
         if images_dir.exists():
@@ -1509,6 +1541,24 @@ def get_video_production_progress(video_id: str, current_user: User = Depends(ge
         "final_ready": output_path.exists() or bool(video.output_path),
         "updated_at": datetime.utcnow().isoformat(),
     }
+
+
+@router.get("/{video_id}/production-clip-thumbnail/{index}")
+def get_video_production_clip_thumbnail(video_id: str, index: int, db: Session = Depends(get_db)):
+    """A still frame from a Ken Burns clip already built for this scene,
+    while the video is still mid-render (Step 5/7, before scenes.json even
+    exists) — used by the live "Suivi" panel so the gallery actually fills
+    in during clip-building, not just once the whole video is nearly done.
+    Intentionally unauthenticated, same reasoning as get_scene_image."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    clip_path = video_dir / "source" / "clips" / f"clip_{index + 1:03d}.mp4"
+    if not clip_path.exists():
+        raise HTTPException(status_code=404, detail="Ce plan n'est pas encore prêt.")
+    thumb_path = video_dir / "source" / "thumbnails" / f"clip_{index}.jpg"
+    return FileResponse(_extract_video_frame(clip_path, thumb_path))
 
 
 @router.get("/{video_id}/production-audio")
