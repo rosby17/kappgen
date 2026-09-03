@@ -172,9 +172,16 @@ def run_video_pipeline(
             prompts = directed_prompts + prompts[len(directed_prompts):]
 
     media_mode = image_style_cfg.get("media_mode", "images")
+    # The manual "Nombre précis" count is source-agnostic (see
+    # fetch_or_generate_images) — pass it through whenever the creator set
+    # one, whether or not AI generation is enabled for this channel. In
+    # "auto" mode, fall back to no cap at all (not the AI-only 10-minute
+    # heuristic above, which only makes sense when the count also caps a
+    # paid AI call).
+    unique_visual_count = ai_unique_scene_count if max_unique_images else None
     image_paths = [] if media_mode == "videos" else fetch_or_generate_images(
         prompts, images_dir, image_style_cfg,
-        unique_generation_count=ai_unique_scene_count if ai_enabled else None,
+        unique_generation_count=unique_visual_count,
         user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
     )
 
