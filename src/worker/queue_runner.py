@@ -1748,6 +1748,71 @@ def generate_and_queue_auto_video_background(channel_id: str):
         db.close()
 
 
+COMMUNITY_IMAGE_TAGGING_BATCH_SIZE = 5
+COMMUNITY_IMAGE_TAGGING_INTERVAL_SECONDS = 120  # a few images every 2 minutes — steady catch-up, no burst
+
+
+def tag_untagged_community_images():
+    """Runs a vision model over a small batch of shared-library images that
+    have never been tagged, and stores the resulting keywords.
+
+    Public-library search only ever matched a source channel's NICHE — a
+    search for "chessboard" found nothing unless the sharing channel's niche
+    happened to contain that word, however clearly a chessboard was actually
+    in the picture. Tagging happens here, in the background, a handful of
+    images at a time, rather than on the search request itself: a vision call
+    is too slow/rate-limited to sit in a search's critical path, and this way
+    a burst of new shares doesn't spike search latency for everyone.
+    """
+    from src.config import STORAGE_PATH
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImageTag
+    from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
+    from src.pipeline.vision import analyze_image_content_tags
+    import mimetypes
+
+    db = SessionLocal()
+    try:
+        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status == "approved").all()
+        already_tagged = {
+            (row.channel_id, row.filename)
+            for row in db.query(CommunityLibraryImageTag.channel_id, CommunityLibraryImageTag.filename).all()
+        }
+        tagged_this_pass = 0
+        for folder in folders:
+            if tagged_this_pass >= COMMUNITY_IMAGE_TAGGING_BATCH_SIZE:
+                break
+            library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
+            if not library_dir.is_dir():
+                continue
+            for asset in sorted(library_dir.iterdir(), key=lambda item: item.name):
+                if tagged_this_pass >= COMMUNITY_IMAGE_TAGGING_BATCH_SIZE:
+                    break
+                if not asset.is_file() or asset.suffix.lower() not in ALLOWED_LIBRARY_EXTENSIONS:
+                    continue
+                if (folder.channel_id, asset.name) in already_tagged:
+                    continue
+                media_type = mimetypes.guess_type(asset.name)[0] or "image/jpeg"
+                try:
+                    tags = analyze_image_content_tags(asset.read_bytes(), media_type)
+                except Exception as exc:
+                    logger.warning(f"Content tagging failed for {folder.channel_id}/{asset.name}: {exc}")
+                    tags = []
+                db.add(CommunityLibraryImageTag(
+                    channel_id=folder.channel_id,
+                    filename=asset.name,
+                    tags_json=json.dumps(tags),
+                ))
+                db.commit()
+                already_tagged.add((folder.channel_id, asset.name))
+                tagged_this_pass += 1
+        if tagged_this_pass:
+            logger.info(f"Tagged {tagged_this_pass} community library image(s) for public-library search.")
+    except Exception as exc:
+        logger.error(f"tag_untagged_community_images failed: {exc}")
+    finally:
+        db.close()
+
+
 def run_daily_automation():
     """
     Zero-human-input daily pipeline: for every channel with automation_mode
@@ -2021,6 +2086,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_automation_check = 0.0
     last_scheduled_publish_check = 0.0
     last_youtube_identity_sync = 0.0
+    last_community_tagging = 0.0
     while not _shutdown_requested:
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
@@ -2037,6 +2103,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_youtube_identity_sync > YOUTUBE_IDENTITY_SYNC_INTERVAL_SECONDS:
             run_youtube_identity_sync()
             last_youtube_identity_sync = now
+        if now - last_community_tagging > COMMUNITY_IMAGE_TAGGING_INTERVAL_SECONDS:
+            tag_untagged_community_images()
+            last_community_tagging = now
         time.sleep(poll_interval_seconds)
 
     # SIGTERM landed — let every in-flight render lane finish its current

@@ -18,7 +18,7 @@ import uuid
 import httpx
 from urllib.parse import quote, urlparse
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
@@ -930,6 +930,19 @@ def search_public_library(
                 CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
             ).filter(CommunityLibraryFolder.status == "approved").all()
         }
+        # Real content keywords a background vision pass tagged each image
+        # with (see queue_runner.py's tag_untagged_community_images) — lets a
+        # search for what's literally IN the picture ("chessboard") find it
+        # regardless of the sharing channel's niche wording. A freshly shared
+        # image simply has none yet until that pass reaches it; niche
+        # matching alone still covers it in the meantime.
+        content_tags = {
+            (tag.channel_id, tag.filename): set(json.loads(tag.tags_json) or [])
+            for tag in db.query(CommunityLibraryImageTag).join(
+                CommunityLibraryFolder,
+                CommunityLibraryFolder.channel_id == CommunityLibraryImageTag.channel_id,
+            ).filter(CommunityLibraryFolder.status == "approved").all()
+        }
         for folder in folders:
             library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
             if not library_dir.is_dir():
@@ -942,11 +955,17 @@ def search_public_library(
                 # the substring fallback also supports a creator's own niche
                 # wording (for example "astronomie et espace").
                 niche_words = {word for word in re.findall(r"\w+", asset_niche.casefold()) if len(word) > 2}
+                asset_tags = content_tags.get((folder.channel_id, asset.name), set())
+                content_matches = bool(asset_tags) and any(
+                    tag == normalized_query or tag in query_words or normalized_query in tag
+                    for tag in asset_tags
+                )
                 niche_matches = (
                     normalized_query in {"", "cinematic background"}
                     or normalized_query in asset_niche.casefold()
                     or asset_niche.casefold() in normalized_query
                     or bool(query_words & niche_words)
+                    or content_matches
                 )
                 if not niche_matches:
                     continue

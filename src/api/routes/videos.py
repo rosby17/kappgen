@@ -984,6 +984,51 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
 
     return video.to_dict()
 
+
+@router.post("/{video_id}/retry-visuals")
+def retry_video_visuals(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-runs only the visual side of a rendered video — images/clips and
+    the final assembly — while keeping the already-generated voiceover
+    exactly as-is, for when the audio/narration is fine but the visuals
+    weren't (e.g. an empty stock-footage/library pool that fell all the way
+    through to plain synthetic gradient art). Unlike /retry (a full re-run)
+    or the scene-editor's is_reassembly path (re-muxes EXISTING clips
+    unchanged), this clears the images/clips/scenes.json so
+    run_video_pipeline's own checkpoint logic regenerates every scene's
+    visual fresh — while that same checkpoint logic reuses voiceover.mp3 +
+    transcript.json untouched, since neither is deleted here."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="Cette vidéo doit être terminée ou en échec pour relancer uniquement le montage.")
+    channel = video.channel
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    source_dir = video_dir / "source"
+    voiceover_path = source_dir / "voiceover.mp3"
+    if not voiceover_path.exists():
+        raise HTTPException(status_code=409, detail="La voix off de cette vidéo n'est plus disponible sur le serveur — utilise « Relancer » (rendu complet) à la place.")
+
+    for rel in ("images", "clips"):
+        target = source_dir / rel
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+    for filename in ("scenes.json", "subtitles.ass"):
+        target = source_dir / filename
+        if target.exists():
+            target.unlink()
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = False
+    video.restart_count = 0
+    video.error_message = None
+    video.progress_stage = "En attente (relance du montage — voix off conservée)"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 class VideoUpdate(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None

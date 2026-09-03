@@ -556,7 +556,7 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     return ai_path
 
 
-def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None) -> Path:
+def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None) -> tuple[Path, bool]:
     text = clean_thumbnail_headline(text)
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
@@ -676,7 +676,7 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
         result = image.convert("RGB")
         result.save(destination, "JPEG", quality=92, optimize=True)
         destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
-        return destination
+        return destination, True
 
     y = top
     for index, line in enumerate(lines):
@@ -703,4 +703,4 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     result.save(destination, "JPEG", quality=90, optimize=True)
     frame_path.unlink(missing_ok=True)
     destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
-    return destination
+    return destination, False

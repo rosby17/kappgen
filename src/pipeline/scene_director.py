@@ -109,11 +109,22 @@ Respond with ONLY this JSON object, no other text:
 {{"queries": ["query for scene 1", "query for scene 2", ...]}}
 The queries array MUST have exactly {len(segment_texts)} entries, in order."""
 
-        raw_text = generate_text(instruction, max_tokens=1500, model=SCENE_DIRECTOR_MODEL, operation='stock_query_direction')
+        # A fixed 1500-token budget was fine for a handful of scenes but
+        # silently broke stock footage entirely on any long video: a 50+
+        # minute narration means 100+ scenes, and the JSON array of that many
+        # "query for scene N" strings routinely got cut off mid-response
+        # before valid JSON ever closed — _extract_json/the length check
+        # below then failed for every scene, so the whole video fell back to
+        # community/library images (and, on a channel with no folder of its
+        # own yet, straight to synthetic gradient art) with zero visible
+        # error anywhere. ~14 tokens/scene comfortably covers "query for
+        # scene N": ["...", ...] at this format's actual verbosity.
+        max_tokens = min(8000, 300 + len(segment_texts) * 14)
+        raw_text = generate_text(instruction, max_tokens=max_tokens, model=SCENE_DIRECTOR_MODEL, operation='stock_query_direction')
         data = _extract_json(raw_text)
         queries = data.get("queries")
         if not isinstance(queries, list) or len(queries) != len(segment_texts):
-            logger.warning(f"Stock-query director returned {len(queries) if isinstance(queries, list) else 'no'} queries for {len(segment_texts)} scenes; ignoring.")
+            logger.error(f"Stock-query director returned {len(queries) if isinstance(queries, list) else 'no'} queries for {len(segment_texts)} scenes; ignoring.")
             return None
         return [str(q).strip() for q in queries]
     except Exception as e:

@@ -923,6 +923,26 @@ class CommunityLibraryImagePlacement(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CommunityLibraryImageTag(Base):
+    """What a vision model actually sees in one shared library image —
+    concrete keywords (subject, objects, setting), not the channel's niche
+    or an admin's classification. Public-library search matched only the
+    *source channel's* niche until now, so an image searched by what it
+    literally shows (e.g. "chessboard", "throne room") never surfaced unless
+    that happened to also be the channel's niche wording. Populated lazily by
+    a background worker pass (see queue_runner.py's tagging loop) rather than
+    at request time, so a slow/rate-limited vision call never blocks a
+    search."""
+    __tablename__ = "community_library_image_tags"
+    __table_args__ = (UniqueConstraint("channel_id", "filename", name="uq_community_image_tag_channel_filename"),)
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, index=True)
+    filename = Column(String(512), nullable=False)
+    tags_json = Column(Text, nullable=False)  # JSON list of lowercase English keywords
+    analyzed_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CreditPot(Base):
     """One purchased credit pack, ported from Izivoice's own credit_pots
     model: a balance isn't one number on the user row, it's the sum of every
