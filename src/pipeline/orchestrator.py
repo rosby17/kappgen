@@ -22,6 +22,33 @@ def unresolved_visual_indices(visual_paths) -> list:
     return [index for index, path in enumerate(visual_paths) if not path]
 
 
+def plan_visual_slots(scene_count: int, media_mode: str) -> tuple:
+    """Decides, per scene, whether it wants an image or a video clip —
+    before anything is downloaded/generated. Returns (video_slot_indices,
+    image_slot_indices): a set and a sorted list, together covering every
+    index in range(scene_count) exactly once.
+
+    "images" reserves every scene for a still (video_slot_indices empty).
+    "videos" reserves every scene for a clip. "mixed" reserves the same
+    ~1-in-3 cadence B-roll placement already uses for its own clip scenes,
+    so both draw from the same set of slots instead of competing for them.
+    Planning this first — rather than generating an image for every scene
+    and only then asking Pexels to fill whatever's still empty — is what
+    makes "mixed" mode actually request stock footage: previously every
+    scene already had an image path by the time that step ran, so it never
+    found an empty scene to fill and a "mixed" channel silently rendered
+    100% images.
+    """
+    if media_mode == "videos":
+        video_slot_indices = set(range(scene_count))
+    elif media_mode == "mixed":
+        video_slot_indices = set(range(2, scene_count, 3))
+    else:
+        video_slot_indices = set()
+    image_slot_indices = [i for i in range(scene_count) if i not in video_slot_indices]
+    return video_slot_indices, image_slot_indices
+
+
 def _media_checkpoint_is_valid(path: Path, expected_duration: float, tolerance: float = 0.75) -> bool:
     """Whether a completed media artifact can safely be reused after restart.
 
@@ -177,23 +204,41 @@ def run_video_pipeline(
             prompts = directed_prompts + prompts[len(directed_prompts):]
 
     media_mode = image_style_cfg.get("media_mode", "images")
+    video_slot_indices, image_slot_indices = plan_visual_slots(len(segments), media_mode)
+
     # The manual "Nombre précis" count is source-agnostic (see
     # fetch_or_generate_images) — pass it through whenever the creator set
     # one, whether or not AI generation is enabled for this channel. In
     # "auto" mode, fall back to no cap at all (not the AI-only 10-minute
     # heuristic above, which only makes sense when the count also caps a
-    # paid AI call).
+    # paid AI call). Scoped to the scenes actually asking for an image now,
+    # not the full segment count, since video-slot scenes never call this.
     unique_visual_count = ai_unique_scene_count if max_unique_images else None
-    image_paths = [] if media_mode == "videos" else fetch_or_generate_images(
-        prompts, images_dir, image_style_cfg,
-        unique_generation_count=unique_visual_count,
-        user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
-    )
+    if image_slot_indices:
+        image_prompts = [prompts[i] for i in image_slot_indices]
+        generated_images = fetch_or_generate_images(
+            image_prompts, images_dir, image_style_cfg,
+            unique_generation_count=min(len(image_slot_indices), unique_visual_count) if unique_visual_count else None,
+            user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
+        )
+    else:
+        generated_images = []
 
-    # Creator-provided B-roll is mixed into the timeline at a restrained,
-    # predictable cadence. Images remain the default; every third scene uses
-    # the next clip, so a handful of short clips adds motion without taking
-    # over the entire montage.
+    visual_paths = [None] * len(segments)
+    visual_types = ["image"] * len(segments)
+    for position, scene_index in enumerate(image_slot_indices):
+        if position < len(generated_images):
+            visual_paths[scene_index] = generated_images[position]
+    # Snapshot before B-roll/stock/subtitle-burn steps below start
+    # overwriting visual_paths — the manifest keeps each scene's original
+    # source image (None for a video-slot scene) even once visual_path
+    # itself has moved on to a subtitled copy or a clip.
+    image_paths = list(visual_paths)
+
+    # Creator-provided B-roll is mixed into the timeline at the same
+    # cadence its scenes were already reserved at above ("videos": every
+    # scene; "mixed": every third scene; "images": none — B-roll is a video
+    # asset, so it has nothing to claim there).
     broll_paths = []
     broll_dir_value = image_style_cfg.get("broll_path")
     if broll_dir_value:
@@ -202,21 +247,8 @@ def run_video_pipeline(
         storage_root = STORAGE_PATH.resolve()
         if storage_root in candidate_dir.parents and candidate_dir.is_dir():
             broll_paths = sorted([p for p in candidate_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}])
-    visual_paths = list(image_paths)
-    visual_types = ["image"] * len(visual_paths)
-    if media_mode == "videos":
-        visual_paths = [None] * len(segments)
-        # "videos" expresses the creator's desired source, not that a real
-        # clip has already been resolved. Marking these empty slots as video
-        # made the Pexels pass below believe every scene was already filled,
-        # so it performed zero searches and later tried to render None paths.
-        visual_types = ["image"] * len(segments)
-    elif len(visual_paths) < len(segments):
-        visual_paths.extend([None] * (len(segments) - len(visual_paths)))
-        visual_types.extend(["image"] * (len(segments) - len(visual_types)))
     if broll_paths:
-        indices = range(len(segments)) if media_mode == "videos" else range(2, len(segments), 3)
-        for i in indices:
+        for i in sorted(video_slot_indices):
             visual_paths[i] = broll_paths[(i // 3) % len(broll_paths)]
             visual_types[i] = "video"
         logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
@@ -438,7 +470,7 @@ def run_video_pipeline(
             "start": seg["start"],
             "end": seg["end"],
             "duration": seg["duration"],
-            "image_path": str(image_paths[i]) if i < len(image_paths) else None,
+            "image_path": str(image_paths[i]) if image_paths[i] is not None else None,
             "visual_path": str(visual_paths[i]),
             "visual_type": visual_types[i],
             "clip_path": str(clip_paths[i]),
