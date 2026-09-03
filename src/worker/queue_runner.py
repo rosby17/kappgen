@@ -1275,6 +1275,11 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         input_type="text",
         creation_source="automatic",
         script_text="",
+        # Placeholder until generate_daily_script returns the real one below
+        # — without it the row shows "(sans titre)" in "Mes Vidéos"/admin for
+        # the whole topic-research + script-writing window, which reads as
+        # broken even though nothing has failed.
+        title=f"{channel.name or channel.niche} — nouvelle vidéo",
         status=VideoStatus.RENDERING.value,
         progress_stage="Recherche du sujet",
         progress_percent=1,
