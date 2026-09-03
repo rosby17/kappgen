@@ -21,10 +21,11 @@ from typing import Optional
 # by 1,000,000 from the usual "$X per million tokens" published rate).
 PRICING = {
     "anthropic": {
-        # Claude Sonnet 5 — Anthropic's published per-million-token rate as of
-        # writing: $3 input / $15 output.
-        "input_per_token": 3.0 / 1_000_000,
-        "output_per_token": 15.0 / 1_000_000,
+        # Claude Sonnet 5 — Anthropic's current published rate:
+        # $2 input / $10 output per million tokens (permanent since
+        # 2026-08-10; do not use the superseded $3/$15 introductory rate).
+        "input_per_token": 2.0 / 1_000_000,
+        "output_per_token": 10.0 / 1_000_000,
         # Anthropic's server-side web_search tool bills per search performed,
         # separately from tokens — $10 per 1,000 searches as of writing. This
         # is a real cost the account is charged regardless of how small, so
