@@ -628,12 +628,29 @@ def download_video_audio(video_id: str, db: Session = Depends(get_db)):
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    source_path = STORAGE_PATH / video.output_path
-    if not source_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found on disk")
+    output_ref = str(video.output_path)
+    if not _video_is_remote(video):
+        source_path = STORAGE_PATH / output_ref
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail="Video file not found on disk")
+        audio_path = ensure_extracted_audio(source_path)
+        return FileResponse(audio_path, media_type="audio/mp4", filename=f"kappgen-{video_id}-audio.m4a")
 
-    audio_path = ensure_extracted_audio(source_path)
-    return FileResponse(audio_path, media_type="audio/mp4", filename=f"kappgen-{video_id}-audio.m4a")
+    # The render lives in B2/R2; download and extract only while the response
+    # is being streamed, keeping storage details invisible to the client.
+    def remote_audio_stream():
+        with tempfile.TemporaryDirectory(prefix="kappgen-audio-source-") as tmp:
+            source_path = Path(tmp) / "output.mp4"
+            with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                with source_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+            audio_path = ensure_extracted_audio(source_path)
+            with audio_path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    yield chunk
+    return StreamingResponse(remote_audio_stream(), media_type="audio/mp4", headers={"Content-Disposition": f'attachment; filename="kappgen-{video_id}-audio.m4a"'})
 
 
 def _publish_video_background(video_id: str) -> None:
