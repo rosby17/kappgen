@@ -56,11 +56,17 @@ def _meta_path(query: str) -> Path:
 def _pick_best_file(video: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Picks the largest landscape file that still fits our 1920x1080 canvas
     without pulling an unnecessarily huge 4K master."""
-    candidates = [
-        f for f in (video.get("video_files") or [])
-        if f.get("link") and (f.get("width") or 0) >= 1280 and (f.get("width") or 0) <= 2560
-        and (f.get("width") or 0) >= (f.get("height") or 0)  # landscape only
-    ]
+    candidates = []
+    for file in video.get("video_files") or []:
+        width, height = file.get("width") or 0, file.get("height") or 0
+        # Pexels' ``medium`` result is commonly 640x360.  The old 1280px
+        # lower bound rejected every one of those files, so a perfectly good
+        # API response quietly became the generic image fallback.  Accept
+        # standard landscape HD/SD files; prefer HD below when both exist.
+        if not file.get("link") or width < 640 or (height and width < height):
+            continue
+        if width <= 2560:
+            candidates.append(file)
     if not candidates:
         return None
     # Closest to 1920 wide, preferring >= 1920 so we downscale rather than upscale.
@@ -89,7 +95,10 @@ def fetch_stock_clip(query: str) -> Optional[Path]:
             resp = client.get(
                 PEXELS_SEARCH_URL,
                 headers={"Authorization": PEXELS_API_KEY},
-                params={"query": query, "orientation": "landscape", "per_page": 10, "size": "medium"},
+                # Ask for large first so 1080p is available, while the
+                # picker above still accepts 640px clips when that is all the
+                # API has for a result.
+                params={"query": query, "orientation": "landscape", "per_page": 10, "size": "large"},
             )
             if resp.status_code == 429:
                 logger.warning("Pexels rate limit reached; falling back to images for this scene.")
