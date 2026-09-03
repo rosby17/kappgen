@@ -427,10 +427,26 @@ def _client_cost_label(description: str) -> str:
 
 @router.get("/{video_id}/cost-recap")
 def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Itemized "what did this video cost" breakdown, shown right after a render finishes."""
+    """Itemized "what did this video cost" breakdown, shown right after a render finishes.
+
+    Grouped by label rather than one row per CreditTransaction: a long video
+    can bill 50+ individual 100-credit Pexels assets, each its own debit row
+    for the admin ledger's sake — surfaced to the creator as-is, that was 50+
+    near-identical lines for what is conceptually one cost ("stock footage").
+    Order-preserving (first-seen position) so the recap still roughly reads
+    top-to-bottom in the order costs were actually incurred during the render."""
     video = _get_owned_video(db, video_id, current_user)
     transactions = _video_cost_transactions(db, video, current_user.id)
-    items = [{"description": _client_cost_label(t.description), "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for t in transactions:
+        label = _client_cost_label(t.description)
+        entry = grouped.setdefault(label, {"description": label, "credits": 0, "count": 0})
+        entry["credits"] += -t.amount
+        entry["count"] += 1
+    items = [
+        {**entry, "description": f'{entry["description"]} × {entry["count"]}' if entry["count"] > 1 else entry["description"]}
+        for entry in grouped.values()
+    ]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
 def _download_filename(video: Video, suffix: str) -> str:
