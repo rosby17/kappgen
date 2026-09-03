@@ -60,15 +60,21 @@ def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dic
         logger.warning(f"Anthropic returned no text content (stop_reason={response.stop_reason!r}, operation={usage_ctx.get('operation')}) — retrying once.")
         response = client.messages.create(**kwargs)
     in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
-    cost_usd = estimate_anthropic_cost(in_tok, out_tok)
-    # Web searches themselves are billed separately by Anthropic per-use;
-    # not tracked here (token cost is), same tradeoff as other providers'
-    # flat-rate estimates in this file already accept.
+    # Web searches are billed separately by Anthropic per-use, on top of
+    # tokens — the SDK reports the real count on usage.server_tool_use when
+    # the tool actually ran; falling back to counting the server_tool_use
+    # content blocks themselves covers older SDK versions that don't expose
+    # that usage field yet. Either way, a real charge on this call must
+    # always be reflected in what the creator is billed — never left out.
+    web_search_uses = getattr(getattr(response.usage, "server_tool_use", None), "web_search_requests", None)
+    if web_search_uses is None:
+        web_search_uses = sum(1 for block in response.content if getattr(block, "type", None) == "server_tool_use" and getattr(block, "name", None) == "web_search")
+    cost_usd = estimate_anthropic_cost(in_tok, out_tok, web_search_uses=web_search_uses)
     log_usage(
         "anthropic", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok, "web_search": enable_web_search},
+        meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok, "web_search": enable_web_search, "web_search_uses": web_search_uses},
     )
     # With tools enabled, content interleaves server_tool_use/web_search_tool_result
     # blocks with the final text — collect every text block instead of
