@@ -126,7 +126,14 @@ def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     content.append({"type": "text", "text": instruction})
 
     response = client.messages.create(
-        model="claude-opus-5",
+        # Sonnet 5, not Opus: describing a reference image's style/subject
+        # is well within Sonnet's vision ability, and PRICING in
+        # cost_tracking.py only has one "anthropic" tier (Sonnet's $3/$15 per
+        # million) — every call here was silently billed to Anthropic at
+        # Opus's real ~5x rate while the creator's own credit ledger only
+        # ever debited the cheaper Sonnet estimate, i.e. KappGen was eating
+        # the difference on every single reference-image upload.
+        model="claude-sonnet-5",
         # Enough room for the full JSON contract (style brief + character
         # anchor + typography + summary). At the old 400 the answer was cut
         # mid-sentence, json.loads failed, and the raw truncated blob was
@@ -240,7 +247,11 @@ def _generate_music_prompt_with_anthropic(user_text: str) -> str:
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
-        model="claude-opus-5",
+        # Sonnet 5, not Opus — this writes one short comma-separated music
+        # description sentence, the same weight of task ai_text.py already
+        # does on Sonnet everywhere else. Same billing mismatch as the vision
+        # call above: PRICING only prices Anthropic calls at Sonnet's rate.
+        model="claude-sonnet-5",
         max_tokens=200,
         messages=[{"role": "user", "content": user_text}],
     )
