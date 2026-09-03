@@ -1652,16 +1652,39 @@ def run_daily_automation():
                 if local_minutes < target_minutes:
                     continue
 
+            # Reserve the slot BEFORE generating, with a conditional UPDATE
+            # keyed on the value just read (optimistic lock), not after —
+            # generate_and_queue_auto_video can run for minutes (a
+            # multi-part script is several sequential Claude calls), and the
+            # old and new worker containers briefly overlap during every
+            # deploy (Coolify starts the replacement before killing the
+            # original). Both processes used to read the same stale
+            # `already` count, both pass the `already >= quota` check, and
+            # both generate — this channel got a 2nd unwanted video the same
+            # day this way more than once. Only the process whose UPDATE
+            # actually matches a row (rowcount > 0) may proceed; the loser
+            # sees rowcount 0 and skips, exactly as if it were over quota.
+            reserved = db.query(Channel).filter(
+                Channel.id == channel.id,
+                Channel.auto_videos_generated_today == already,
+            ).update({"auto_videos_generated_today": already + 1})
+            db.commit()
+            if not reserved:
+                continue
+
             video = generate_and_queue_auto_video(db, channel)
             if not video:
-                # Leave the counter untouched so this slot is retried on the
-                # next check within today's window instead of silently
-                # skipping it on a transient Claude failure.
+                # Generation failed (or was legitimately skipped, e.g.
+                # insufficient credit) — release the slot so this is
+                # retried on the next check within today's window instead
+                # of silently burning it on a transient failure.
+                db.query(Channel).filter(Channel.id == channel.id).update(
+                    {"auto_videos_generated_today": already}
+                )
+                db.commit()
                 logger.warning(f"Daily automation: script generation failed for channel {channel.id} ('{channel.name}'); will retry.")
                 continue
 
-            channel.auto_videos_generated_today = already + 1
-            db.commit()
             logger.info(f"Daily automation: queued auto-generated video {already + 1}/{quota} for channel {channel.id} ('{channel.name}') — \"{video.title}\".")
 
             # Only pace actual launches, not skipped channels — otherwise a
