@@ -18,7 +18,7 @@ from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
 from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluate_script_compliance, build_compliance_dossier
-from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
+from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail, generate_contextual_thumbnail_headline
 from src.utils.logger import logger
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render, estimate_video_cost_credits
@@ -796,6 +796,16 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             history_dir.mkdir(parents=True, exist_ok=True)
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
             shutil.copy2(current, archive)
+        # A manual thumbnail regeneration is explicitly a fresh creative
+        # request. Re-read the actual script here instead of recycling the
+        # previous caption (which may have been an old, title-derived draft).
+        video.thumbnail_text = generate_contextual_thumbnail_headline(
+            script=video.script_text or "",
+            title=video.title or "",
+            niche=(channel.niche or ""),
+            draft=video.thumbnail_text or "",
+        )
+        db.commit()
         generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
         succeeded = True
     except Exception as e:

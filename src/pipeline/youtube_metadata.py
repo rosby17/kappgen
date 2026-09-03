@@ -85,6 +85,48 @@ def clean_thumbnail_headline(value: str) -> str:
     return " ".join(kept) or "NOUVELLE VIDÉO"
 
 
+def _headline_fits_image(value: str) -> bool:
+    words = str(value or "").strip().split()
+    return 2 <= len(words) <= _THUMBNAIL_HEADLINE_MAX_WORDS and len(" ".join(words)) <= _THUMBNAIL_HEADLINE_MAX_CHARS
+
+
+def generate_contextual_thumbnail_headline(script: str, title: str, niche: str, draft: str = "") -> str:
+    """Write the *hook* for the image, not a shortened YouTube title.
+
+    The metadata model's JSON answer is useful for title/description, but a
+    thumbnail needs a distinct editorial decision. Giving that decision its
+    own small pass stops a long title's opening words becoming the headline.
+    """
+    if not any_text_provider_configured():
+        return clean_thumbnail_headline(draft or title)
+    prompt = f"""Tu es directeur éditorial de miniatures YouTube.
+Lis le sujet et le script, puis écris UNE accroche visuelle autonome dans la langue du script.
+
+Sujet de la vidéo : {title}
+Niche : {niche or 'générale'}
+Script : {(script or '')[:7000]}
+
+Règles impératives :
+- 2 à 5 mots, 38 caractères maximum ;
+- des mots entiers uniquement, sans points de suspension ni ponctuation ;
+- exprime le bénéfice, le résultat, le danger, la surprise ou le conflit le plus fort du contenu ;
+- ne reprends PAS simplement le début du titre et ne résume pas tout le titre ;
+- la phrase doit être compréhensible seule et donner envie de cliquer.
+
+Exemple : pour une vidéo sur une feuille d'aluminium dans le congélateur qui évite la buée, préfère « FINI LA BUÉE » à « UNE BANDE DE PAPIER ALUMINIUM ».
+Réponds uniquement par l'accroche, sans guillemets ni explication."""
+    try:
+        candidate = generate_text(prompt, max_tokens=60, operation="thumbnail_headline").strip()
+        candidate = re.sub(r"^['\"“”«»]+|['\"“”«»]+$", "", candidate).strip()
+        candidate = re.sub(r"\s+", " ", candidate)
+        if _headline_fits_image(candidate):
+            return candidate
+        logger.warning("Thumbnail headline pass returned an invalid length; using compact safe fallback.")
+    except Exception as exc:
+        logger.warning(f"Contextual thumbnail headline generation failed: {exc}")
+    return clean_thumbnail_headline(draft or title)
+
+
 def _fallback_metadata(video, channel) -> dict:
     raw_title = (video.title or video.script_text or "Nouvelle vidéo").strip().splitlines()[0]
     title = re.sub(r"\s+", " ", raw_title)[:100]
@@ -144,11 +186,17 @@ tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 5 mots, 38
         tags = [str(tag).strip() for tag in data.get("tags", []) if str(tag).strip()][:12]
         if tags:
             description += "\n\n" + " ".join("#" + re.sub(r"[^\w]", "", tag) for tag in tags[:5])
+        headline = generate_contextual_thumbnail_headline(
+            script=script,
+            title=title,
+            niche=channel.niche or "",
+            draft=str(data.get("thumbnail_text") or ""),
+        )
         return {
             "title": title,
             "description": description[:5000],
             "tags": tags,
-            "thumbnail_text": clean_thumbnail_headline(data.get("thumbnail_text") or title),
+            "thumbnail_text": headline,
         }
     except Exception as exc:
         logger.warning(f"YouTube metadata generation failed, using safe fallback: {exc}")
