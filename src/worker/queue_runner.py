@@ -506,7 +506,7 @@ def process_single_queued_video() -> bool:
         # the full `title` there instead produced garbled, overlong thumbnail
         # text (a whole opening sentence crammed onto the image).
         try:
-            meta = youtube_metadata.generate_metadata(video, channel)
+            meta = youtube_metadata.generate_metadata(video, channel, reuse_existing=True)
             if not video.title:
                 video.title = meta["title"]
             if not video.youtube_description:
@@ -808,7 +808,7 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     # Reuse the title/description already proposed (and possibly edited by
     # the creator) right after the render finished, instead of silently
     # regenerating and overwriting them at the last second.
-    meta = youtube_metadata.generate_metadata(video, channel)
+    meta = youtube_metadata.generate_metadata(video, channel, reuse_existing=True)
     if video.title:
         meta["title"] = video.title
     if video.youtube_description:
