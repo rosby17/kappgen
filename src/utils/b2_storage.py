@@ -9,6 +9,7 @@ B2 speaks plain S3 — so nothing downstream needs to know which backend a
 video landed on beyond the `storage_backend` column already storing "r2"
 history; new writes just always use "b2" going forward.
 """
+import re
 from pathlib import Path
 from typing import Optional
 from src.config import (
@@ -18,6 +19,19 @@ from src.config import (
 from src.utils.logger import logger
 
 _client = None
+
+
+def slugify(name: Optional[str], fallback: str = "chaine") -> str:
+    """Turns a channel name into a short, readable, filesystem/URL-safe
+    fragment for object keys — purely cosmetic (so a human browsing the B2
+    console can recognize a channel at a glance), never the actual
+    identifier: the channel/video UUID stays the real key, this is only
+    ever a suffix next to it, so a rename, an empty name, or two channels
+    sharing a name can never cause a collision or a lost file."""
+    if not name:
+        return fallback
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug[:40] or fallback
 
 
 def is_b2_configured() -> bool:
