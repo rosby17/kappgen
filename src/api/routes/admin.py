@@ -52,7 +52,7 @@ def _queued_video_positions(db: Session) -> tuple[dict[str, int], int]:
         db.query(Video.id)
         .join(Channel, Video.channel_id == Channel.id)
         .filter(Video.status == "queued")
-        .order_by(active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
+        .order_by(Video.admin_priority.desc(), active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
         .all()
     )]
     return {video_id: index + 1 for index, video_id in enumerate(queued_ids)}, len(queued_ids)
@@ -486,6 +486,29 @@ def admin_retry_video(video_id: str, admin: User = Depends(get_current_admin), d
         video.status = VideoStatus.QUEUED.value
         video.progress_stage = "En attente du moteur de rendu"
         db.commit()
+    db.refresh(video)
+    data = video.to_dict()
+    data["display_title"] = _admin_video_title(video)
+    return data
+
+
+class VideoPriorityPayload(BaseModel):
+    prioritize: bool
+
+
+@router.put("/videos/{video_id}/priority")
+def admin_set_video_priority(video_id: str, payload: VideoPriorityPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Jumps a queued video ahead of the normal paid-tier-then-FIFO render
+    order (see Video.admin_priority, honored by queue_runner.py's
+    process_single_queued_video). Only meaningful while still queued —
+    a video already rendering/done/failed has nothing left to jump ahead of."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status != "queued":
+        raise HTTPException(status_code=409, detail="Seules les vidéos en attente peuvent être priorisées.")
+    video.admin_priority = 1 if payload.prioritize else 0
+    db.commit()
     db.refresh(video)
     data = video.to_dict()
     data["display_title"] = _admin_video_title(video)

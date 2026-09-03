@@ -113,9 +113,11 @@ def process_single_queued_video() -> bool:
     db = SessionLocal()
     video = None
     try:
-        # Paid-tier priority first, FIFO within the same tier. The highest
-        # currently-active plan price wins; welcome-credit/free users have a
-        # priority value of zero and therefore wait behind every paid tier.
+        # Admin manual override first (see Video.admin_priority — set from
+        # the admin Vidéos tab, e.g. "Prioriser cette vidéo"), then paid-tier
+        # priority, then FIFO within the same tier. The highest currently-
+        # active plan price wins; welcome-credit/free users have a priority
+        # value of zero and therefore wait behind every paid tier.
         active_plan_price = (
             db.query(func.coalesce(func.max(Plan.price_fcfa), 0))
             .select_from(Subscription)
@@ -132,7 +134,7 @@ def process_single_queued_video() -> bool:
             db.query(Video)
             .join(Channel, Video.channel_id == Channel.id)
             .filter(Video.status == VideoStatus.QUEUED.value)
-            .order_by(active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
+            .order_by(Video.admin_priority.desc(), active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
             .with_for_update(skip_locked=True)
             .first()
         )
