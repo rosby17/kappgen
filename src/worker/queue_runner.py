@@ -518,7 +518,10 @@ def process_single_queued_video() -> bool:
             logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
         _, thumbnail_ai_used = await_parallel_thumbnail()
-        if not thumbnail_ai_used and thumbnail_enabled:
+        # Every finished video must have a visible card thumbnail. Channels
+        # without a reference style skip the parallel AI job, but still get a
+        # representative frame from the finished MP4 here.
+        if not thumbnail_ai_used:
             # The parallel attempt above started before the video existed and
             # failed its AI call — strict=True means it raised rather than
             # writing a generic, unstyled placeholder (see
@@ -532,7 +535,7 @@ def process_single_queued_video() -> bool:
                 youtube_metadata.generate_thumbnail(
                     output_mp4, thumbnail_destination,
                     video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-                    channel, video.id, strict=True,
+                    channel if thumbnail_enabled else None, video.id, strict=False,
                 )
                 video.thumbnail_error = None
                 logger.info(f"Post-render thumbnail retry for video {video.id} succeeded.")

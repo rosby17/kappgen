@@ -530,6 +530,25 @@ def download_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     return FileResponse(thumbnail_path, media_type="image/jpeg", filename=_download_filename(video, "thumbnail").replace(".mp4", ".jpg"))
 
 
+@router.get("/{video_id}/thumbnail")
+def serve_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
+    """Serve an inline card thumbnail, repairing legacy renders that never
+    produced one by extracting a representative frame from their MP4."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or not video.output_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+    video_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output.mp4"
+    thumbnail_path = video_path.with_name("thumbnail.jpg")
+    if not thumbnail_path.exists() and video_path.exists():
+        try:
+            generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or "Nouvelle vidéo", channel=None)
+        except Exception as exc:
+            logger.warning("Could not repair thumbnail for video %s: %s", video_id, exc)
+    if not thumbnail_path.exists():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(thumbnail_path, media_type="image/jpeg")
+
+
 @router.get("/{video_id}/audio")
 def download_video_audio(video_id: str, db: Session = Depends(get_db)):
     """Extracts and returns this video's soundtrack, for the 'reuse audio' flow.
