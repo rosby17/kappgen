@@ -71,8 +71,11 @@ CREDIT_VALUE_FCFA = STARTER_PACK_PRICE_FCFA / STARTER_PACK_CREDITS  # 0.035 FCFA
 # Automatic ("KappGen AI choisit le sujet et écrit le script") mode bills the
 # creator this many times the script generation's real provider cost — same
 # margin-protection idea as CREDIT_MARKUP_MULTIPLIER above, applied to
-# Anthropic/OpenAI/fal.ai spend instead of Izivoice spend.
-SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER = 4.0
+# Anthropic/OpenAI/fal.ai spend instead of Izivoice spend. Lowered from 4x:
+# a creator who writes/pastes their own script pays nothing here at all, so
+# this markup only ever lands on those who chose full automation — no need
+# to price it as steeply as a scarce/paid resource.
+SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER = 1.5
 
 # Flat "conventional" fee charged on a render that used NO paid AI feature at
 # all — own script, own voice recording (transcription off), own images, own
