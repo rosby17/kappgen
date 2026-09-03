@@ -1015,7 +1015,8 @@ def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     if size_bytes and b2_storage.should_upload_to_b2(db, size_bytes):
         channel_name = video.channel.name if video.channel else None
         channel_slug = b2_storage.slugify(channel_name)
-        object_key = f"channels/{video.channel_id}-{channel_slug}/videos/{video.id}/output.mp4"
+        channel_short = b2_storage.short_id(video.channel_id)
+        object_key = f"channels/{channel_short}-{channel_slug}/videos/{video.id}/output.mp4"
         url = b2_storage.upload_video(output_mp4, object_key)
         if url:
             video.output_path = url

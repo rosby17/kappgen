@@ -34,6 +34,19 @@ def slugify(name: Optional[str], fallback: str = "chaine") -> str:
     return slug[:40] or fallback
 
 
+def short_id(uuid_str: Optional[str], length: int = 8) -> str:
+    """First `length` chars of a UUID — purely for shorter, easier-to-scan B2
+    object keys (a creator/admin browsing the B2 console was getting lost in
+    full 36-char UUIDs). Not the source of truth: the video's own folder
+    still nests under this, and the DB row is always addressed by the full
+    UUID — a theoretical 8-char prefix collision between two channels would
+    just mean their videos share a top folder in the B2 console, never a
+    lost or overwritten file."""
+    if not uuid_str:
+        return "chaine"
+    return uuid_str.replace("-", "")[:length]
+
+
 def is_b2_configured() -> bool:
     return bool(B2_ENDPOINT and B2_KEY_ID and B2_APPLICATION_KEY and B2_BUCKET_NAME and B2_PUBLIC_URL_BASE)
 
