@@ -279,7 +279,6 @@ def run_video_pipeline(
     if broll_paths:
         if broll_shuffle:
             import random
-            from src.utils.ffmpeg_runner import get_audio_duration
             broll_durations = {p: max(0.1, get_audio_duration(p)) for p in broll_paths}
             for i in sorted(video_slot_indices):
                 clip_path = broll_paths[(i // 3) % len(broll_paths)]
