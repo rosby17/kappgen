@@ -991,6 +991,12 @@ class VideoUpdate(BaseModel):
     approved_for_publish: Optional[bool] = None
     extended_retention: Optional[bool] = None
     retention_days: Optional[int] = None
+    # Opportunistic script edit — see update_video below: only takes effect
+    # while the video is still 'queued', on a best-effort basis (no delay is
+    # introduced to let a creator "catch" it; the worker may already have
+    # claimed it by the time this request lands, in which case it's rejected
+    # with a clear message instead of silently doing nothing).
+    script_text: Optional[str] = None
 
 @router.patch("/{video_id}")
 def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1004,6 +1010,21 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
 
     if payload.approved_for_publish is not None:
         video.approved_for_publish = payload.approved_for_publish
+
+    if payload.script_text is not None:
+        # Opportunity window, not a gate: the worker isn't held up waiting
+        # for a creator to look — this only succeeds if the video is still
+        # sitting in 'queued' at the moment the request arrives. Once it's
+        # been claimed ('rendering' or later), the script is already
+        # committed to the pipeline and editing it here would silently do
+        # nothing useful — better to say so plainly.
+        if video.status != VideoStatus.QUEUED.value:
+            raise HTTPException(status_code=409, detail="Le rendu de cette vidéo a déjà démarré — le script ne peut plus être modifié.")
+        new_script = payload.script_text.strip()
+        if video.input_type == "text" and len(new_script) < 40:
+            raise HTTPException(status_code=400, detail="Le script est trop court (40 caractères minimum).")
+        video.script_text = new_script
+        video.estimated_duration_seconds = max(3.0, len(new_script.split()) / 2.5)
 
     if payload.retention_days is not None:
         from datetime import timedelta
