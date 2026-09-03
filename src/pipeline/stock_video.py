@@ -31,7 +31,7 @@ import httpx
 from src.config import ASSETS_PATH, PEXELS_API_KEY
 from src.utils.logger import logger
 
-PEXELS_SEARCH_URL = "https://api.pexels.com/videos/search"
+PEXELS_SEARCH_URL = "https://api.pexels.com/v1/videos/search"
 CACHE_DIR = ASSETS_PATH / "stock_video_cache"
 
 # A scene lasts 20-45s; a clip shorter than this is looped by build_video_clip
