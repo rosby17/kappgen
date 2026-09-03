@@ -181,7 +181,11 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
         # web-search ones, is still a negligible cost for a one-line title.
         raw_text = generate_text(
             instruction, max_tokens=1000, model=SCRIPT_WRITER_MODEL,
-            operation='script_topic', cost_sink=cost_sink, enable_web_search=bool(use_web_trends or youtube_sources_block),
+            operation='script_topic', cost_sink=cost_sink,
+            enable_web_search=bool(use_web_trends or youtube_sources_block),
+            # Topic selection is a short auxiliary task; keep Sonnet for the
+            # long-form narration itself and use the cheaper provider first.
+            preferred_provider='deepseek',
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
@@ -241,7 +245,18 @@ Originality guardrail: older videos from this channel commonly used the followin
 
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
-        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script', cost_sink=cost_sink).strip()
+        # Short utility sections (hook/conclusion) do not need Sonnet-level
+        # reasoning. DeepSeek is preferred for those; long sections remain on
+        # Claude for quality and continuity, with normal fallback behavior.
+        preferred_provider = "deepseek" if word_count <= 400 else None
+        text = generate_text(
+            instruction,
+            max_tokens=max_tokens,
+            model=SCRIPT_WRITER_MODEL,
+            operation='script',
+            cost_sink=cost_sink,
+            preferred_provider=preferred_provider,
+        ).strip()
         return text or None
     except Exception as e:
         logger.error(f"Daily script part generation failed for part '{part.get('name')}': {e}")
