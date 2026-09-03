@@ -347,6 +347,21 @@ def run_video_pipeline(
                             visual_paths[scene_index] = clip_path
                             visual_types[scene_index] = "video"
                             billed_clips[position] = clip_path
+                    # If a particular query has no result, keep the montage
+                    # dynamic by reusing another real cached Pexels clip
+                    # rather than leaving the reserved video slot empty.
+                    # Reuse is deliberately a last resort, after the exact
+                    # query and the photo fallback below have had a chance.
+                    from src.pipeline.stock_video import CACHE_DIR
+                    cached_clips = list(dict.fromkeys([*billed_clips.values(), *CACHE_DIR.glob("*.mp4")]))
+                    for position, scene_index in enumerate(open_indices):
+                        if visual_paths[scene_index] or not cached_clips:
+                            continue
+                        clip_path = cached_clips[position % len(cached_clips)]
+                        if clip_path.exists() and _bill_stock_asset():
+                            visual_paths[scene_index] = clip_path
+                            visual_types[scene_index] = "video"
+                            billed_clips[position] = clip_path
                     # Scenes footage didn't cover, and that have no image
                     # either (AI tier off/out of quota, empty libraries),
                     # take a real stock photograph rather than the synthetic
