@@ -290,9 +290,18 @@ _RATE_LIMIT_BACKOFF_SECONDS = 20
 
 def _is_rate_limited(exc: Exception) -> bool:
     text = str(exc).lower()
-    # An exhausted balance also surfaces as 429 on OpenAI (insufficient_quota);
-    # that one must NOT be retried — no amount of waiting adds credit.
-    if "insufficient_quota" in text or "credit_balance_exhausted" in text or "no credits remaining" in text:
+    # A per-minute rate limit is worth a short retry (waiting genuinely
+    # helps); a fully exhausted allowance is not — no amount of waiting
+    # inside one request recovers a DAILY quota, so retrying just burns
+    # ~60s (2 backoff attempts) before falling through to the next provider
+    # anyway. "insufficient_quota"/"credit_balance_exhausted" cover OpenAI/
+    # Anthropic's phrasing; "resource_exhausted"/"quota exceeded" cover
+    # Gemini's (its free tier's actual failure mode here — 20 requests/day,
+    # trivially burned through by a handful of channels' daily automation).
+    if any(marker in text for marker in (
+        "insufficient_quota", "credit_balance_exhausted", "no credits remaining",
+        "resource_exhausted", "quota exceeded", "quota_exceeded",
+    )):
         return False
     return "429" in text or "too many requests" in text or "rate limit" in text
 
