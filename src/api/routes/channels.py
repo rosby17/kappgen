@@ -37,7 +37,16 @@ ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 ALLOWED_BROLL_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
-MAX_BROLL_UPLOAD_BYTES = 250 * 1024 * 1024  # 250 MB per creator clip
+# api.kappgen.com is proxied through Cloudflare, whose own request-body cap
+# sits around 100MB regardless of what this backend allows — a clip this
+# server would happily accept still silently fails at the Cloudflare edge
+# before ever reaching here. Capped here to match that real ceiling (with a
+# small margin) so the error message a creator sees is actually true, and so
+# a too-large file gets rejected quickly by this check rather than being
+# accepted request-body-wise but still failing to actually arrive in
+# practice. The frontend enforces the same 95MB limit client-side, before
+# even attempting the upload (see CLOUDFLARE_UPLOAD_LIMIT_BYTES in App.jsx).
+MAX_BROLL_UPLOAD_BYTES = 95 * 1024 * 1024  # 95 MB per creator clip
 
 
 class VoiceSettingsPreviewRequest(BaseModel):
@@ -2392,7 +2401,7 @@ async def upload_channel_broll(channel_id: str, files: List[UploadFile] = File(.
         (broll_dir / f"{uuid.uuid4().hex[:8]}_{stem}{ext}").write_bytes(contents)
         saved += 1
     if not saved:
-        raise HTTPException(status_code=400, detail="Aucun clip vidéo valide (MP4, MOV, WebM ou M4V, 250 Mo max).")
+        raise HTTPException(status_code=400, detail="Aucun clip vidéo valide (MP4, MOV, WebM ou M4V, 95 Mo max).")
     style = dict(channel.image_style or {})
     style["broll_path"] = f"channels/{channel.id}/broll"
     style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])

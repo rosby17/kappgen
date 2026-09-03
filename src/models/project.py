@@ -113,6 +113,13 @@ class ImageStyle(BaseModel):
     # How the creator wants the montage to consume their uploaded media.
     # Kept separate from `sources`, which controls AI/community image pools.
     media_mode: str = "images"  # images | videos | mixed
+    # When True, each B-roll scene grabs a random slice of its source clip
+    # instead of playing it continuously start-to-finish (orchestrator.py) —
+    # for re-cutting footage that's already been published elsewhere, where
+    # a straight replay would read as a rehash. False (default) keeps the
+    # continuous "pillar clip" behavior (e.g. a single talking-head avatar
+    # recording meant to play through naturally).
+    broll_shuffle: bool = False
     # Opt-in only, set at upload time — this channel's own library becomes
     # eligible for admin curation into its niche's shared community library
     # (see CommunityLibraryFolder). Never shared without this being true.

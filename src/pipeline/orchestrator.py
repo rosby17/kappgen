@@ -265,16 +265,38 @@ def run_video_pipeline(
     # (via build_video_clip's -stream_loop) once a clip's own runtime is
     # exhausted, so a short clip still just keeps playing rather than freezing
     # on its last frame.
+    # broll_shuffle (image_style.broll_shuffle) is the opposite editing intent
+    # from the continuous cursor above: for a creator re-cutting footage
+    # that's already been published elsewhere (their own back-catalog, not a
+    # single continuous "pillar" recording), playing it start-to-finish is
+    # exactly what makes it read as a rehash. Each scene instead grabs a
+    # random slice of the source clip — different order, different in-points
+    # than the original — so the same raw footage produces a differently
+    # paced sequence every render. Needs the clip's real duration (not just
+    # "assume it's long enough") to pick a valid random start.
+    broll_shuffle = bool(image_style_cfg.get("broll_shuffle"))
     visual_video_start_offsets = [0.0] * len(segments)
     if broll_paths:
-        broll_cursor = {p: 0.0 for p in broll_paths}
-        for i in sorted(video_slot_indices):
-            clip_path = broll_paths[(i // 3) % len(broll_paths)]
-            visual_paths[i] = clip_path
-            visual_types[i] = "video"
-            visual_video_start_offsets[i] = broll_cursor[clip_path]
-            broll_cursor[clip_path] += segments[i]["duration"]
-        logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
+        if broll_shuffle:
+            import random
+            from src.utils.ffmpeg_runner import get_audio_duration
+            broll_durations = {p: max(0.1, get_audio_duration(p)) for p in broll_paths}
+            for i in sorted(video_slot_indices):
+                clip_path = broll_paths[(i // 3) % len(broll_paths)]
+                visual_paths[i] = clip_path
+                visual_types[i] = "video"
+                usable_span = max(0.0, broll_durations[clip_path] - segments[i]["duration"])
+                visual_video_start_offsets[i] = random.uniform(0, usable_span) if usable_span > 0 else 0.0
+            logger.info(f"B-roll shuffle enabled: {sum(t == 'video' for t in visual_types)} scene(s) re-cut from random points in {len(broll_paths)} source clip(s).")
+        else:
+            broll_cursor = {p: 0.0 for p in broll_paths}
+            for i in sorted(video_slot_indices):
+                clip_path = broll_paths[(i // 3) % len(broll_paths)]
+                visual_paths[i] = clip_path
+                visual_types[i] = "video"
+                visual_video_start_offsets[i] = broll_cursor[clip_path]
+                broll_cursor[clip_path] += segments[i]["duration"]
+            logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
 
     # Stock footage (Pexels) fills the scenes the creator's own clips don't
     # cover — real motion instead of a Ken Burns pan over a still, which is
