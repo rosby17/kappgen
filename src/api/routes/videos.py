@@ -622,12 +622,29 @@ def _publish_video_background(video_id: str) -> None:
     from src.worker.queue_runner import try_publish_to_youtube
 
     db = SessionLocal()
+    temp_dir = None
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
             return
         channel = video.channel
-        video_path = STORAGE_PATH / video.output_path
+        output_ref = str(video.output_path or "")
+        is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+        if is_remote:
+            # Finished renders are normally moved to B2/R2 to free the worker
+            # disk. YouTube still needs a local seekable file, so materialize
+            # the object only for the duration of this background upload.
+            temp_dir = tempfile.TemporaryDirectory(prefix="kappgen-youtube-")
+            video_path = Path(temp_dir.name) / "output.mp4"
+            with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                with video_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+        else:
+            video_path = STORAGE_PATH / output_ref
+            if not video_path.exists():
+                raise FileNotFoundError("Le fichier vidéo n'existe plus sur le serveur.")
         try_publish_to_youtube(db, channel, video, video_path)
     except Exception as exc:
         video = db.query(Video).filter(Video.id == video_id).first()
@@ -635,6 +652,8 @@ def _publish_video_background(video_id: str) -> None:
             video.youtube_publish_error = str(exc)[:500]
             db.commit()
     finally:
+        if temp_dir:
+            temp_dir.cleanup()
         db.close()
 
 
@@ -804,8 +823,10 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
             },
         )
 
-    video_path = STORAGE_PATH / video.output_path
-    if not video_path.exists():
+    output_ref = str(video.output_path or "")
+    is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+    video_path = STORAGE_PATH / output_ref if not is_remote else None
+    if video_path is not None and not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
 
     report = _refresh_compliance_report(db, video)
