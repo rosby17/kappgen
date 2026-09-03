@@ -186,7 +186,6 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
             # Topic selection is a short auxiliary task; keep Sonnet for the
             # long-form narration itself and use Gemini's free tier first.
             preferred_provider='gemini',
-            free_only=True,
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
@@ -257,7 +256,6 @@ Originality guardrail: older videos from this channel commonly used the followin
             operation='script',
             cost_sink=cost_sink,
             preferred_provider=preferred_provider,
-            free_only=True,
         ).strip()
         return text or None
     except Exception as e:
