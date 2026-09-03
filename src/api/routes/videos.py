@@ -790,6 +790,7 @@ def get_youtube_compliance_dossier(video_id: str, current_user: User = Depends(g
 class CompliancePublishRequest(BaseModel):
     confirm_human_review: bool = False
     force_publish: bool = False
+    republish: bool = False
 
 
 class ComplianceOverrideRequest(BaseModel):
@@ -830,7 +831,7 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
         raise HTTPException(status_code=409, detail="La vidéo doit être prête avant sa publication.")
 
     channel = video.channel
-    if video.youtube_video_id:
+    if video.youtube_video_id and not (payload and payload.republish):
         # Before refusing as "already published", confirm it's actually still
         # live — a creator who deleted the video on YouTube (or had it taken
         # down) has no other way to get it back online otherwise. Reuses the
@@ -847,6 +848,11 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
                 "video": video.to_dict(),
             }
         _append_compliance_event(video, "youtube_video_missing_republishing", {"previous_youtube_video_id": video.youtube_video_id})
+        video.youtube_video_id = None
+        video.youtube_published_at = None
+        db.commit()
+    elif video.youtube_video_id and payload and payload.republish:
+        _append_compliance_event(video, "youtube_republish_requested", {"previous_youtube_video_id": video.youtube_video_id})
         video.youtube_video_id = None
         video.youtube_published_at = None
         db.commit()
