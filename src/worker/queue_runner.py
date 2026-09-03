@@ -55,6 +55,15 @@ PURGE_INTERVAL_SECONDS = 3600
 # something a creator can act on.
 SERVICE_UNAVAILABLE_MESSAGE = "Les serveurs de KappGen sont temporairement indisponibles. Veuillez réessayer plus tard."
 
+
+class VideoCancelledError(Exception):
+    """Raised from update_progress (both the narration and music branches)
+    when a creator cancels a video (POST /{video_id}/cancel) while it's
+    still queued or rendering. Checked between pipeline stages rather than
+    inside them, so an in-flight render stops at the next stage boundary
+    instead of finishing into a result nobody wanted."""
+    pass
+
 # Unlike SERVICE_UNAVAILABLE_MESSAGE (our own provider credits/outages — the
 # creator can't act on those), an empty KappGen credit balance is entirely
 # the creator's own thing to fix, so it gets its own clear, actionable
@@ -265,6 +274,12 @@ def process_single_queued_video() -> bool:
             from src.pipeline.music_video import render_music_video
 
             def update_progress(stage: str, percent: int):
+                # Re-checked fresh from the DB every stage transition — a
+                # cancellation lands via a different request/session, so this
+                # ORM object wouldn't otherwise see it before its own next
+                # refresh/query.
+                if db.query(Video.status).filter(Video.id == video.id).scalar() == VideoStatus.CANCELLED.value:
+                    raise VideoCancelledError(f"Video {video.id} cancelled by the creator.")
                 video.progress_stage = stage
                 video.progress_percent = percent
                 db.commit()
@@ -426,6 +441,8 @@ def process_single_queued_video() -> bool:
 
         # Execute render pipeline
         def update_progress(stage: str, percent: int):
+            if db.query(Video.status).filter(Video.id == video.id).scalar() == VideoStatus.CANCELLED.value:
+                raise VideoCancelledError(f"Video {video.id} cancelled by the creator.")
             video.progress_stage = stage
             video.progress_percent = percent
             db.commit()
@@ -533,6 +550,25 @@ def process_single_queued_video() -> bool:
             # publishes on demand from NicheCut.
 
         return True
+
+    except VideoCancelledError:
+        # Not a failure — the creator stopped it on purpose (see
+        # POST /{video_id}/cancel). status is already "cancelled", set by
+        # that request; leave it as-is instead of overwriting it below with
+        # "failed". Still refunds whatever credits this attempt already
+        # spent, same courtesy as a genuine failure.
+        if video:
+            logger.info(f"Video {video.id} rendering stopped: cancelled by the creator.")
+            try:
+                db.refresh(video)
+                if not video.is_reassembly:
+                    from src.utils.billing import refund_video_credits
+                    refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo annulée ({video.title or video.id})")
+                    if refunded:
+                        logger.info(f"Refunded {refunded} credits for cancelled video {video.id}.")
+            except Exception as cancel_err:
+                logger.error(f"Failed to finalize cancellation for video {video.id}: {cancel_err}")
+        return False
 
     except Exception as e:
         # Full exception + traceback stays server-side only — the creator

@@ -9,6 +9,11 @@ class VideoStatus(str, Enum):
     RENDERING = "rendering"
     DONE = "done"
     FAILED = "failed"
+    # Set by the creator via POST /{video_id}/cancel while a video is still
+    # queued or rendering — checked between pipeline stages (see
+    # queue_runner.py's update_progress) so an in-flight render stops at the
+    # next stage boundary instead of finishing into a result nobody wanted.
+    CANCELLED = "cancelled"
 
 class InputType(str, Enum):
     TEXT = "text"

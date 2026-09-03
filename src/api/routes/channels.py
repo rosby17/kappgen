@@ -950,7 +950,12 @@ def search_public_library(
                 )
                 if not niche_matches:
                     continue
-                asset_url = f"/api/channels/public-library/community/{folder.channel_id}/{quote(asset.name)}"
+                # The frontend prepends its own API_BASE, which already ends
+                # in /api (https://api.kappgen.com/api) — a leading /api here
+                # doubled it into /api/api/channels/... and 404'd every
+                # community thumbnail, while Pexels items (whose URLs are
+                # already absolute) loaded fine and hid the bug.
+                asset_url = f"/channels/public-library/community/{folder.channel_id}/{quote(asset.name)}"
                 items.append({
                     "id": f"community-{folder.channel_id}-{asset.name}",
                     "type": "photos",

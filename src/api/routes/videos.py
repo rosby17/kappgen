@@ -909,6 +909,25 @@ def list_channel_videos(channel_id: str, current_user: User = Depends(get_curren
     _backfill_trust_scores(db, videos)
     return [v.to_dict() for v in videos]
 
+@router.post("/{video_id}/cancel")
+def cancel_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Lets a creator stop a video that's still queued or actively rendering
+    — so they're never stuck watching a render play out to a result they
+    already know they don't want. Just flips the status; the worker's own
+    update_progress checks it between pipeline stages (see queue_runner.py's
+    VideoCancelledError) and stops there, refunding whatever credits that
+    attempt already spent. A queued-but-not-yet-picked-up video is simply
+    never claimed by the worker (its claiming query filters status='queued')."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status not in (VideoStatus.QUEUED.value, VideoStatus.RENDERING.value):
+        raise HTTPException(status_code=409, detail="Cette vidéo n'est plus en cours de génération.")
+    video.status = VideoStatus.CANCELLED.value
+    video.progress_stage = "Annulée par le créateur"
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 @router.post("/{video_id}/retry")
 def retry_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
