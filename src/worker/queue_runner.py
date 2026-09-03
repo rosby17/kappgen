@@ -1695,6 +1695,7 @@ def retry_auto_video_script_background(video_id: str):
             recent_scripts=recent_scripts,
             on_title=_on_title_picked,
             on_partial_script=_on_partial_script,
+            preset_title=(video.title or "").strip() if not (video.title or "").endswith(" — nouvelle vidéo") else None,
         )
         if not result:
             video.status = VideoStatus.FAILED.value

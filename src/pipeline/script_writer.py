@@ -261,6 +261,7 @@ def generate_daily_script(
     recent_scripts: Optional[List[str]] = None,
     on_title: Optional[callable] = None,
     on_partial_script: Optional[callable] = None,
+    preset_title: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -297,7 +298,10 @@ def generate_daily_script(
         for text in recent_scripts[:5]
     )
     try:
-        title = _pick_topic(
+        # A failed render/script retry may already have selected and persisted
+        # a title. Reuse it instead of paying Claude to select the same topic
+        # again; a missing/placeholder title still follows the normal picker.
+        title = (preset_title or "").strip() or _pick_topic(
             niche, recent_titles, style_prompt, language, cost_sink=cost_sink,
             topic_examples=topic_examples, use_web_trends=use_web_trends, youtube_topic_sources=youtube_topic_sources,
         )
