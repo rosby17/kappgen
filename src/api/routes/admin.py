@@ -1261,7 +1261,7 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
 # `provider` column, kept under the old URL prefix since the frontend and
 # any saved links already point at it.
 
-IMAGE_KEY_PROVIDERS = ["huggingface", "fal", "izivoice"]
+IMAGE_KEY_PROVIDERS = ["huggingface", "fal", "izivoice", "gemini"]
 
 
 @router.get("/hf-accounts")

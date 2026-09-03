@@ -158,6 +158,7 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()] or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
 
 # NOTE: NicheCut's database must always be its own, dedicated instance — never
 # shared with another project (see incident: an earlier setup pointed this at

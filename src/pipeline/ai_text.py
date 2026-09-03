@@ -12,7 +12,7 @@ import httpx
 from typing import Optional
 from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
-    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY, GEMINI_API_KEY,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY, GEMINI_API_KEY, GEMINI_API_KEYS,
 )
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, PRICING
@@ -217,12 +217,30 @@ GEMINI_MODEL = "gemini-3.6-flash"
 
 
 def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
-    if not GEMINI_API_KEY:
+    keys = list(GEMINI_API_KEYS)
+    try:
+        from src.db.session import SessionLocal
+        from src.db.models import HuggingFaceAccount
+        db = SessionLocal()
+        try:
+            rows = (db.query(HuggingFaceAccount.token)
+                    .filter(HuggingFaceAccount.provider == "gemini", HuggingFaceAccount.is_enabled == True)
+                    .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst()).all())
+            if rows:
+                keys = [row[0] for row in rows]
+        finally:
+            db.close()
+    except Exception:
+        pass
+    if not keys:
         raise RuntimeError("GEMINI_API_KEY is not configured on the server.")
-    resp = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-        params={"key": GEMINI_API_KEY},
-        json={
+    last_error = None
+    for key in keys:
+        try:
+            resp = httpx.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            params={"key": key},
+            json={
             "contents": [{"parts": [{"text": prompt}]}],
             # This model burns the vast majority of maxOutputTokens on hidden
             # "thinking" before writing any visible text — observed ~90-95%
@@ -233,29 +251,25 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             # content length instead of an early MAX_TOKENS cutoff — still
             # free-tier, just token-budget-hungry.
             "generationConfig": {"maxOutputTokens": max(max_tokens * 15, 4000)},
-        },
-        timeout=120.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    candidates = data.get("candidates") or []
-    parts = (((candidates or [{}])[0]).get("content") or {}).get("parts") or []
-    text = "".join(p.get("text", "") for p in parts).strip()
-    if not text:
-        # Gemini reports why nothing came back via finishReason (e.g. "MAX_TOKENS"
-        # cutting off before any real text, or "SAFETY") instead of an HTTP error —
-        # surface it so a wall of empty retries in the log doesn't read as a mystery.
-        reason = (candidates[0] if candidates else {}).get("finishReason", "unknown")
-        raise RuntimeError(f"Gemini text generation returned no text content (finishReason={reason}).")
-    usage = data.get("usageMetadata") or {}
-    in_tok, out_tok = usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
-    log_usage(
-        "gemini", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
-        0.0,
-        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": GEMINI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
-    )
-    return text, 0.0
+            },
+            timeout=120.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            parts = (((candidates or [{}])[0]).get("content") or {}).get("parts") or []
+            text = "".join(p.get("text", "") for p in parts).strip()
+            if not text:
+                reason = (candidates[0] if candidates else {}).get("finishReason", "unknown")
+                raise RuntimeError(f"Gemini text generation returned no text content (finishReason={reason}).")
+            usage = data.get("usageMetadata") or {}
+            in_tok, out_tok = usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
+            log_usage("gemini", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens", 0.0, user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"), meta={"model": GEMINI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True})
+            return text, 0.0
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"All Gemini keys failed: {last_error}")
 
 
 def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
