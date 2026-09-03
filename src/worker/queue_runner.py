@@ -1250,7 +1250,13 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     try:
         validate_channel_visual_source(channel, db)
     except Exception as exc:
-        logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({exc})")
+        # The row is created only after this preflight. Without a visible
+        # failure card, an on-demand launch looked like it started and then
+        # vanished because the frontend's optimistic placeholder had nothing
+        # real to replace it with.
+        detail = getattr(exc, "detail", None) or "La source visuelle de cette chaîne n'est pas prête."
+        logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({detail})")
+        _record_automation_failure(db, channel, message=str(detail))
         return None
 
     # Bug history: this used to fall back to the script's own opening

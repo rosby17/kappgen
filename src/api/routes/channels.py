@@ -1085,6 +1085,16 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
     if not can_render:
         raise HTTPException(status_code=402, detail=reason)
 
+    # Do this before replying "C'est lancé". Previously this validation ran
+    # only in the background worker; when a channel had no actual media in
+    # its selected library/community source (or its AI visual option was not
+    # available on the plan), the client briefly showed its optimistic card
+    # and then removed it because no real Video row was ever created.
+    # Returning the actionable validation message here makes the missing
+    # source a configuration error the creator can fix, not a ghost launch.
+    from src.api.routes.videos import validate_channel_visual_source
+    validate_channel_visual_source(channel, db)
+
     from threading import Thread
     from src.worker.queue_runner import generate_and_queue_auto_video_background
     Thread(target=generate_and_queue_auto_video_background, args=(channel.id,), daemon=True).start()
