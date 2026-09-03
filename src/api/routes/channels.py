@@ -675,7 +675,7 @@ def _installed_font_families() -> tuple[str, ...]:
         # fontconfig may return several aliases for one face, comma-separated.
         for raw_name in line.split(","):
             name = re.sub(r"\s+", " ", raw_name).strip()
-            if name and not name.startswith("."):
+            if name and not name.startswith(".") and "noto" not in name.casefold():
                 families.setdefault(name.casefold(), name)
     return tuple(sorted(families.values(), key=str.casefold))
 
