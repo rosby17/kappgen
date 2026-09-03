@@ -18,11 +18,11 @@ import uuid
 import httpx
 from urllib.parse import quote, urlparse
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice, ChannelPipelineShare
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.pipeline import youtube_publisher
 from src.pipeline.niche_detector import suggest_niche
 from src.pipeline.script_structure_analyzer import analyze_script_structure_text
@@ -854,6 +854,111 @@ def get_channel(channel_id: str, current_user: User = Depends(get_current_user),
     data["unpublished_count"] = data["done_count"] - data["published_count"]
     data["total_count"] = db.query(Video).filter(Video.channel_id == channel.id).count()
     return data
+
+
+# Same field set the in-account "Réutiliser le pipeline" duplicate copies in
+# the frontend (openDuplicateWizard) — kept in sync deliberately: whatever's
+# safe to hand a brand new channel of your own is exactly what's safe to
+# hand a completely different account. Explicitly excludes: identity (name,
+# description), the source's own YouTube connection, its cloned voice id,
+# its logo file, and its analyzed thumbnail style — none of those can be
+# shared as-is with someone else's channel.
+def build_pipeline_share_template(channel: Channel) -> Dict[str, Any]:
+    branding = dict(channel.branding or {})
+    branding.pop("logo_path", None)
+    return {
+        "content_type": channel.content_type or "narration",
+        "niche": channel.niche,
+        "subtitle_style": channel.subtitle_style or {},
+        "branding": branding,
+        "music_preference": channel.music_preference or {},
+        "image_style": channel.image_style or {},
+        "effects_config": channel.effects_config or {},
+        "automation_mode": channel.automation_mode or "manual",
+        "automation_style_prompt": channel.automation_style_prompt,
+        "topic_examples": channel.topic_examples,
+        "use_web_trends": bool(channel.use_web_trends),
+        "youtube_topic_sources": channel.youtube_topic_sources,
+        "videos_per_day": channel.videos_per_day or 1,
+        "automation_window_start_hour": channel.automation_window_start_hour if channel.automation_window_start_hour is not None else 7,
+        "automation_window_end_hour": channel.automation_window_end_hour if channel.automation_window_end_hour is not None else 11,
+        "active_days": channel.active_days,
+        "script_generation_hour": channel.script_generation_hour,
+        "script_generation_minute": channel.script_generation_minute or 0,
+        "script_generation_second": channel.script_generation_second or 0,
+        "script_generation_days": channel.script_generation_days,
+        "timezone": channel.timezone or "Africa/Douala",
+        "publish_mode": channel.publish_mode or "manual",
+        "youtube_made_for_kids": bool(channel.youtube_made_for_kids),
+        "youtube_default_description": channel.youtube_default_description,
+        "youtube_default_tags": channel.youtube_default_tags or [],
+        "youtube_category_id": channel.youtube_category_id or "22",
+        "youtube_privacy_status": channel.youtube_privacy_status or "public",
+        "youtube_contains_synthetic_media": channel.youtube_contains_synthetic_media is not False,
+        "youtube_license": channel.youtube_license or "youtube",
+        "youtube_notify_subscribers": channel.youtube_notify_subscribers is not False,
+        "youtube_embeddable": channel.youtube_embeddable is not False,
+        "youtube_public_stats_viewable": channel.youtube_public_stats_viewable is not False,
+        "publish_time_mode": channel.publish_time_mode or "range",
+        "publish_schedule_hour": channel.publish_schedule_hour if channel.publish_schedule_hour is not None else 8,
+        "publish_schedule_day_offset": channel.publish_schedule_day_offset if channel.publish_schedule_day_offset is not None else 1,
+        "script_structure": channel.script_structure,
+        "voice_settings": channel.voice_settings,
+    }
+
+
+_PIPELINE_SHARE_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L — read aloud/typed by hand
+_PIPELINE_SHARE_TTL_DAYS = 30
+
+
+@router.post("/{channel_id}/pipeline-share")
+def create_pipeline_share(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Generates a short redeemable code handing this channel's template
+    settings to a DIFFERENT account (another director on the platform) —
+    the cross-account counterpart to "Réutiliser le pipeline". The snapshot
+    is frozen now, at share time: editing or deleting this channel later
+    never changes what the code redeems, and redeeming it only pre-fills
+    the recipient's own create-channel wizard once — the two channels are
+    fully independent from that point on, by design (see the "Copie unique"
+    choice made for this feature over a live-synced alternative)."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    code = "".join(random.choices(_PIPELINE_SHARE_CODE_ALPHABET, k=8))
+    share = ChannelPipelineShare(
+        code=code,
+        channel_id=channel.id,
+        owner_user_id=current_user.id,
+        source_channel_name=channel.name,
+        template=build_pipeline_share_template(channel),
+        expires_at=datetime.utcnow() + timedelta(days=_PIPELINE_SHARE_TTL_DAYS),
+    )
+    db.add(share)
+    db.commit()
+    return {"code": code, "expires_at": share.expires_at.isoformat()}
+
+
+@router.get("/pipeline-share/{code}")
+def redeem_pipeline_share(code: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Any authenticated user can redeem a code — that's the whole point,
+    it's meant to cross accounts. The code itself (8 chars from a
+    36-character alphabet, shared out of band by the owner) is the only
+    gate; not tied to who redeems it, and reusable until it expires."""
+    share = db.query(ChannelPipelineShare).filter(ChannelPipelineShare.code == code.strip().upper()).first()
+    if not share or share.revoked:
+        raise HTTPException(status_code=404, detail="Code de partage introuvable ou révoqué.")
+    if share.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=410, detail="Ce code de partage a expiré.")
+    share.redeemed_count = (share.redeemed_count or 0) + 1
+    db.commit()
+    return {
+        "source_channel_name": share.source_channel_name,
+        "template": share.template,
+    }
+
 
 @router.get("/{channel_id}/library-preview")
 def get_channel_library_preview(channel_id: str, db: Session = Depends(get_db)):

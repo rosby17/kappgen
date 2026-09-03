@@ -352,6 +352,42 @@ class Channel(Base):
             "video_count": len(self.videos) if self.videos else 0
         }
 
+
+class ChannelPipelineShare(Base):
+    """A one-time, cross-account export of a channel's template settings —
+    "Réutiliser le pipeline" but for handing it to a *different* user (e.g.
+    another director on the platform), not just duplicating within your own
+    account. `template` is a frozen snapshot taken at share time (the same
+    fields the wizard copies for an in-account duplicate, see
+    build_pipeline_share_template in channels.py) — deliberately NOT a live
+    reference to the source channel, so editing or deleting the original
+    afterwards can never change what a code redeems, and redeeming just
+    pre-fills the recipient's own create-channel wizard once; the two
+    channels are fully independent from that point on."""
+    __tablename__ = "channel_pipeline_shares"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    code = Column(String(12), unique=True, nullable=False, index=True)
+    channel_id = Column(String(36), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False)
+    owner_user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    source_channel_name = Column(String(255), nullable=False)
+    template = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    revoked = Column(Boolean, nullable=False, default=False)
+    redeemed_count = Column(Integer, nullable=False, default=0)
+
+    def to_dict(self):
+        return {
+            "code": self.code,
+            "source_channel_name": self.source_channel_name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "revoked": self.revoked,
+            "redeemed_count": self.redeemed_count or 0,
+        }
+
+
 class Folder(Base):
     __tablename__ = "folders"
 
