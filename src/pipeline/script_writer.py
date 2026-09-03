@@ -246,6 +246,7 @@ def generate_daily_script(
     on_progress: Optional[callable] = None,
     recent_scripts: Optional[List[str]] = None,
     on_title: Optional[callable] = None,
+    on_partial_script: Optional[callable] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -316,6 +317,11 @@ def generate_daily_script(
                 # shows real incremental movement instead of jumping straight
                 # from "topic picked" to "script done" on a long multi-part script.
                 on_progress("Rédaction du script", 8 + round(16 * (i + 1) / len(parts)))
+            if on_partial_script:
+                # Run last so callers can persist both the accumulated text
+                # and the precise part x/y label without the generic progress
+                # callback immediately overwriting it.
+                on_partial_script(" ".join(written_parts).strip(), i + 1, len(parts))
 
         script_text = " ".join(written_parts).strip()
         # A part_text that's technically non-empty (passes the guard above)

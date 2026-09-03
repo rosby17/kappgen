@@ -1,5 +1,6 @@
 import uuid
 import re
+import json
 import shutil
 import threading
 from datetime import datetime, timedelta
@@ -1031,6 +1032,106 @@ def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
         )
     import json
     return json.loads(scenes_path.read_text(encoding="utf-8"))
+
+
+@router.get("/{video_id}/production-progress")
+def get_video_production_progress(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Expose safe, progressively-created production artifacts to the owner."""
+    video = _get_owned_video(db, video_id, current_user)
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    source_dir = video_dir / "source"
+    transcript_path = source_dir / "transcript.json"
+    scenes_path = source_dir / "scenes.json"
+    audio_path = source_dir / "voiceover.mp3"
+    subtitles_path = source_dir / "subtitles.ass"
+    output_path = video_dir / "output.mp4"
+
+    transcript = None
+    if transcript_path.exists():
+        try:
+            transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        except Exception:
+            transcript = None
+
+    scenes = []
+    if scenes_path.exists():
+        try:
+            manifest = json.loads(scenes_path.read_text(encoding="utf-8"))
+            scenes = [{
+                "index": item.get("index", index),
+                "start": item.get("start"),
+                "end": item.get("end"),
+                "duration": item.get("duration"),
+                "text": item.get("text") or "",
+                "visual_type": item.get("visual_type") or "image",
+                "image_url": f"/videos/{video.id}/production-assets/{Path(item.get('image_path') or item.get('visual_path') or '').name}",
+            } for index, item in enumerate(manifest)]
+        except Exception:
+            scenes = []
+
+    # scenes.json is written after clips are built. During visual generation,
+    # show the image files that already exist so the gallery grows live.
+    if not scenes:
+        images_dir = source_dir / "images"
+        if images_dir.exists():
+            for index, image_path in enumerate(sorted(p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_UPLOAD_EXTENSIONS)):
+                scenes.append({
+                    "index": index,
+                    "text": "",
+                    "visual_type": "image",
+                    "image_url": f"/videos/{video.id}/production-assets/{image_path.name}",
+                })
+
+    subtitle_preview = ""
+    if transcript:
+        subtitle_preview = transcript.get("text") or ""
+    elif subtitles_path.exists():
+        subtitle_preview = subtitles_path.read_text(encoding="utf-8", errors="ignore")[-12000:]
+
+    return {
+        "video_id": video.id,
+        "title": video.title,
+        "status": video.status,
+        "stage": video.progress_stage,
+        "percent": video.progress_percent,
+        "error": video.error_message,
+        "script": video.script_text or "",
+        "transcript": (transcript or {}).get("text") or "",
+        "subtitle_preview": subtitle_preview,
+        "audio_ready": audio_path.exists(),
+        "audio_url": f"/videos/{video.id}/production-audio" if audio_path.exists() else None,
+        "subtitles_ready": subtitles_path.exists() or bool(transcript),
+        "scenes": scenes,
+        "final_ready": output_path.exists() or bool(video.output_path),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.get("/{video_id}/production-audio")
+def get_video_production_audio(video_id: str, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    audio_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "source" / "voiceover.mp3"
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="L’audio n’est pas encore disponible.")
+    return FileResponse(audio_path, media_type="audio/mpeg", filename=f"kappgen-{video_id}-preview.mp3")
+
+
+@router.get("/{video_id}/production-assets/{filename}")
+def get_video_production_asset(video_id: str, filename: str, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail="Ressource introuvable.")
+    source_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "source"
+    candidates = [source_dir / "images" / filename, source_dir / "stock" / filename, source_dir / filename]
+    asset = next((path for path in candidates if path.exists() and path.is_file()), None)
+    if not asset:
+        # Stock and B-roll files can live in provider-specific subfolders.
+        asset = next((path for path in source_dir.rglob(filename) if path.is_file()), None)
+    if not asset or asset.suffix.lower() not in IMAGE_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Ressource introuvable.")
+    return FileResponse(asset)
 
 
 # Cap on video.edit_history — a bounded undo stack, not a full audit log.

@@ -1393,6 +1393,12 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         video.title = title
         db.commit()
 
+    def _on_partial_script(text: str, completed_parts: int, total_parts: int) -> None:
+        video.script_text = text
+        video.progress_stage = f"Rédaction du script · partie {completed_parts}/{total_parts}"
+        video.progress_percent = 8 + round(16 * completed_parts / max(1, total_parts))
+        db.commit()
+
     result = generate_daily_script(
         niche=channel.niche,
         recent_titles=recent_titles,
@@ -1404,6 +1410,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         on_progress=_on_script_progress,
         recent_scripts=recent_scripts,
         on_title=_on_title_picked,
+        on_partial_script=_on_partial_script,
     )
     if not result:
         db.delete(video)
@@ -1600,6 +1607,12 @@ def retry_auto_video_script_background(video_id: str):
             video.title = title
             db.commit()
 
+        def _on_partial_script(text: str, completed_parts: int, total_parts: int) -> None:
+            video.script_text = text
+            video.progress_stage = f"Rédaction du script · partie {completed_parts}/{total_parts}"
+            video.progress_percent = 8 + round(16 * completed_parts / max(1, total_parts))
+            db.commit()
+
         result = generate_daily_script(
             niche=channel.niche,
             recent_titles=recent_titles,
@@ -1610,9 +1623,11 @@ def retry_auto_video_script_background(video_id: str):
             use_web_trends=bool(channel.use_web_trends),
             recent_scripts=recent_scripts,
             on_title=_on_title_picked,
+            on_partial_script=_on_partial_script,
         )
         if not result:
             video.status = VideoStatus.FAILED.value
+            video.script_text = ""
             video.error_message = SERVICE_UNAVAILABLE_MESSAGE
             video.progress_stage = "Échec"
             db.commit()
