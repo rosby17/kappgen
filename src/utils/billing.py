@@ -40,6 +40,13 @@ IZIVOICE_MUSIC_CREDITS = 300
 # see generate_thumbnail_image's caller in youtube_metadata.py.
 THUMBNAIL_CREDITS = 2000
 
+# Pexels itself is free (no per-call cost to KappGen), but per product
+# decision no video asset — free provider or not — renders invisibly/for
+# free to the creator; a token charge per stock clip or photo actually used
+# keeps that promise intact without meaningfully affecting the creator's
+# render economics. See orchestrator.py's stock-footage/photo fallback.
+STOCK_MEDIA_CREDITS = 100
+
 
 def random_image_credit_cost() -> int:
     """A per-image debit amount within IZIVOICE_IMAGE_CREDITS_MIN/MAX instead
