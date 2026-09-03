@@ -376,7 +376,9 @@ def assemble_final_video(
     # Cap it to short/medium videos; long ones fall back to a plain hard-cut
     # concat, which streams clips sequentially instead of holding them all
     # open in memory at once.
-    MAX_CLIPS_FOR_XFADE = 15
+    # Keep smooth crossfades for normal long-form videos too; the old limit of
+    # 15 made anything beyond a few minutes fall back to abrupt concat cuts.
+    MAX_CLIPS_FOR_XFADE = 60
     use_xfade = (
         clip_durations is not None
         and len(clip_durations) == len(clip_paths)

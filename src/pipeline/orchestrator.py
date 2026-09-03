@@ -385,11 +385,19 @@ def run_video_pipeline(
         # scene before asking the image pipeline for a possible synthetic
         # fallback; a repeated real visual is preferable to a generic blank
         # background and keeps the finished montage visually complete.
-        reusable_images = [path for path in visual_paths if path and Path(path).suffix.lower() not in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}]
+        reusable_images = list(dict.fromkeys(path for path in visual_paths if path and Path(path).suffix.lower() not in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}))
         if reusable_images:
+            import random
+            pool = list(reusable_images)
+            previous = None
             for position, scene_index in enumerate(unresolved_indices):
-                visual_paths[scene_index] = reusable_images[position % len(reusable_images)]
+                if position % len(pool) == 0:
+                    random.shuffle(pool)
+                    if previous is not None and len(pool) > 1 and pool[0] == previous:
+                        pool[0], pool[1] = pool[1], pool[0]
+                visual_paths[scene_index] = pool[position % len(pool)]
                 visual_types[scene_index] = "image"
+                previous = visual_paths[scene_index]
             unresolved_indices = unresolved_visual_indices(visual_paths)
         logger.warning(f"{len(unresolved_indices)} scene(s) still have no video; using image fallback assets.")
     if unresolved_indices:
