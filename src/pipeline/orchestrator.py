@@ -380,7 +380,19 @@ def run_video_pipeline(
     # image pipeline (which itself ends in safe synthetic fallback artwork).
     unresolved_indices = unresolved_visual_indices(visual_paths)
     if unresolved_indices:
+        # In mixed mode, video slots can remain empty when Pexels has no
+        # matching clip. Reuse a real image already resolved for another
+        # scene before asking the image pipeline for a possible synthetic
+        # fallback; a repeated real visual is preferable to a generic blank
+        # background and keeps the finished montage visually complete.
+        reusable_images = [path for path in visual_paths if path and Path(path).suffix.lower() not in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}]
+        if reusable_images:
+            for position, scene_index in enumerate(unresolved_indices):
+                visual_paths[scene_index] = reusable_images[position % len(reusable_images)]
+                visual_types[scene_index] = "image"
+            unresolved_indices = unresolved_visual_indices(visual_paths)
         logger.warning(f"{len(unresolved_indices)} scene(s) still have no video; using image fallback assets.")
+    if unresolved_indices:
         fallback_images = fetch_or_generate_images(
             [prompts[i] if i < len(prompts) else (script_text or "")[:200] for i in unresolved_indices],
             images_dir,
