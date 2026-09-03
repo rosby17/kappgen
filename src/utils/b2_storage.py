@@ -114,6 +114,31 @@ def delete_video(object_key: str) -> None:
         logger.warning(f"B2 delete failed for {object_key}: {exc}")
 
 
+def archive_directory(local_dir: Path, object_prefix: str) -> bool:
+    """Uploads every file under local_dir to B2 under object_prefix, preserving
+    the relative layout. Used to archive the post-render editor's heavy scene
+    assets (images/clips/audio segments) before they'd otherwise just be
+    deleted outright — same "never lose it, just stop paying local disk for
+    it" idea as _finalize_output_storage, applied to the editor's working
+    files instead of the final render. Returns False (and uploads nothing
+    further) on the first failure, so the caller can safely skip deleting
+    local files it couldn't actually archive — a failed archive must never
+    turn into data loss."""
+    if not is_b2_configured() or not local_dir.is_dir():
+        return False
+    try:
+        client = _get_client()
+        for f in local_dir.rglob("*"):
+            if not f.is_file():
+                continue
+            key = f"{object_prefix}/{f.relative_to(local_dir).as_posix()}"
+            client.upload_file(str(f), B2_BUCKET_NAME, key)
+        return True
+    except Exception as exc:
+        logger.warning(f"B2 directory archive failed for {local_dir} ({object_prefix}): {exc}")
+        return False
+
+
 def object_key_from_url(url: str) -> Optional[str]:
     if not url or not url.startswith(B2_PUBLIC_URL_BASE):
         return None

@@ -1073,14 +1073,36 @@ def purge_old_render_output(video: Video) -> None:
 
 
 def purge_edit_assets(video: Video) -> None:
-    """Deletes the heavy scene images/clips kept for the post-render editor,
-    without touching output.mp4 or the small source files (voiceover, transcript,
-    subtitles) — the video stays downloadable/watchable, just no longer editable."""
+    """Archives then deletes the heavy scene images/clips kept for the
+    post-render editor, without touching output.mp4 or the small source
+    files (voiceover, transcript, subtitles) — the video stays
+    downloadable/watchable, just no longer editable in-place. Archived to B2
+    first (never straight-deleted) so a video that's long past its editing
+    window can still, in principle, be recovered — this is what actually
+    frees the VPS disk of the bulk of a video's footprint (scene
+    images/clips/audio segments are the large part; the local editor UI
+    doesn't read these back once purged, so there is currently no
+    "reopen editor after purge" flow — this only runs once editing is
+    already considered over)."""
+    from src.utils import b2_storage
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    channel_name = video.channel.name if video.channel else None
+    channel_slug = b2_storage.slugify(channel_name)
+    channel_short = b2_storage.short_id(video.channel_id)
+    video_short = b2_storage.short_id(video.id)
+    prefix = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/edit_assets"
     for sub in ("source/images", "source/clips", "source/audio_segments"):
         p = video_dir / sub
-        if p.exists():
+        if not p.exists():
+            continue
+        archived = b2_storage.archive_directory(p, f"{prefix}/{sub.split('/')[-1]}")
+        if archived or not b2_storage.is_b2_configured():
+            # Delete locally once safely archived — or, if B2 isn't even
+            # configured, fall back to the old behavior (straight delete)
+            # rather than accumulating disk forever with archival unavailable.
             shutil.rmtree(p, ignore_errors=True)
+        else:
+            logger.warning(f"Skipped local delete of {p} for video {video.id} — B2 archive failed, keeping local copy.")
     scenes_manifest = video_dir / "source" / "scenes.json"
     scenes_manifest.unlink(missing_ok=True)
 
