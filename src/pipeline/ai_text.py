@@ -335,6 +335,7 @@ def generate_text(
     video_id: Optional[str] = None,
     cost_sink: Optional[list] = None,
     enable_web_search: bool = False,
+    preferred_provider: Optional[str] = None,
 ) -> str:
     """Tries providers in order — by default Anthropic, DeepSeek, fal.ai
     (Claude via OpenRouter), OpenAI, then Groq's free tier — falling through
@@ -364,6 +365,11 @@ def generate_text(
     appended to it — used by callers (e.g. auto script generation) that need
     to know the actual cost incurred to bill the creator for it.
 
+    `preferred_provider`, when set, moves one configured provider to the front
+    for this call while preserving the normal fallback chain. This is useful
+    for low-risk tasks such as stock-search keywords that should use Gemini
+    before any paid provider.
+
     `enable_web_search` only applies to the Anthropic path (its server-side
     web_search tool) — every other provider ignores it; if Anthropic isn't
     first (or isn't available) the call still succeeds, just without live
@@ -379,6 +385,8 @@ def generate_text(
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]
+    if preferred_provider in order:
+        order = [preferred_provider] + [pid for pid in order if pid != preferred_provider]
     if enable_web_search and "anthropic" in order:
         # Web search only works through Anthropic's server-side tool (see the
         # docstring) — every other provider silently ignores it. The admin's

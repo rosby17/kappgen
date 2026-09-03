@@ -153,7 +153,16 @@ Respond with ONLY this JSON object, no other text:
 {{"queries": ["query for scene {start + 1}", "..."]}}
 The queries array MUST have exactly {len(batch)} entries, in order."""
 
-            raw_text = generate_text(instruction, max_tokens=1500, model=SCENE_DIRECTOR_MODEL, operation='stock_query_direction')
+            # Stock keywords are a lightweight classification task. Prefer
+            # Gemini (free tier when configured) and fall back automatically
+            # through the admin provider chain if it is unavailable.
+            raw_text = generate_text(
+                instruction,
+                max_tokens=1500,
+                model=SCENE_DIRECTOR_MODEL,
+                operation='stock_query_direction',
+                preferred_provider='gemini',
+            )
             data = _extract_json(raw_text)
             batch_queries = data.get("queries")
             if not isinstance(batch_queries, list) or len(batch_queries) != len(batch):
