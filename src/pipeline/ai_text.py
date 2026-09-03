@@ -217,17 +217,17 @@ GEMINI_MODEL = "gemini-3.6-flash"
 
 
 def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
-    keys = list(GEMINI_API_KEYS)
+    keys = [{"id": None, "token": key} for key in GEMINI_API_KEYS]
     try:
         from src.db.session import SessionLocal
         from src.db.models import HuggingFaceAccount
         db = SessionLocal()
         try:
-            rows = (db.query(HuggingFaceAccount.token)
+            rows = (db.query(HuggingFaceAccount.id, HuggingFaceAccount.token)
                     .filter(HuggingFaceAccount.provider == "gemini", HuggingFaceAccount.is_enabled == True)
                     .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst()).all())
             if rows:
-                keys = [row[0] for row in rows]
+                keys = [{"id": row[0], "token": row[1]} for row in rows]
         finally:
             db.close()
     except Exception:
@@ -235,7 +235,8 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     if not keys:
         raise RuntimeError("GEMINI_API_KEY is not configured on the server.")
     last_error = None
-    for key in keys:
+    for account in keys:
+        key = account["token"]
         try:
             resp = httpx.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
@@ -265,6 +266,9 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             usage = data.get("usageMetadata") or {}
             in_tok, out_tok = usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
             log_usage("gemini", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens", 0.0, user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"), meta={"model": GEMINI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True})
+            if account["id"]:
+                from src.pipeline.images import _mark_provider_account
+                _mark_provider_account(account["id"], "active")
             return text, 0.0
         except Exception as exc:
             last_error = exc
