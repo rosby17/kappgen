@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
@@ -484,6 +484,12 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
+
+    # B2/R2 outputs are intentionally public and no longer exist on the
+    # worker's local disk after finalization. Redirect instead of prefixing
+    # STORAGE_PATH to an HTTPS URL (which caused "file not found on disk").
+    if video.storage_backend in ("b2", "r2") or str(video.output_path).startswith(("http://", "https://")):
+        return RedirectResponse(url=video.output_path, status_code=307)
 
     source_path = STORAGE_PATH / video.output_path
     if not source_path.exists():
