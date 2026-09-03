@@ -354,6 +354,7 @@ def generate_text(
     cost_sink: Optional[list] = None,
     enable_web_search: bool = False,
     preferred_provider: Optional[str] = None,
+    free_only: bool = False,
 ) -> str:
     """Tries providers in order — by default Anthropic, DeepSeek, fal.ai
     (Claude via OpenRouter), OpenAI, then Groq's free tier — falling through
@@ -403,9 +404,13 @@ def generate_text(
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]
+    if free_only:
+        # Explicit cost guard: never silently fall through to Anthropic,
+        # DeepSeek, fal.ai or OpenAI when the free pool is exhausted.
+        order = [pid for pid in ("gemini", "groq") if pid in order]
     if preferred_provider in order:
         order = [preferred_provider] + [pid for pid in order if pid != preferred_provider]
-    if enable_web_search and "anthropic" in order:
+    if enable_web_search and "anthropic" in order and not free_only:
         # Web search only works through Anthropic's server-side tool (see the
         # docstring) — every other provider silently ignores it. The admin's
         # general priority order (e.g. Gemini/Groq first, both free) has no

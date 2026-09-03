@@ -116,7 +116,7 @@ Règles impératives :
 Exemple : pour une vidéo sur une feuille d'aluminium dans le congélateur qui évite la buée, préfère « FINI LA BUÉE » à « UNE BANDE DE PAPIER ALUMINIUM ».
 Réponds uniquement par l'accroche, sans guillemets ni explication."""
     try:
-        candidate = generate_text(prompt, max_tokens=60, operation="thumbnail_headline", preferred_provider="gemini").strip()
+        candidate = generate_text(prompt, max_tokens=60, operation="thumbnail_headline", preferred_provider="gemini", free_only=True).strip()
         candidate = re.sub(r"^['\"“”«»]+|['\"“”«»]+$", "", candidate).strip()
         candidate = re.sub(r"\s+", " ", candidate)
         if _headline_fits_image(candidate):
@@ -243,7 +243,7 @@ Réponds uniquement en JSON valide avec: title (max 100 caractères), descriptio
 tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 5 mots, 38 caractères maximum, phrase complète et naturelle, fidèle au sujet). Le texte est imprimé tel quel dans une image : ne le coupe jamais, ne le termine jamais par "...", et ne renvoie ni le titre complet ni un sous-titre."""
         # Metadata is editorially useful but does not need Sonnet. Prefer
         # Gemini's free tier and retain the normal provider fallback chain.
-        text = generate_text(prompt, max_tokens=1800, operation='youtube_metadata', preferred_provider='gemini')
+        text = generate_text(prompt, max_tokens=1800, operation='youtube_metadata', preferred_provider='gemini', free_only=True)
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         title = str(data.get("title") or fallback["title"]).strip()[:100]

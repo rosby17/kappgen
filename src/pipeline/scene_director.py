@@ -162,6 +162,7 @@ The queries array MUST have exactly {len(batch)} entries, in order."""
                 model=SCENE_DIRECTOR_MODEL,
                 operation='stock_query_direction',
                 preferred_provider='gemini',
+                free_only=True,
             )
             data = _extract_json(raw_text)
             batch_queries = data.get("queries")
