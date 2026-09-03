@@ -58,6 +58,32 @@ def _thumbnail_font_path(font_family: str) -> str:
 _THUMBNAIL_ACCENT_COLORS = ["#ffd400", "#f7c600", "#ffcc33"]
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# A thumbnail headline is not the video's full title. Image models render a
+# few large words reliably; long copy is what led to cropped fragments such
+# as “EMPÊC” and “DÉGIVRE T” in otherwise good artwork.
+_THUMBNAIL_HEADLINE_MAX_WORDS = 5
+_THUMBNAIL_HEADLINE_MAX_CHARS = 38
+_TRAILING_CONNECTORS = {"à", "au", "aux", "avec", "dans", "de", "des", "du", "en", "et", "le", "la", "les", "pour", "sur", "un", "une", "vers"}
+
+
+def clean_thumbnail_headline(value: str) -> str:
+    """Keep only a short sequence of complete, natural-looking words.
+
+    A shortened fallback is preferable to truncating a word half way through:
+    it keeps the image clean and gives GPT Image 2 a headline it can fit.
+    """
+    headline = re.sub(r"\s+", " ", str(value or "").replace("\n", " ")).strip(" \"'“”«»")
+    headline = re.sub(r"[|•·…]+", " ", headline)
+    kept = []
+    for word in headline.split():
+        candidate = " ".join([*kept, word])
+        if len(kept) >= _THUMBNAIL_HEADLINE_MAX_WORDS or len(candidate) > _THUMBNAIL_HEADLINE_MAX_CHARS:
+            break
+        kept.append(word)
+    while len(kept) > 1 and kept[-1].casefold().strip(".,:;!?") in _TRAILING_CONNECTORS:
+        kept.pop()
+    return " ".join(kept) or "NOUVELLE VIDÉO"
+
 
 def _fallback_metadata(video, channel) -> dict:
     raw_title = (video.title or video.script_text or "Nouvelle vidéo").strip().splitlines()[0]
@@ -72,7 +98,7 @@ def _fallback_metadata(video, channel) -> dict:
         f"Abonne-toi à la chaîne pour découvrir les prochaines vidéos."
     )
     tags = [tag for tag in [niche, channel.name] if tag]
-    return {"title": title, "description": description, "tags": tags, "thumbnail_text": title[:55]}
+    return {"title": title, "description": description, "tags": tags, "thumbnail_text": clean_thumbnail_headline(title)}
 
 
 def generate_metadata(video, channel) -> dict:
@@ -101,7 +127,7 @@ Ne mentionne jamais KappGen ni aucun outil de production dans le titre ou la des
 Script: {script}
 
 Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
-tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fidèle au sujet)."""
+tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 5 mots, 38 caractères maximum, phrase complète et naturelle, fidèle au sujet). Le texte est imprimé tel quel dans une image : ne le coupe jamais, ne le termine jamais par "...", et ne renvoie ni le titre complet ni un sous-titre."""
         text = generate_text(prompt, max_tokens=1200, operation='youtube_metadata')
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
@@ -122,7 +148,7 @@ tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fi
             "title": title,
             "description": description[:5000],
             "tags": tags,
-            "thumbnail_text": str(data.get("thumbnail_text") or title).strip()[:70],
+            "thumbnail_text": clean_thumbnail_headline(data.get("thumbnail_text") or title),
         }
     except Exception as exc:
         logger.warning(f"YouTube metadata generation failed, using safe fallback: {exc}")
@@ -260,6 +286,7 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
     story with foreground, midground and background detail.
     """
     thumbnail_style = thumbnail_style or {}
+    text = clean_thumbnail_headline(text)
     style_prompt = (thumbnail_style.get("style_prompt") or "").strip() or (
         (image_style or {}).get("style_prompt") or ""
     ).strip()
@@ -313,14 +340,16 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
             f"Add the exact headline “{text}” in the reserved {text_side} area, reproducing this channel's "
             f"established headline treatment exactly: {typography}. The headline colours are mandatory: use those "
             f"exact text colours, accent-word colours and box/band fill colours — never substitute your own "
-            f"palette, never default to plain white or black text, never invert the contrast. Perfectly spelled, "
-            f"every word fully visible inside the frame, nothing cropped or cut off. "
+            f"palette, never default to plain white or black text, never invert the contrast. HARD TEXT RULE: render "
+            f"only this complete headline, word-for-word; do not add, omit, abbreviate, split or crop a word. Keep it "
+            f"within four short lines and a safe 8 percent margin on every edge. "
         )
     else:
         type_clause = (
             f"Add the exact headline “{text}” in the reserved {text_side} area, large bold condensed uppercase "
-            f"editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene, "
-            f"every word fully visible inside the frame, nothing cropped or cut off. "
+            f"editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene. "
+            f"HARD TEXT RULE: render only this complete headline, word-for-word; do not add, omit, abbreviate, split or "
+            f"crop a word. Keep it within four short lines and a safe 8 percent margin on every edge. "
         )
 
     return (
@@ -411,6 +440,7 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
 
 
 def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None) -> Path:
+    text = clean_thumbnail_headline(text)
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
     image = None
