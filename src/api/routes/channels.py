@@ -968,7 +968,9 @@ def search_public_library(
                     "id": f"community-{folder.channel_id}-{asset.name}",
                     "type": "photos",
                     "provider": "ai_generated" if is_ai_generated else "community",
-                    "thumbnail_url": asset_url,
+                    # Small cached JPEG for the grid; the original (asset_url,
+                    # unchanged) is what the preview/import/render actually use.
+                    "thumbnail_url": f"{asset_url}/thumb",
                     "asset_url": asset_url,
                     "source_url": None,
                     "author": "KappGen AI" if is_ai_generated else "Communauté KappGen",
@@ -1040,9 +1042,7 @@ def search_public_library(
     return {"query": clean_query, "media_type": media_type, "page": safe_page, "per_page": safe_per_page, "items": items, "has_next": bool(payload.get("next_page"))}
 
 
-@router.get("/public-library/community/{channel_id}/{filename}")
-def get_public_community_library_image(channel_id: str, filename: str, db: Session = Depends(get_db)):
-    """Serve one approved shared image without making a private library public."""
+def _resolve_approved_community_asset(db: Session, channel_id: str, filename: str) -> Path:
     folder = db.query(CommunityLibraryFolder).filter(
         CommunityLibraryFolder.channel_id == channel_id,
         CommunityLibraryFolder.status == "approved",
@@ -1053,7 +1053,49 @@ def get_public_community_library_image(channel_id: str, filename: str, db: Sessi
     candidate = (library_dir / filename).resolve()
     if candidate.parent != library_dir or not candidate.is_file() or candidate.suffix.lower() not in ALLOWED_LIBRARY_EXTENSIONS:
         raise HTTPException(status_code=404, detail="Ressource publique introuvable.")
+    return candidate
+
+
+@router.get("/public-library/community/{channel_id}/{filename}")
+def get_public_community_library_image(channel_id: str, filename: str, db: Session = Depends(get_db)):
+    """Serve one approved shared image, full resolution — used for the
+    expanded preview, the video render, and 'Ajouter à cette chaîne', never
+    for the browsing grid (see the /thumb endpoint below for that)."""
+    candidate = _resolve_approved_community_asset(db, channel_id, filename)
     return FileResponse(candidate, headers={"Cache-Control": "public, max-age=3600"})
+
+
+_PUBLIC_LIBRARY_THUMB_MAX_WIDTH = 480
+_PUBLIC_LIBRARY_THUMB_QUALITY = 70
+
+
+@router.get("/public-library/community/{channel_id}/{filename}/thumb")
+def get_public_community_library_thumbnail(channel_id: str, filename: str, db: Session = Depends(get_db)):
+    """A small, cached JPEG for the browsing grid.
+
+    The grid was serving each community image at its full render resolution
+    — the same file the pipeline burns into a video — which is exactly why it
+    loaded far slower than the Pexels rows above it (Pexels already returns a
+    pre-sized 'large' variant for thumbnails). Resized once, cached to disk
+    next to the original, and reused on every later request; the full-quality
+    original is untouched and still what actually gets imported/rendered."""
+    from PIL import Image
+    import io
+
+    candidate = _resolve_approved_community_asset(db, channel_id, filename)
+    thumb_dir = candidate.parent / ".public_thumbs"
+    thumb_path = thumb_dir / f"{candidate.name}.jpg"
+    if not thumb_path.is_file() or thumb_path.stat().st_mtime < candidate.stat().st_mtime:
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        with Image.open(candidate) as image:
+            image = image.convert("RGB")
+            if image.width > _PUBLIC_LIBRARY_THUMB_MAX_WIDTH:
+                ratio = _PUBLIC_LIBRARY_THUMB_MAX_WIDTH / image.width
+                image = image.resize((_PUBLIC_LIBRARY_THUMB_MAX_WIDTH, max(1, round(image.height * ratio))), Image.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, "JPEG", quality=_PUBLIC_LIBRARY_THUMB_QUALITY, optimize=True)
+            thumb_path.write_bytes(buffer.getvalue())
+    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 class PublicLibraryImportPayload(BaseModel):
