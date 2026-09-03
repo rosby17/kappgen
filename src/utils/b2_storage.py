@@ -102,6 +102,38 @@ def upload_video(local_path: Path, object_key: str) -> Optional[str]:
         return None
 
 
+def upload_file(local_path: Path, object_key: str) -> bool:
+    """Generic single-file upload (unlike upload_video, doesn't assume
+    video/mp4) — used to archive the editor's scenes.json manifest alongside
+    the image/clip/audio directories archive_directory already handles, so a
+    later restore_directory-based restore has the manifest to go with the
+    assets it references, not just the raw files."""
+    if not is_b2_configured():
+        return False
+    try:
+        client = _get_client()
+        client.upload_file(str(local_path), B2_BUCKET_NAME, object_key)
+        return True
+    except Exception as exc:
+        logger.warning(f"B2 file upload failed for {local_path} ({object_key}): {exc}")
+        return False
+
+
+def download_file(object_key: str, local_path: Path) -> bool:
+    """Counterpart to upload_file — downloads a single object back to disk,
+    creating parent directories as needed."""
+    if not is_b2_configured():
+        return False
+    try:
+        client = _get_client()
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        client.download_file(B2_BUCKET_NAME, object_key, str(local_path))
+        return True
+    except Exception as exc:
+        logger.warning(f"B2 file download failed for {object_key} -> {local_path}: {exc}")
+        return False
+
+
 def delete_video(object_key: str) -> None:
     """Best-effort delete — a failed cleanup here just leaves an orphaned
     object in the bucket, never something worth failing a purge pass over."""
@@ -136,6 +168,39 @@ def archive_directory(local_dir: Path, object_prefix: str) -> bool:
         return True
     except Exception as exc:
         logger.warning(f"B2 directory archive failed for {local_dir} ({object_prefix}): {exc}")
+        return False
+
+
+def restore_directory(object_prefix: str, local_dir: Path) -> bool:
+    """Downloads every object under object_prefix back into local_dir,
+    mirroring archive_directory's layout exactly (relative path under the
+    prefix -> relative path under local_dir). Used to bring back a video's
+    editor assets on demand when a creator reopens a video whose assets were
+    already archived-and-purged (see purge_edit_assets) — editing should
+    never be a dead end just because nobody touched a video for a few days.
+    Returns False (without partially creating local_dir) if nothing was
+    found under the prefix or the download fails partway, so the caller
+    never mistakes an incomplete restore for a successful one."""
+    if not is_b2_configured():
+        return False
+    try:
+        client = _get_client()
+        paginator = client.get_paginator("list_objects_v2")
+        keys = []
+        for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix=f"{object_prefix}/"):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        if not keys:
+            return False
+        for key in keys:
+            rel = key[len(object_prefix) + 1:]
+            if not rel:
+                continue
+            dest = local_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(B2_BUCKET_NAME, key, str(dest))
+        return True
+    except Exception as exc:
+        logger.warning(f"B2 directory restore failed for {object_prefix} -> {local_dir}: {exc}")
         return False
 
 

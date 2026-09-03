@@ -470,6 +470,7 @@ class Video(Base):
     progress_percent = Column(Integer, nullable=False, default=0)
     is_reassembly = Column(Boolean, nullable=False, default=False)
     edit_assets_purged_at = Column(DateTime, nullable=True)
+    edit_assets_restored_at = Column(DateTime, nullable=True)
     # Only meaningful for input_type="audio": whether to spend Izivoice STT
     # credits transcribing the upload for accurate subtitles, or skip it (free,
     # approximate title-based captions instead). Opt-out toggle in the wizard.
@@ -594,7 +595,10 @@ class Video(Base):
             "progress_percent": self.progress_percent or 0,
             "purged_at": self.purged_at.isoformat() if self.purged_at else None,
             "expiry_warning_sent_at": self.expiry_warning_sent_at.isoformat() if self.expiry_warning_sent_at else None,
-            "editable": bool(self.status == VideoStatus.DONE.value and self.output_path and not self.edit_assets_purged_at),
+            # No longer conditioned on edit_assets_purged_at: purged edit assets
+            # are restored on demand (see restore_edit_assets / GET .../scenes),
+            # so a purge is never a dead end for the creator anymore.
+            "editable": bool(self.status == VideoStatus.DONE.value and self.output_path),
             "transcribe_audio": self.transcribe_audio,
             "audio_rights_confirmed": self.audio_rights_confirmed,
             "audio_source_type": self.audio_source_type,

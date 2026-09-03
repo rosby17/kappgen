@@ -1427,14 +1427,25 @@ def _resolve_scene_thumbnail(video: Video, scene: Dict[str, Any]) -> Path:
     return _extract_video_frame(Path(visual_path), thumb_path)
 
 
-def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
+def _load_scenes_manifest(video: Video, db: Optional[Session] = None) -> List[Dict[str, Any]]:
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     scenes_path = video_dir / "source" / "scenes.json"
     if not scenes_path.exists():
-        raise HTTPException(
-            status_code=409,
-            detail="Cette vidéo n’est plus éditable (fichiers sources supprimés ou vidéo antérieure à cette fonctionnalité).",
-        )
+        # Fichiers d'édition purgés localement (voir EDIT_ASSETS_RETENTION_DAYS) —
+        # mais archivés sur B2 avant suppression, donc récupérables à la demande
+        # plutôt qu'une fin de partie pour l'édition.
+        from src.worker.queue_runner import restore_edit_assets
+        restored = restore_edit_assets(video)
+        if restored and scenes_path.exists():
+            if db is not None:
+                video.edit_assets_purged_at = None
+                video.edit_assets_restored_at = datetime.utcnow()
+                db.commit()
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Cette vidéo n'est plus éditable (fichiers sources introuvables, y compris dans l'archive, ou vidéo antérieure à cette fonctionnalité).",
+            )
     import json
     return json.loads(scenes_path.read_text(encoding="utf-8"))
 
@@ -1603,7 +1614,7 @@ def list_video_scenes(video_id: str, current_user: User = Depends(get_current_us
     video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value:
         raise HTTPException(status_code=409, detail="La vidéo n’est pas encore prête.")
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     return [
         {
             "index": s["index"],
@@ -1630,7 +1641,7 @@ def get_scene_image(video_id: str, scene_index: int, db: Session = Depends(get_d
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1658,7 +1669,7 @@ async def replace_scene_image(
     import json
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     scenes_path = video_dir / "source" / "scenes.json"
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1727,7 +1738,7 @@ def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleU
     if not text:
         raise HTTPException(status_code=400, detail="Le texte ne peut pas être vide.")
 
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1768,7 +1779,7 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
     if not can_render:
         raise HTTPException(status_code=402, detail=reason)
 
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1865,7 +1876,7 @@ def undo_last_edit(video_id: str, current_user: User = Depends(get_current_user)
 
         video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
         scenes_path = video_dir / "source" / "scenes.json"
-        scenes = _load_scenes_manifest(video)
+        scenes = _load_scenes_manifest(video, db)
         scene = next((s for s in scenes if s["index"] == scene_index), None)
         if not scene:
             raise HTTPException(status_code=404, detail="Scene not found")

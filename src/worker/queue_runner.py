@@ -1078,25 +1078,28 @@ def purge_old_render_output(video: Video) -> None:
         shutil.move(str(video_dir), str(destination))
 
 
-def purge_edit_assets(video: Video) -> None:
-    """Archives then deletes the heavy scene images/clips kept for the
-    post-render editor, without touching output.mp4 or the small source
-    files (voiceover, transcript, subtitles) — the video stays
-    downloadable/watchable, just no longer editable in-place. Archived to B2
-    first (never straight-deleted) so a video that's long past its editing
-    window can still, in principle, be recovered — this is what actually
-    frees the VPS disk of the bulk of a video's footprint (scene
-    images/clips/audio segments are the large part; the local editor UI
-    doesn't read these back once purged, so there is currently no
-    "reopen editor after purge" flow — this only runs once editing is
-    already considered over)."""
+def _edit_assets_b2_prefix(video: Video) -> str:
     from src.utils import b2_storage
-    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     channel_name = video.channel.name if video.channel else None
     channel_slug = b2_storage.slugify(channel_name)
     channel_short = b2_storage.short_id(video.channel_id)
     video_short = b2_storage.short_id(video.id)
-    prefix = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/edit_assets"
+    return f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/edit_assets"
+
+
+def purge_edit_assets(video: Video) -> None:
+    """Archives then deletes the heavy scene images/clips kept for the
+    post-render editor, without touching output.mp4 or the small source
+    files (voiceover, transcript, subtitles) — the video stays
+    downloadable/watchable, just no longer editable in-place until
+    restore_edit_assets brings it back (see below). Archived to B2 first
+    (never straight-deleted): scenes.json is archived alongside the
+    image/clip/audio directories (not just deleted) specifically so a
+    restore has the manifest to go with the assets it references, not just
+    orphaned files with nothing tying them back into scenes."""
+    from src.utils import b2_storage
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    prefix = _edit_assets_b2_prefix(video)
     for sub in ("source/images", "source/clips", "source/audio_segments"):
         p = video_dir / sub
         if not p.exists():
@@ -1110,27 +1113,72 @@ def purge_edit_assets(video: Video) -> None:
         else:
             logger.warning(f"Skipped local delete of {p} for video {video.id} — B2 archive failed, keeping local copy.")
     scenes_manifest = video_dir / "source" / "scenes.json"
-    scenes_manifest.unlink(missing_ok=True)
+    if scenes_manifest.exists():
+        manifest_archived = b2_storage.upload_file(scenes_manifest, f"{prefix}/scenes.json")
+        if manifest_archived or not b2_storage.is_b2_configured():
+            scenes_manifest.unlink(missing_ok=True)
+        else:
+            logger.warning(f"Skipped deleting scenes.json for video {video.id} — B2 archive failed, keeping local copy.")
+
+
+def restore_edit_assets(video: Video) -> bool:
+    """Counterpart to purge_edit_assets: brings the archived scene
+    images/clips/audio segments and scenes.json manifest back to local disk
+    so a creator can reopen the editor on a video whose assets were already
+    purged. Returns False if nothing was archived for this video (B2 wasn't
+    configured at purge time, or the video predates edit-asset archiving
+    entirely) — that case is genuinely unrecoverable, not a bug to retry."""
+    from src.utils import b2_storage
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    prefix = _edit_assets_b2_prefix(video)
+    source_dir = video_dir / "source"
+    manifest_ok = b2_storage.download_file(f"{prefix}/scenes.json", source_dir / "scenes.json")
+    if not manifest_ok:
+        return False
+    any_assets = False
+    for sub in ("images", "clips", "audio_segments"):
+        if b2_storage.restore_directory(f"{prefix}/{sub}", source_dir / sub):
+            any_assets = True
+    return any_assets
+
+
+EDIT_ASSETS_RESTORE_GRACE_DAYS = 3
 
 
 def purge_stale_edit_assets():
     """Background sweep for the EDIT_ASSETS_RETENTION_DAYS window — most users
-    trigger this earlier via the explicit 'close editor' action instead."""
+    trigger this earlier via the explicit 'close editor' action instead. Also
+    catches videos whose assets were brought back via restore_edit_assets but
+    then left untouched again for EDIT_ASSETS_RESTORE_GRACE_DAYS — restoring
+    on demand must not turn into permanent local storage, or we're back to
+    the unbounded-disk-growth problem this whole purge system exists to
+    avoid."""
     db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RETENTION_DAYS)
-        stale = (
+        purge_cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RETENTION_DAYS)
+        restore_cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RESTORE_GRACE_DAYS)
+        never_purged = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(Video.edit_assets_purged_at.is_(None))
+            .filter(Video.edit_assets_restored_at.is_(None))
             .filter(Video.finished_at.isnot(None))
-            .filter(Video.finished_at < cutoff)
+            .filter(Video.finished_at < purge_cutoff)
             .all()
         )
+        restored_and_stale = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.edit_assets_restored_at.isnot(None))
+            .filter(Video.edit_assets_restored_at < restore_cutoff)
+            .all()
+        )
+        stale = never_purged + restored_and_stale
         for video in stale:
             try:
                 purge_edit_assets(video)
                 video.edit_assets_purged_at = datetime.utcnow()
+                video.edit_assets_restored_at = None
                 logger.info(f"Purged edit assets (images/clips) for video {video.id}, finished {video.finished_at}.")
             except Exception as purge_err:
                 logger.warning(f"Failed to purge edit assets for video {video.id}: {purge_err}")
