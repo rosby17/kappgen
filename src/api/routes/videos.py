@@ -762,7 +762,14 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     if not access_token:
         raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
 
-    thumbnail_path = generate_thumbnail(video_path, video_path.with_name("thumbnail.jpg"), video.thumbnail_text or video.title or channel.name, channel=channel)
+    # Push whatever thumbnail is currently active (whatever the creator sees
+    # on their card — possibly restored from history, or manually
+    # regenerated) instead of generating yet another new one, which used to
+    # silently diverge from what was actually visible in the app. Only
+    # generate one from scratch for a legacy video that never got one.
+    thumbnail_path = video_path.with_name("thumbnail.jpg")
+    if not thumbnail_path.exists():
+        thumbnail_path = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
