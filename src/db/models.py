@@ -476,6 +476,14 @@ class Video(Base):
     # job and returns immediately instead of blocking; the frontend polls
     # this flag rather than awaiting one long response.
     thumbnail_regenerating = Column(Boolean, nullable=False, default=False)
+    # When the flag above was set — the background thread doing the actual
+    # regeneration is a daemon thread with no persistence of its own, so a
+    # server restart (a deploy, a crash) while one is running kills it
+    # without ever reaching the `finally` that clears the flag, leaving it
+    # stuck true forever and every future regeneration attempt permanently
+    # blocked behind a 409. Lets the endpoint tell "genuinely in progress"
+    # apart from "orphaned by a restart" and treat a stale one as available.
+    thumbnail_regenerating_started_at = Column(DateTime, nullable=True)
     # Bumped every time thumbnail.jpg is (re)written — the actual file is
     # overwritten in place at a fixed path, so nothing about the video row
     # itself (finished_at, output_path, ...) changes when it's regenerated.

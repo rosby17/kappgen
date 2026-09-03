@@ -85,6 +85,7 @@ def init_db():
             "expiry_warning_sent_at": "ALTER TABLE videos ADD COLUMN expiry_warning_sent_at TIMESTAMP",
             "downloaded_at": "ALTER TABLE videos ADD COLUMN downloaded_at TIMESTAMP",
             "thumbnail_regenerating": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating BOOLEAN DEFAULT FALSE NOT NULL",
+            "thumbnail_regenerating_started_at": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating_started_at TIMESTAMP",
             "thumbnail_updated_at": "ALTER TABLE videos ADD COLUMN thumbnail_updated_at TIMESTAMP",
             "admin_priority": "ALTER TABLE videos ADD COLUMN admin_priority INTEGER DEFAULT 0 NOT NULL",
         }

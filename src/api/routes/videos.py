@@ -2,7 +2,7 @@ import uuid
 import re
 import shutil
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
@@ -840,10 +840,19 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     video_path = STORAGE_PATH / video.output_path if video.output_path else None
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
-    if video.thumbnail_regenerating:
+    # A stuck flag from a server restart mid-regeneration (the background
+    # thread is a daemon with no persistence of its own) must never block
+    # every future attempt forever — past a generous timeout, treat it as
+    # orphaned and let this request take over rather than 409ing endlessly.
+    stale_cutoff = datetime.utcnow() - timedelta(minutes=5)
+    if video.thumbnail_regenerating and (
+        video.thumbnail_regenerating_started_at is None
+        or video.thumbnail_regenerating_started_at > stale_cutoff
+    ):
         raise HTTPException(status_code=409, detail="Une régénération est déjà en cours pour cette vidéo.")
 
     video.thumbnail_regenerating = True
+    video.thumbnail_regenerating_started_at = datetime.utcnow()
     db.commit()
     threading.Thread(target=_regenerate_thumbnail_background, args=(video_id,), daemon=True).start()
     return {"status": "started"}
