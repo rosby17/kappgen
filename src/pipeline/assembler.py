@@ -353,13 +353,13 @@ def assemble_final_video(
         if not item_full_path.exists():
             continue
         item_shape = item.get("shape") or "rectangle"
-        item_size = item.get("size_percent") or 12
+        item_size = item.get("size_percent") or 10
         item_x, item_y = resolve_overlay_percent(item, item_size)
         image_overlays.append({
             "path": apply_overlay_shape_mask(item_full_path, item_shape, temp_dir, item.get("id") or item_path_str),
             "x_percent": item_x,
             "y_percent": item_y,
-            "size_percent": item.get("size_percent") or 12,
+            "size_percent": item.get("size_percent") or 10,
             "opacity": item.get("opacity") if item.get("opacity") is not None else 1.0,
         })
 

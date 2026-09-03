@@ -62,7 +62,7 @@ class OverlayItem(BaseModel):
     corner: str = "top-right"   # legacy 4-preset fallback, only used when x_percent/y_percent are absent (old saved channels)
     x_percent: Optional[float] = None  # 0-100, free placement — where the image's own top-left sits inside the inset frame; None = derive from `corner`
     y_percent: Optional[float] = None  # same, vertical axis
-    size_percent: float = 12    # width as % of the 1920px-wide render frame
+    size_percent: float = 10    # width as % of the 1920px-wide render frame
     opacity: float = 1.0        # 0-1
     shape: str = "rectangle"    # "rectangle" | "rounded" | "circle" — actually masked at render time, see assembler.py:apply_overlay_shape_mask
 

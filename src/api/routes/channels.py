@@ -1518,7 +1518,7 @@ async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), 
         "image_path": f"channels/{channel.id}/overlays/{overlay_id}{ext}",
         "enabled": True,
         "corner": "top-right",
-        "size_percent": 12,
+        "size_percent": 10,
         "opacity": 1.0,
     })
     branding["overlays"] = overlays
