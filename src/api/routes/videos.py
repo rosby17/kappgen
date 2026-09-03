@@ -761,7 +761,7 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     # generate one from scratch for a legacy video that never got one.
     thumbnail_path = video_path.with_name("thumbnail.jpg")
     if not thumbnail_path.exists():
-        thumbnail_path = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
+        thumbnail_path, _ = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
@@ -798,7 +798,7 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             draft=video.thumbnail_text or "",
         )
         db.commit()
-        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
+        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)  # ai_success ignored here — a manual regen has no fallback to skip
         succeeded = True
     except Exception as e:
         logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
