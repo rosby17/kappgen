@@ -118,6 +118,7 @@ def _pick_topic(
     cost_sink: Optional[List[float]] = None,
     topic_examples: Optional[str] = None,
     use_web_trends: bool = False,
+    youtube_topic_sources: Optional[str] = None,
 ) -> Optional[str]:
     avoid_list = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet — this is the first video)"
     # Without real examples, topic selection has nothing to anchor on but the
@@ -148,10 +149,22 @@ Read past the formatting noise yourself: identify the actual titles, and where v
         "This channel covers current events/trends — use web search to find something genuinely happening right now (recent news, a real trending story, an actual event) and build the topic around it, instead of a generic evergreen angle."
         if use_web_trends else ""
     )
+    youtube_sources_block = ""
+    if youtube_topic_sources and youtube_topic_sources.strip():
+        sources = youtube_topic_sources.strip()[:4000]
+        youtube_sources_block = (
+            "The creator supplied these YouTube channel/video URLs as research sources:\n"
+            f'\"\"\"\n{sources}\n\"\"\"\n'
+            "Use web research to identify their high-performing videos and study broad audience signals: "
+            "recurring themes, title structure, specificity, curiosity gaps, and (where visible) popularity. "
+            "Do NOT copy titles, scripts, or near-identical video concepts. Create a distinct, original topic "
+            "for this creator's own niche and voice instead."
+        )
     instruction = f"""You are the head writer for a faceless YouTube channel (niche: {niche or "general"}).
 {f"Creative/tone direction from the channel owner: {style_prompt}" if style_prompt else ""}
 {examples_block}
 {web_search_line}
+{youtube_sources_block}
 
 Titles of videos already published on this channel (never repeat these topics or very close variants):
 {avoid_list}
@@ -168,7 +181,7 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
         # web-search ones, is still a negligible cost for a one-line title.
         raw_text = generate_text(
             instruction, max_tokens=1000, model=SCRIPT_WRITER_MODEL,
-            operation='script_topic', cost_sink=cost_sink, enable_web_search=use_web_trends,
+            operation='script_topic', cost_sink=cost_sink, enable_web_search=bool(use_web_trends or youtube_sources_block),
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
@@ -243,8 +256,11 @@ def generate_daily_script(
     default_language: Optional[str] = None,
     topic_examples: Optional[str] = None,
     use_web_trends: bool = False,
+    youtube_topic_sources: Optional[str] = None,
     on_progress: Optional[callable] = None,
     recent_scripts: Optional[List[str]] = None,
+    on_title: Optional[callable] = None,
+    on_partial_script: Optional[callable] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -283,10 +299,17 @@ def generate_daily_script(
     try:
         title = _pick_topic(
             niche, recent_titles, style_prompt, language, cost_sink=cost_sink,
-            topic_examples=topic_examples, use_web_trends=use_web_trends,
+            topic_examples=topic_examples, use_web_trends=use_web_trends, youtube_topic_sources=youtube_topic_sources,
         )
         if not title:
             return None
+        # The title is picked before a single word of the script is written —
+        # surface it immediately (e.g. so the caller can save it to the video
+        # row right away) instead of only once the whole script finishes,
+        # which left "Sujet pris en charge par KappGen" showing in the UI for
+        # the entire, often much longer, writing phase.
+        if on_title:
+            on_title(title)
         if on_progress:
             on_progress("Rédaction du script", 8)
 
@@ -308,6 +331,11 @@ def generate_daily_script(
                 # shows real incremental movement instead of jumping straight
                 # from "topic picked" to "script done" on a long multi-part script.
                 on_progress("Rédaction du script", 8 + round(16 * (i + 1) / len(parts)))
+            if on_partial_script:
+                # Run last so callers can persist both the accumulated text
+                # and the precise part x/y label without the generic progress
+                # callback immediately overwriting it.
+                on_partial_script(" ".join(written_parts).strip(), i + 1, len(parts))
 
         script_text = " ".join(written_parts).strip()
         # A part_text that's technically non-empty (passes the guard above)

@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from sqlalchemy import or_, func
+from sqlalchemy import or_, and_
 from src.db.session import SessionLocal, init_db
-from src.db.models import Video, Channel, User, VoiceCloneJob, Subscription, Plan
+from src.db.models import Video, Channel, User, VoiceCloneJob
 from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
 from src.config import FRONTEND_BASE_URL
 from src.models.project import VideoStatus
@@ -54,6 +54,15 @@ PURGE_INTERVAL_SECONDS = 3600
 # mention of credits/quotas/API keys, which are our problem to fix, not
 # something a creator can act on.
 SERVICE_UNAVAILABLE_MESSAGE = "Les serveurs de KappGen sont temporairement indisponibles. Veuillez réessayer plus tard."
+
+
+class VideoCancelledError(Exception):
+    """Raised from update_progress (both the narration and music branches)
+    when a creator cancels a video (POST /{video_id}/cancel) while it's
+    still queued or rendering. Checked between pipeline stages rather than
+    inside them, so an in-flight render stops at the next stage boundary
+    instead of finishing into a result nobody wanted."""
+    pass
 
 # Unlike SERVICE_UNAVAILABLE_MESSAGE (our own provider credits/outages — the
 # creator can't act on those), an empty KappGen credit balance is entirely
@@ -113,28 +122,23 @@ def process_single_queued_video() -> bool:
     db = SessionLocal()
     video = None
     try:
-        # Admin manual override first (see Video.admin_priority — set from
-        # the admin Vidéos tab, e.g. "Prioriser cette vidéo"), then paid-tier
-        # priority, then FIFO within the same tier. The highest currently-
-        # active plan price wins; welcome-credit/free users have a priority
-        # value of zero and therefore wait behind every paid tier.
-        active_plan_price = (
-            db.query(func.coalesce(func.max(Plan.price_fcfa), 0))
-            .select_from(Subscription)
-            .join(Plan, Subscription.plan_id == Plan.id)
-            .filter(
-                Subscription.user_id == Channel.user_id,
-                Subscription.status == "active",
-                Subscription.expires_at > datetime.utcnow(),
-            )
-            .correlate(Channel)
-            .scalar_subquery()
+        # One public rule: first launched, first processed. A platform admin
+        # may explicitly set admin_priority for an exceptional intervention,
+        # but plan/tier is never an implicit queue priority.
+        #
+        # Automatic videos are inserted immediately with an empty script so
+        # their place is durable. Their background script writer owns that
+        # empty row; the render worker must wait until it has real content.
+        ready_for_render = or_(
+            Video.is_reassembly.is_(True),
+            Channel.automation_mode != "auto",
+            and_(Video.script_text.is_not(None), Video.script_text != ""),
         )
         video = (
             db.query(Video)
             .join(Channel, Video.channel_id == Channel.id)
-            .filter(Video.status == VideoStatus.QUEUED.value)
-            .order_by(Video.admin_priority.desc(), active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
+            .filter(Video.status == VideoStatus.QUEUED.value, ready_for_render)
+            .order_by(Video.admin_priority.desc(), Video.created_at.asc(), Video.id.asc())
             .with_for_update(skip_locked=True)
             .first()
         )
@@ -188,20 +192,27 @@ def process_single_queued_video() -> bool:
             youtube_metadata.generate_thumbnail,
             video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
             video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-            channel, video.id,
+            channel, video.id, strict=True,
         ) if thumbnail_enabled else None
 
         def await_parallel_thumbnail():
+            """Returns (path, ai_used) — ai_used=False means generate_thumbnail
+            fell all the way through to its own fallback (a plain solid-color
+            frame, since __thumbnail_source__.mp4 never exists this early —
+            the parallel job starts before the video is rendered, so it has
+            no real frame to grab either). The caller re-attempts a proper
+            thumbnail once the real output.mp4 exists — see the ai_used check
+            right after this is awaited below."""
             if thumbnail_future is None:
                 thumbnail_executor.shutdown(wait=False, cancel_futures=True)
-                return None
+                return None, False
             try:
-                result = thumbnail_future.result()
-                logger.info("Parallel GPT Image 2 thumbnail ready for video %s", video.id)
-                return result
+                result, ai_used = thumbnail_future.result()
+                logger.info("Parallel thumbnail ready for video %s (ai_used=%s)", video.id, ai_used)
+                return result, ai_used
             except Exception as exc:
                 logger.warning("Parallel thumbnail failed for video %s: %s", video.id, exc)
-                return None
+                return None, False
             finally:
                 thumbnail_executor.shutdown(wait=False, cancel_futures=False)
 
@@ -270,6 +281,12 @@ def process_single_queued_video() -> bool:
             from src.pipeline.music_video import render_music_video
 
             def update_progress(stage: str, percent: int):
+                # Re-checked fresh from the DB every stage transition — a
+                # cancellation lands via a different request/session, so this
+                # ORM object wouldn't otherwise see it before its own next
+                # refresh/query.
+                if db.query(Video.status).filter(Video.id == video.id).scalar() == VideoStatus.CANCELLED.value:
+                    raise VideoCancelledError(f"Video {video.id} cancelled by the creator.")
                 video.progress_stage = stage
                 video.progress_percent = percent
                 db.commit()
@@ -431,6 +448,8 @@ def process_single_queued_video() -> bool:
 
         # Execute render pipeline
         def update_progress(stage: str, percent: int):
+            if db.query(Video.status).filter(Video.id == video.id).scalar() == VideoStatus.CANCELLED.value:
+                raise VideoCancelledError(f"Video {video.id} cancelled by the creator.")
             video.progress_stage = stage
             video.progress_percent = percent
             db.commit()
@@ -498,7 +517,32 @@ def process_single_queued_video() -> bool:
         except Exception as e:
             logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
-        await_parallel_thumbnail()
+        _, thumbnail_ai_used = await_parallel_thumbnail()
+        if not thumbnail_ai_used and thumbnail_enabled:
+            # The parallel attempt above started before the video existed and
+            # failed its AI call — strict=True means it raised rather than
+            # writing a generic, unstyled placeholder (see
+            # generate_thumbnail's docstring: publishing something with none
+            # of the creator's actual reference style was worse than a clear
+            # "couldn't make one" state). Retry once for real now that
+            # output_mp4 exists — transient AI timeouts do happen — still
+            # strict, so a second failure leaves no thumbnail file at all
+            # rather than a mediocre one.
+            try:
+                youtube_metadata.generate_thumbnail(
+                    output_mp4, thumbnail_destination,
+                    video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
+                    channel, video.id, strict=True,
+                )
+                video.thumbnail_error = None
+                logger.info(f"Post-render thumbnail retry for video {video.id} succeeded.")
+            except Exception as exc:
+                video.thumbnail_error = (
+                    "La miniature n'a pas pu être générée dans le style de la chaîne. "
+                    "Réessaie dans quelques minutes, ou régénère-la manuellement."
+                )
+                logger.warning(f"Post-render thumbnail retry failed for video {video.id}, leaving no thumbnail: {exc}")
+            db.commit()
 
         # A Trust Score is part of the finished video, not something the
         # creator has to remember to request. Run this final, post-render
@@ -538,6 +582,25 @@ def process_single_queued_video() -> bool:
             # publishes on demand from NicheCut.
 
         return True
+
+    except VideoCancelledError:
+        # Not a failure — the creator stopped it on purpose (see
+        # POST /{video_id}/cancel). status is already "cancelled", set by
+        # that request; leave it as-is instead of overwriting it below with
+        # "failed". Still refunds whatever credits this attempt already
+        # spent, same courtesy as a genuine failure.
+        if video:
+            logger.info(f"Video {video.id} rendering stopped: cancelled by the creator.")
+            try:
+                db.refresh(video)
+                if not video.is_reassembly:
+                    from src.utils.billing import refund_video_credits
+                    refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo annulée ({video.title or video.id})")
+                    if refunded:
+                        logger.info(f"Refunded {refunded} credits for cancelled video {video.id}.")
+            except Exception as cancel_err:
+                logger.error(f"Failed to finalize cancellation for video {video.id}: {cancel_err}")
+        return False
 
     except Exception as e:
         # Full exception + traceback stays server-side only — the creator
@@ -771,7 +834,7 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         try:
             video.progress_stage = "Génération de la miniature"
             db.commit()
-            thumbnail_path = youtube_metadata.generate_thumbnail(
+            thumbnail_path, _ = youtube_metadata.generate_thumbnail(
                 output_mp4, existing_thumbnail, meta.get("thumbnail_text") or meta["title"], channel=channel, video_id=video.id
             )
         except Exception as e:
@@ -807,6 +870,46 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
 
 MAX_AUTO_RESTARTS = 4
 
+
+def _wait_for_auto_video_turn(db, video: Video) -> bool:
+    """Hold automatic script preparation in the same FIFO as rendering.
+
+    Auto videos get a durable queued row as soon as the creator launches
+    them. The script writer may only start once every older non-final video
+    has finished, unless an administrator explicitly gave this row a higher
+    priority. This avoids a newer video looking active while an older one is
+    waiting, and makes the full workflow (topic, script and render) FIFO.
+    """
+    while True:
+        db.refresh(video)
+        if video.status in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+            return False
+        current_priority = int(video.admin_priority or 0)
+        older_position = or_(
+            Video.created_at < video.created_at,
+            and_(Video.created_at == video.created_at, Video.id < video.id),
+        )
+        earlier_work = (
+            db.query(Video.id)
+            .filter(
+                Video.id != video.id,
+                Video.status.in_([VideoStatus.QUEUED.value, VideoStatus.RENDERING.value]),
+                or_(
+                    Video.admin_priority > current_priority,
+                    and_(Video.admin_priority == current_priority, older_position),
+                ),
+            )
+            .first()
+        )
+        if not earlier_work:
+            return True
+        video.status = VideoStatus.QUEUED.value
+        video.progress_stage = "En attente de la vidéo précédente"
+        video.progress_percent = 0
+        db.commit()
+        time.sleep(2)
+        db.expire_all()
+
 def requeue_orphaned_videos():
     """
     On worker startup, any video still marked 'rendering' was orphaned by a
@@ -824,6 +927,7 @@ def requeue_orphaned_videos():
     db = SessionLocal()
     try:
         orphaned = db.query(Video).filter(Video.status == VideoStatus.RENDERING.value).all()
+        restart_script_ids = []
         for video in orphaned:
             video.restart_count = (video.restart_count or 0) + 1
             if video.restart_count > MAX_AUTO_RESTARTS:
@@ -849,8 +953,15 @@ def requeue_orphaned_videos():
                 video.started_at = None
                 video.progress_stage = f"En reprise après interruption du serveur (tentative {video.restart_count + 1})"
                 video.progress_percent = 0
+                # An automatic video interrupted during topic/script writing
+                # has no script yet. It is intentionally excluded from the
+                # render picker, so restart its writer after this transaction.
+                if video.creation_source == "automatic" and not (video.script_text or "").strip():
+                    restart_script_ids.append(video.id)
         if orphaned:
             db.commit()
+        for video_id in restart_script_ids:
+            threading.Thread(target=retry_auto_video_script_background, args=(video_id,), daemon=True).start()
     finally:
         db.close()
 
@@ -1250,7 +1361,13 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     try:
         validate_channel_visual_source(channel, db)
     except Exception as exc:
-        logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({exc})")
+        # The row is created only after this preflight. Without a visible
+        # failure card, an on-demand launch looked like it started and then
+        # vanished because the frontend's optimistic placeholder had nothing
+        # real to replace it with.
+        detail = getattr(exc, "detail", None) or "La source visuelle de cette chaîne n'est pas prête."
+        logger.warning(f"Daily automation: channel {channel.id} ('{channel.name}') has no usable visual source; skipping. ({detail})")
+        _record_automation_failure(db, channel, message=str(detail))
         return None
 
     # Bug history: this used to fall back to the script's own opening
@@ -1298,9 +1415,12 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         # the whole topic-research + script-writing window, which reads as
         # broken even though nothing has failed.
         title=f"{channel.name or channel.niche} — nouvelle vidéo",
-        status=VideoStatus.RENDERING.value,
-        progress_stage="Recherche du sujet",
-        progress_percent=1,
+        # A durable FIFO position is recorded before any AI work starts.
+        # The worker ignores auto rows with an empty script; this background
+        # writer claims the row only when every older video has finished.
+        status=VideoStatus.QUEUED.value,
+        progress_stage="En attente dans la file",
+        progress_percent=0,
         transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
         voice_id=getattr(channel, "voice_id", None),
     )
@@ -1308,9 +1428,43 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     db.commit()
     db.refresh(video)
 
+    if not _wait_for_auto_video_turn(db, video):
+        return None
+    video.status = VideoStatus.RENDERING.value
+    video.progress_stage = "Recherche du sujet"
+    video.progress_percent = 1
+    db.commit()
+
+    # A video may have waited minutes before its turn. Refresh its recent
+    # history now so the topic generator also avoids the titles produced by
+    # those earlier videos while it was waiting.
+    recent_video_history = (
+        db.query(Video)
+        .filter(Video.channel_id == channel.id, Video.id != video.id)
+        .order_by(Video.created_at.desc())
+        .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+        .all()
+    )
+    recent_titles = [v.title or (v.script_text or "").split("\n")[0][:120] for v in recent_video_history]
+    recent_scripts = [v.script_text for v in recent_video_history if (v.script_text or "").strip()]
+
     def _on_script_progress(stage: str, percent: int) -> None:
         video.progress_stage = stage
         video.progress_percent = percent
+        db.commit()
+
+    def _on_title_picked(title: str) -> None:
+        # Saved the moment the topic is chosen, well before the script
+        # itself is written, so "Mes Vidéos" shows the real title instead of
+        # a generic placeholder for the entire (often multi-minute) writing
+        # phase that follows.
+        video.title = title
+        db.commit()
+
+    def _on_partial_script(text: str, completed_parts: int, total_parts: int) -> None:
+        video.script_text = text
+        video.progress_stage = f"Rédaction du script · partie {completed_parts}/{total_parts}"
+        video.progress_percent = 8 + round(16 * completed_parts / max(1, total_parts))
         db.commit()
 
     result = generate_daily_script(
@@ -1321,8 +1475,11 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         default_language="French" if (owner.locale or "fr") == "fr" else "English",
         topic_examples=channel.topic_examples,
         use_web_trends=bool(channel.use_web_trends),
+        youtube_topic_sources=channel.youtube_topic_sources,
         on_progress=_on_script_progress,
         recent_scripts=recent_scripts,
+        on_title=_on_title_picked,
+        on_partial_script=_on_partial_script,
     )
     if not result:
         db.delete(video)
@@ -1491,6 +1648,16 @@ def retry_auto_video_script_background(video_id: str):
             db.commit()
             return
 
+        # Script retries obey exactly the same durable FIFO order as a new
+        # automatic launch. The render picker ignores this empty-script row
+        # until the writer has claimed its turn below.
+        if not _wait_for_auto_video_turn(db, video):
+            return
+        video.status = VideoStatus.RENDERING.value
+        video.progress_stage = "Régénération du script…"
+        video.progress_percent = 1
+        db.commit()
+
         recent_video_history = (
                 db.query(Video)
                 .filter(Video.channel_id == channel.id, Video.id != video.id)
@@ -1505,6 +1672,16 @@ def retry_auto_video_script_background(video_id: str):
             channel.automation_style_prompt,
         ])) or None
 
+        def _on_title_picked(title: str) -> None:
+            video.title = title
+            db.commit()
+
+        def _on_partial_script(text: str, completed_parts: int, total_parts: int) -> None:
+            video.script_text = text
+            video.progress_stage = f"Rédaction du script · partie {completed_parts}/{total_parts}"
+            video.progress_percent = 8 + round(16 * completed_parts / max(1, total_parts))
+            db.commit()
+
         result = generate_daily_script(
             niche=channel.niche,
             recent_titles=recent_titles,
@@ -1513,10 +1690,14 @@ def retry_auto_video_script_background(video_id: str):
             default_language="French" if (owner.locale or "fr") == "fr" else "English",
             topic_examples=channel.topic_examples,
             use_web_trends=bool(channel.use_web_trends),
+            youtube_topic_sources=channel.youtube_topic_sources,
             recent_scripts=recent_scripts,
+            on_title=_on_title_picked,
+            on_partial_script=_on_partial_script,
         )
         if not result:
             video.status = VideoStatus.FAILED.value
+            video.script_text = ""
             video.error_message = SERVICE_UNAVAILABLE_MESSAGE
             video.progress_stage = "Échec"
             db.commit()
@@ -1595,6 +1776,79 @@ def generate_and_queue_auto_video_background(channel_id: str):
             logger.warning(f"generate-now: script generation failed for channel {channel_id}.")
     except Exception as e:
         logger.warning(f"generate-now background run failed for channel {channel_id}: {e}")
+    finally:
+        db.close()
+
+
+COMMUNITY_IMAGE_TAGGING_BATCH_SIZE = 5
+COMMUNITY_IMAGE_TAGGING_INTERVAL_SECONDS = 120  # a few images every 2 minutes — steady catch-up, no burst
+
+
+def tag_untagged_community_images():
+    """Runs a vision model over a small batch of shared-library images that
+    have never been tagged, and stores the resulting keywords.
+
+    Public-library search only ever matched a source channel's NICHE — a
+    search for "chessboard" found nothing unless the sharing channel's niche
+    happened to contain that word, however clearly a chessboard was actually
+    in the picture. Tagging happens here, in the background, a handful of
+    images at a time, rather than on the search request itself: a vision call
+    is too slow/rate-limited to sit in a search's critical path, and this way
+    a burst of new shares doesn't spike search latency for everyone.
+
+    Every folder that has ever been shared is tagged here regardless of its
+    curation status (pending/approved/flagged) — search itself still only
+    reads from approved folders (see search_public_library), but classifying
+    only on approval meant a folder's very first search after being approved
+    found nothing until the tagging pass caught up. Getting there ahead of
+    approval means the catalogue is already searchable the moment an admin
+    flips the switch.
+    """
+    from src.config import STORAGE_PATH
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImageTag
+    from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
+    from src.pipeline.vision import analyze_image_content_tags
+    import mimetypes
+
+    db = SessionLocal()
+    try:
+        folders = db.query(CommunityLibraryFolder).all()
+        already_tagged = {
+            (row.channel_id, row.filename)
+            for row in db.query(CommunityLibraryImageTag.channel_id, CommunityLibraryImageTag.filename).all()
+        }
+        tagged_this_pass = 0
+        for folder in folders:
+            if tagged_this_pass >= COMMUNITY_IMAGE_TAGGING_BATCH_SIZE:
+                break
+            library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
+            if not library_dir.is_dir():
+                continue
+            for asset in sorted(library_dir.iterdir(), key=lambda item: item.name):
+                if tagged_this_pass >= COMMUNITY_IMAGE_TAGGING_BATCH_SIZE:
+                    break
+                if not asset.is_file() or asset.suffix.lower() not in ALLOWED_LIBRARY_EXTENSIONS:
+                    continue
+                if (folder.channel_id, asset.name) in already_tagged:
+                    continue
+                media_type = mimetypes.guess_type(asset.name)[0] or "image/jpeg"
+                try:
+                    tags = analyze_image_content_tags(asset.read_bytes(), media_type)
+                except Exception as exc:
+                    logger.warning(f"Content tagging failed for {folder.channel_id}/{asset.name}: {exc}")
+                    tags = []
+                db.add(CommunityLibraryImageTag(
+                    channel_id=folder.channel_id,
+                    filename=asset.name,
+                    tags_json=json.dumps(tags),
+                ))
+                db.commit()
+                already_tagged.add((folder.channel_id, asset.name))
+                tagged_this_pass += 1
+        if tagged_this_pass:
+            logger.info(f"Tagged {tagged_this_pass} community library image(s) for public-library search.")
+    except Exception as exc:
+        logger.error(f"tag_untagged_community_images failed: {exc}")
     finally:
         db.close()
 
@@ -1872,6 +2126,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_automation_check = 0.0
     last_scheduled_publish_check = 0.0
     last_youtube_identity_sync = 0.0
+    last_community_tagging = 0.0
     while not _shutdown_requested:
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
@@ -1888,6 +2143,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_youtube_identity_sync > YOUTUBE_IDENTITY_SYNC_INTERVAL_SECONDS:
             run_youtube_identity_sync()
             last_youtube_identity_sync = now
+        if now - last_community_tagging > COMMUNITY_IMAGE_TAGGING_INTERVAL_SECONDS:
+            tag_untagged_community_images()
+            last_community_tagging = now
         time.sleep(poll_interval_seconds)
 
     # SIGTERM landed — let every in-flight render lane finish its current

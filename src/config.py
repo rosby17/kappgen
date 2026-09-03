@@ -37,10 +37,11 @@ R2_FREE_TIER_CAP_BYTES = int(os.getenv("R2_FREE_TIER_CAP_BYTES", str(9_500_000_0
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
-# Product policy: video renders are plan-priority ordered and sequential. Kept as a
-# compatibility constant for older deployment configuration, but the worker
-# clamps the video lane count to one even if a stale environment variable is
-# still set higher.
+# Product policy: video renders are sequential FIFO. Only an explicit admin
+# override may move a video ahead of older work; a creator's plan never changes
+# the order. Kept as a compatibility constant for older deployment configuration,
+# but the worker clamps the video lane count to one even if a stale environment
+# variable is still set higher.
 MAX_CONCURRENT_RENDERS = 1
 # Separate, tighter cap on simultaneous Izivoice TTS/STT calls specifically —
 # Izivoice rate-limits aggressively, so this stays below MAX_CONCURRENT_RENDERS

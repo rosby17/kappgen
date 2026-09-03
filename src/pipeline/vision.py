@@ -363,6 +363,42 @@ def _run_with_fallback(steps: list) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+IMAGE_CONTENT_TAGS_INSTRUCTION = (
+    "You are indexing this image for a stock-photo search engine, exactly like Pexels or "
+    "Unsplash tag their catalogue. List 5 to 10 concrete English keywords for what is "
+    "LITERALLY visible: subjects, objects, setting, action, era, mood. Do not describe art "
+    "style, color palette, composition or medium — only content a viewer could point at. "
+    "Single words or short two-word phrases, all lowercase. "
+    'Reply with ONLY a JSON array of strings, e.g. ["chessboard","crown","throne room","medieval","candlelight"].'
+)
+
+
+def analyze_image_content_tags(image_bytes: bytes, media_type: str) -> list:
+    """Concrete searchable keywords for one image — what a stock-catalogue
+    search actually needs and a style/mood brief doesn't give: literal
+    subject matter, not art direction. Used to tag the public library so a
+    search for "chessboard" can find an image of one regardless of which
+    niche the channel that shared it happens to be in."""
+    raw = _run_with_fallback(_vision_chain([(image_bytes, media_type)], IMAGE_CONTENT_TAGS_INSTRUCTION))
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned.strip())
+    try:
+        tags = json.loads(cleaned)
+    except ValueError:
+        # A model that ignored the JSON contract still usually answers with a
+        # comma/newline-separated list — salvage plain words rather than
+        # tagging nothing.
+        tags = re.split(r"[,\n]", cleaned)
+    if not isinstance(tags, list):
+        return []
+    cleaned_tags = []
+    for tag in tags:
+        tag = re.sub(r"[^a-zA-Z0-9\s-]", "", str(tag)).strip().lower()
+        if tag and tag not in cleaned_tags:
+            cleaned_tags.append(tag)
+    return cleaned_tags[:10]
+
+
 def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
     """Analyzes a reference image and returns a reusable image-generation style prompt.
     Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI."""

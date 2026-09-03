@@ -136,13 +136,23 @@ def build_video_clip(
     output_clip_path: Path,
     duration: float,
     fps: int = 30,
+    **_unused_image_only_kwargs,
 ) -> Path:
-    """Prepare a creator-provided B-roll clip for one narration scene.
+    """Prepare a creator-provided B-roll or fetched stock clip for one
+    narration scene.
 
     The source is looped when shorter than the scene and center-cropped to the
     same 1920x1080 canvas as image scenes. Audio from the B-roll is discarded;
     the narration/mix remains the single authoritative audio track.
-    """
+
+    `**_unused_image_only_kwargs` absorbs the Ken-Burns-only parameters
+    (zoom_min_pct, zoom_max_pct, energy, scene_index, editing_profile) that
+    orchestrator.py's clip-building loop passes to whichever of this function
+    or build_image_clip a scene needs — every "video" scene (creator B-roll,
+    and since the Pexels stock-footage source, fetched clips too) was
+    crashing with a TypeError here otherwise, well before any output was
+    written, which orchestrator.py's f.result() then re-raised and failed
+    the whole render on."""
     # `format` is its own filter, not an option of `fps` — chaining it with ":"
     # made ffmpeg reject the whole graph ("Option not found"), which failed
     # every single video scene (creator B-roll included) before any output

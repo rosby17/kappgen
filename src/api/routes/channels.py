@@ -16,10 +16,11 @@ import subprocess
 import time
 import uuid
 import httpx
+from urllib.parse import quote, urlparse
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
@@ -781,6 +782,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         automation_style_prompt=payload.automation_style_prompt,
         topic_examples=payload.topic_examples,
         use_web_trends=bool(payload.use_web_trends),
+        youtube_topic_sources=payload.youtube_topic_sources,
         videos_per_day=max(1, payload.videos_per_day or 1),
         automation_window_start_hour=payload.automation_window_start_hour if payload.automation_window_start_hour is not None else 7,
         automation_window_end_hour=payload.automation_window_end_hour if payload.automation_window_end_hour is not None else 11,
@@ -883,10 +885,336 @@ def community_library_availability(niche: str, db: Session = Depends(get_db)):
     ).count()
     image_count = max(0, sum(f.image_count for f in folders) - moved_out_count) + moved_count
     return {
-        "available": image_count > 0,
+        # Pexels is the public source behind this option, so it is usable
+        # even before another KappGen creator shares media for this niche.
+        "available": bool(PEXELS_API_KEY) or image_count > 0,
         "folder_count": len(folders),
         "image_count": image_count,
     }
+
+
+@router.get("/public-library/search")
+def search_public_library(
+    query: str = "",
+    media_type: str = "photos",
+    page: int = 1,
+    per_page: int = 24,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Browse Pexels and creator-approved community images in one catalogue.
+
+    Personal libraries remain private. Only images from folders explicitly
+    shared *and approved* for the community are exposed here.
+    """
+    del current_user  # Authentication is required; no per-user data is read.
+    if media_type not in {"photos", "videos"}:
+        raise HTTPException(status_code=400, detail="Type de média invalide.")
+    clean_query = " ".join((query or "").split())[:120]
+    if not clean_query:
+        clean_query = "cinematic background"
+    safe_page = max(1, min(int(page or 1), 100))
+    safe_per_page = max(8, min(int(per_page or 24), 40))
+    # Community uploads are images today. Put them first so a creator can
+    # actually discover the material that other KappGen creators shared,
+    # rather than it being buried under a third-party catalogue.
+    items = []
+    if media_type == "photos":
+        normalized_query = clean_query.casefold()
+        query_words = {word for word in re.findall(r"\w+", normalized_query) if len(word) > 2}
+        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status == "approved").all()
+        placements = {
+            (placement.channel_id, placement.filename): placement.niche
+            for placement in db.query(CommunityLibraryImagePlacement).join(
+                CommunityLibraryFolder,
+                CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
+            ).filter(CommunityLibraryFolder.status == "approved").all()
+        }
+        # Real content keywords a background vision pass tagged each image
+        # with (see queue_runner.py's tag_untagged_community_images) — lets a
+        # search for what's literally IN the picture ("chessboard") find it
+        # regardless of the sharing channel's niche wording. A freshly shared
+        # image simply has none yet until that pass reaches it; niche
+        # matching alone still covers it in the meantime.
+        content_tags = {
+            (tag.channel_id, tag.filename): set(json.loads(tag.tags_json) or [])
+            for tag in db.query(CommunityLibraryImageTag).join(
+                CommunityLibraryFolder,
+                CommunityLibraryFolder.channel_id == CommunityLibraryImageTag.channel_id,
+            ).filter(CommunityLibraryFolder.status == "approved").all()
+        }
+        for folder in folders:
+            library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
+            if not library_dir.is_dir():
+                continue
+            for asset in sorted(library_dir.iterdir(), key=lambda item: item.name, reverse=True):
+                if not asset.is_file() or asset.suffix.lower() not in ALLOWED_LIBRARY_EXTENSIONS:
+                    continue
+                asset_niche = placements.get((folder.channel_id, asset.name), folder.niche)
+                # Exact niche matching keeps category browsing useful, while
+                # the substring fallback also supports a creator's own niche
+                # wording (for example "astronomie et espace").
+                niche_words = {word for word in re.findall(r"\w+", asset_niche.casefold()) if len(word) > 2}
+                asset_tags = content_tags.get((folder.channel_id, asset.name), set())
+                content_matches = bool(asset_tags) and any(
+                    tag == normalized_query or tag in query_words or normalized_query in tag
+                    for tag in asset_tags
+                )
+                niche_matches = (
+                    normalized_query in {"", "cinematic background"}
+                    or normalized_query in asset_niche.casefold()
+                    or asset_niche.casefold() in normalized_query
+                    or bool(query_words & niche_words)
+                    or content_matches
+                )
+                if not niche_matches:
+                    continue
+                # The frontend prepends its own API_BASE, which already ends
+                # in /api (https://api.kappgen.com/api) — a leading /api here
+                # doubled it into /api/api/channels/... and 404'd every
+                # community thumbnail, while Pexels items (whose URLs are
+                # already absolute) loaded fine and hid the bug.
+                asset_url = f"/channels/public-library/community/{folder.channel_id}/{quote(asset.name)}"
+                # _persist_generated_images_to_channel_library (images.py) names
+                # every scene image it auto-copies into a channel's shared
+                # library "generated_N.ext" — a reliable, already-existing
+                # marker for "KappGen's own AI made this", as opposed to
+                # something the creator uploaded themselves. Surfaced as a
+                # distinct provider so a browsing creator can tell which is
+                # which, rather than both reading as generic "community".
+                is_ai_generated = asset.name.startswith("generated_")
+                items.append({
+                    "id": f"community-{folder.channel_id}-{asset.name}",
+                    "type": "photos",
+                    "provider": "ai_generated" if is_ai_generated else "community",
+                    # Small cached JPEG for the grid; the original (asset_url,
+                    # unchanged) is what the preview/import/render actually use.
+                    "thumbnail_url": f"{asset_url}/thumb",
+                    "asset_url": asset_url,
+                    "source_url": None,
+                    "author": "KappGen AI" if is_ai_generated else "Communauté KappGen",
+                    "author_url": None,
+                    "width": None,
+                    "height": None,
+                    "duration": None,
+                    "alt": asset_niche,
+                    # Kept explicit (rather than parsed back out of `id`) so the
+                    # import endpoint gets an unambiguous, unencoded source
+                    # instead of re-splitting a hyphen-joined id string.
+                    "source_channel_id": folder.channel_id,
+                    "source_filename": asset.name,
+                })
+                if len(items) >= safe_per_page:
+                    break
+            if len(items) >= safe_per_page:
+                break
+
+    payload = {}
+    if PEXELS_API_KEY and len(items) < safe_per_page:
+        url = "https://api.pexels.com/v1/search" if media_type == "photos" else "https://api.pexels.com/videos/search"
+        params = {"query": clean_query, "page": safe_page, "per_page": safe_per_page - len(items), "orientation": "landscape"}
+        try:
+            response = httpx.get(url, headers={"Authorization": PEXELS_API_KEY}, params=params, timeout=12.0)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            logger.warning("Pexels public library search failed: %s", exc)
+            if not items:
+                raise HTTPException(status_code=502, detail="Impossible de charger les ressources publiques. Réessaie dans un instant.")
+
+    if not PEXELS_API_KEY and not items:
+        raise HTTPException(status_code=503, detail="La bibliothèque publique est momentanément indisponible.")
+
+    raw_items = payload.get("photos", []) if media_type == "photos" else payload.get("videos", [])
+    for item in raw_items:
+        if media_type == "photos":
+            source = item.get("src") or {}
+            thumbnail = source.get("large") or source.get("medium") or source.get("original")
+            author = item.get("photographer") or "Pexels"
+            author_url = item.get("photographer_url")
+            duration = None
+        else:
+            pictures = item.get("image") or ""
+            files = item.get("video_files") or []
+            playable = next((f.get("link") for f in files if f.get("quality") in {"sd", "hd"} and f.get("link")), None)
+            thumbnail = pictures
+            author = (item.get("user") or {}).get("name") or "Pexels"
+            author_url = (item.get("user") or {}).get("url")
+            duration = item.get("duration")
+            source = {"original": playable}
+        if not thumbnail:
+            continue
+        items.append({
+            "id": str(item.get("id")),
+            "type": media_type,
+            "provider": "pexels",
+            "thumbnail_url": thumbnail,
+            "source_url": item.get("url"),
+            "asset_url": source.get("original"),
+            "author": author,
+            "author_url": author_url,
+            "width": item.get("width"),
+            "height": item.get("height"),
+            "duration": duration,
+            "alt": item.get("alt") or clean_query,
+        })
+    return {"query": clean_query, "media_type": media_type, "page": safe_page, "per_page": safe_per_page, "items": items, "has_next": bool(payload.get("next_page"))}
+
+
+def _resolve_approved_community_asset(db: Session, channel_id: str, filename: str) -> Path:
+    folder = db.query(CommunityLibraryFolder).filter(
+        CommunityLibraryFolder.channel_id == channel_id,
+        CommunityLibraryFolder.status == "approved",
+    ).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Ressource publique introuvable.")
+    library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
+    candidate = (library_dir / filename).resolve()
+    if candidate.parent != library_dir or not candidate.is_file() or candidate.suffix.lower() not in ALLOWED_LIBRARY_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Ressource publique introuvable.")
+    return candidate
+
+
+@router.get("/public-library/community/{channel_id}/{filename}")
+def get_public_community_library_image(channel_id: str, filename: str, db: Session = Depends(get_db)):
+    """Serve one approved shared image, full resolution — used for the
+    expanded preview, the video render, and 'Ajouter à cette chaîne', never
+    for the browsing grid (see the /thumb endpoint below for that)."""
+    candidate = _resolve_approved_community_asset(db, channel_id, filename)
+    return FileResponse(candidate, headers={"Cache-Control": "public, max-age=3600"})
+
+
+_PUBLIC_LIBRARY_THUMB_MAX_WIDTH = 480
+_PUBLIC_LIBRARY_THUMB_QUALITY = 70
+
+
+@router.get("/public-library/community/{channel_id}/{filename}/thumb")
+def get_public_community_library_thumbnail(channel_id: str, filename: str, db: Session = Depends(get_db)):
+    """A small, cached JPEG for the browsing grid.
+
+    The grid was serving each community image at its full render resolution
+    — the same file the pipeline burns into a video — which is exactly why it
+    loaded far slower than the Pexels rows above it (Pexels already returns a
+    pre-sized 'large' variant for thumbnails). Resized once, cached to disk
+    next to the original, and reused on every later request; the full-quality
+    original is untouched and still what actually gets imported/rendered."""
+    from PIL import Image
+    import io
+
+    candidate = _resolve_approved_community_asset(db, channel_id, filename)
+    thumb_dir = candidate.parent / ".public_thumbs"
+    thumb_path = thumb_dir / f"{candidate.name}.jpg"
+    if not thumb_path.is_file() or thumb_path.stat().st_mtime < candidate.stat().st_mtime:
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        with Image.open(candidate) as image:
+            image = image.convert("RGB")
+            if image.width > _PUBLIC_LIBRARY_THUMB_MAX_WIDTH:
+                ratio = _PUBLIC_LIBRARY_THUMB_MAX_WIDTH / image.width
+                image = image.resize((_PUBLIC_LIBRARY_THUMB_MAX_WIDTH, max(1, round(image.height * ratio))), Image.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, "JPEG", quality=_PUBLIC_LIBRARY_THUMB_QUALITY, optimize=True)
+            thumb_path.write_bytes(buffer.getvalue())
+    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+
+
+class PublicLibraryImportPayload(BaseModel):
+    provider: str  # "pexels" | "community"
+    media_type: str  # "photos" | "videos"
+    asset_url: Optional[str] = None  # required for provider="pexels"
+    source_channel_id: Optional[str] = None  # required for provider="community"
+    source_filename: Optional[str] = None  # required for provider="community"
+
+
+# Only ever fetched server-side for a provider="pexels" import — restricting
+# the host before making the request closes the SSRF hole a client-supplied
+# URL would otherwise open (a creator's browser can only ever hand us a real
+# Pexels asset_url to begin with, but the backend must not trust that alone).
+_PEXELS_ASSET_HOSTS = {"images.pexels.com", "videos.pexels.com", "player.vimeo.com"}
+
+
+@router.post("/{channel_id}/public-library/import")
+async def import_public_library_asset(
+    channel_id: str,
+    payload: PublicLibraryImportPayload,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Copies one Pexels or community-shared asset into a creator's OWN
+    channel library/B-roll folder, so it's actually usable in a render — the
+    public catalogue is browsable but was otherwise a dead end: nothing there
+    fed the pipeline until a creator brought it into their own niche folder."""
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    if payload.media_type not in {"photos", "videos"}:
+        raise HTTPException(status_code=400, detail="Type de média invalide.")
+
+    if payload.provider == "community":
+        if not (payload.source_channel_id and payload.source_filename):
+            raise HTTPException(status_code=400, detail="Ressource communautaire incomplète.")
+        folder = db.query(CommunityLibraryFolder).filter(
+            CommunityLibraryFolder.channel_id == payload.source_channel_id,
+            CommunityLibraryFolder.status == "approved",
+        ).first()
+        if not folder:
+            raise HTTPException(status_code=404, detail="Ressource communautaire introuvable.")
+        source_dir = (STORAGE_PATH / "channels" / payload.source_channel_id / "library").resolve()
+        source_path = (source_dir / payload.source_filename).resolve()
+        if source_path.parent != source_dir or not source_path.is_file() or source_path.suffix.lower() not in ALLOWED_LIBRARY_EXTENSIONS:
+            raise HTTPException(status_code=404, detail="Ressource communautaire introuvable.")
+        contents = source_path.read_bytes()
+        ext = source_path.suffix.lower()
+    elif payload.provider == "pexels":
+        if not payload.asset_url:
+            raise HTTPException(status_code=400, detail="Ressource Pexels incomplète.")
+        host = urlparse(payload.asset_url).hostname or ""
+        if host not in _PEXELS_ASSET_HOSTS:
+            raise HTTPException(status_code=400, detail="Source non autorisée.")
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(payload.asset_url)
+                resp.raise_for_status()
+                contents = resp.content
+        except httpx.HTTPError as exc:
+            logger.warning("Public-library import fetch failed: %s", exc)
+            raise HTTPException(status_code=502, detail="Téléchargement de la ressource impossible. Réessaie dans un instant.")
+        guessed_ext = Path(urlparse(payload.asset_url).path).suffix.lower()
+        ext = guessed_ext if payload.media_type == "photos" else (guessed_ext or ".mp4")
+        if payload.media_type == "photos" and ext not in ALLOWED_LIBRARY_EXTENSIONS:
+            ext = ".jpg"
+        if payload.media_type == "videos" and ext not in ALLOWED_BROLL_EXTENSIONS:
+            ext = ".mp4"
+    else:
+        raise HTTPException(status_code=400, detail="Fournisseur invalide.")
+
+    if not contents:
+        raise HTTPException(status_code=502, detail="Ressource vide, importation impossible.")
+
+    if payload.media_type == "photos":
+        if len(contents) > MAX_IMAGE_UPLOAD_BYTES:
+            raise HTTPException(status_code=400, detail=f"Image trop volumineuse (max {MAX_IMAGE_UPLOAD_BYTES // (1024*1024)} Mo).")
+        library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+        library_dir.mkdir(parents=True, exist_ok=True)
+        existing = len(list(library_dir.glob("img_*")))
+        _write_library_image(library_dir / f"img_{existing:04d}_{uuid.uuid4().hex[:8]}{ext}", ext, contents)
+        style = dict(channel.image_style or {})
+        style["library_image_count"] = len([f for f in library_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_LIBRARY_EXTENSIONS])
+        channel.image_style = style
+    else:
+        if len(contents) > MAX_BROLL_UPLOAD_BYTES:
+            raise HTTPException(status_code=400, detail=f"Vidéo trop volumineuse (max {MAX_BROLL_UPLOAD_BYTES // (1024*1024)} Mo).")
+        broll_dir = STORAGE_PATH / "channels" / channel.id / "broll"
+        broll_dir.mkdir(parents=True, exist_ok=True)
+        (broll_dir / f"{uuid.uuid4().hex[:8]}_public-library{ext}").write_bytes(contents)
+        style = dict(channel.image_style or {})
+        style["broll_path"] = f"channels/{channel.id}/broll"
+        style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])
+        channel.image_style = style
+
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
 
 @router.put("/{channel_id}")
 def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -962,6 +1290,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.topic_examples = payload.topic_examples
     if payload.use_web_trends is not None:
         channel.use_web_trends = payload.use_web_trends
+    if payload.youtube_topic_sources is not None:
+        channel.youtube_topic_sources = payload.youtube_topic_sources
     if payload.videos_per_day is not None:
         channel.videos_per_day = max(1, payload.videos_per_day)
     if payload.automation_window_start_hour is not None:
@@ -1084,6 +1414,16 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
     can_render, reason = user_can_render(db, current_user)
     if not can_render:
         raise HTTPException(status_code=402, detail=reason)
+
+    # Do this before replying "C'est lancé". Previously this validation ran
+    # only in the background worker; when a channel had no actual media in
+    # its selected library/community source (or its AI visual option was not
+    # available on the plan), the client briefly showed its optimistic card
+    # and then removed it because no real Video row was ever created.
+    # Returning the actionable validation message here makes the missing
+    # source a configuration error the creator can fix, not a ghost launch.
+    from src.api.routes.videos import validate_channel_visual_source
+    validate_channel_visual_source(channel, db)
 
     from threading import Thread
     from src.worker.queue_runner import generate_and_queue_auto_video_background

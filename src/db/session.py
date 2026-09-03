@@ -85,7 +85,9 @@ def init_db():
             "expiry_warning_sent_at": "ALTER TABLE videos ADD COLUMN expiry_warning_sent_at TIMESTAMP",
             "downloaded_at": "ALTER TABLE videos ADD COLUMN downloaded_at TIMESTAMP",
             "thumbnail_regenerating": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating BOOLEAN DEFAULT FALSE NOT NULL",
+            "thumbnail_regenerating_started_at": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating_started_at TIMESTAMP",
             "thumbnail_updated_at": "ALTER TABLE videos ADD COLUMN thumbnail_updated_at TIMESTAMP",
+            "thumbnail_error": "ALTER TABLE videos ADD COLUMN thumbnail_error TEXT",
             "admin_priority": "ALTER TABLE videos ADD COLUMN admin_priority INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:
@@ -174,6 +176,7 @@ def init_db():
             "music_channel_config": "ALTER TABLE channels ADD COLUMN music_channel_config JSON",
             "topic_examples": "ALTER TABLE channels ADD COLUMN topic_examples TEXT",
             "use_web_trends": "ALTER TABLE channels ADD COLUMN use_web_trends BOOLEAN DEFAULT FALSE NOT NULL",
+            "youtube_topic_sources": "ALTER TABLE channels ADD COLUMN youtube_topic_sources TEXT",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

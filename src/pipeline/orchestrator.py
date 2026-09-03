@@ -172,9 +172,16 @@ def run_video_pipeline(
             prompts = directed_prompts + prompts[len(directed_prompts):]
 
     media_mode = image_style_cfg.get("media_mode", "images")
+    # The manual "Nombre précis" count is source-agnostic (see
+    # fetch_or_generate_images) — pass it through whenever the creator set
+    # one, whether or not AI generation is enabled for this channel. In
+    # "auto" mode, fall back to no cap at all (not the AI-only 10-minute
+    # heuristic above, which only makes sense when the count also caps a
+    # paid AI call).
+    unique_visual_count = ai_unique_scene_count if max_unique_images else None
     image_paths = [] if media_mode == "videos" else fetch_or_generate_images(
         prompts, images_dir, image_style_cfg,
-        unique_generation_count=ai_unique_scene_count if ai_enabled else None,
+        unique_generation_count=unique_visual_count,
         user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
     )
 
@@ -205,15 +212,18 @@ def run_video_pipeline(
             visual_types[i] = "video"
         logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
 
-    # Free stock footage (Pexels) fills the scenes the creator's own clips
-    # don't cover — real motion instead of a Ken Burns pan over a still,
-    # which is the clearest visual difference between an automated montage
-    # and a hand-cut one. Rides along with the "community" source rather than
-    # being its own toggle: both are the same promise to the creator ("free
-    # visuals I don't have to provide myself"), and stock keeps that promise
-    # even for a niche whose shared pool is still empty. Costs the creator
-    # nothing (see stock_video.py) and is entirely best-effort: no key, no
-    # match, or a failed download simply leaves that scene on its image.
+    # Stock footage (Pexels) fills the scenes the creator's own clips don't
+    # cover — real motion instead of a Ken Burns pan over a still, which is
+    # the clearest visual difference between an automated montage and a
+    # hand-cut one. Rides along with the "community" source rather than
+    # being its own toggle: both are the same promise to the creator ("I
+    # don't have to provide these visuals myself"), and stock keeps that
+    # promise even for a niche whose shared pool is still empty. Pexels
+    # itself is free to KappGen, but per product decision no asset renders
+    # invisibly/for free to the creator — a token STOCK_MEDIA_CREDITS charge
+    # applies per clip/photo actually used (debited only once it's confirmed
+    # usable, so a failed download or an unaffordable balance never bills
+    # anything and simply leaves that scene on its fallback image).
     if "community" in enabled_sources:
         from src.config import PEXELS_API_KEY
         if not PEXELS_API_KEY:
@@ -221,6 +231,18 @@ def run_video_pipeline(
         else:
             from src.pipeline.scene_director import build_stock_search_queries
             from src.pipeline.stock_video import fetch_stock_clips
+            from src.utils.billing import debit_izivoice_usage_by_user_id, STOCK_MEDIA_CREDITS
+            user_id = channel_config.get("user_id")
+
+            def _bill_stock_asset() -> bool:
+                # Fails open (returns True, i.e. allows the asset) if there's
+                # no user to bill — a channel with no owner is an edge case
+                # elsewhere in the pipeline too, not something this specific
+                # billing step should be the one to newly break on.
+                if not user_id:
+                    return True
+                return debit_izivoice_usage_by_user_id(user_id, STOCK_MEDIA_CREDITS, "stock_media", video_id=video_id)
+
             # Only scenes still without footage are worth a query/download.
             open_indices = [i for i in range(len(segments)) if visual_types[i] != "video"]
             if open_indices:
@@ -231,11 +253,13 @@ def run_video_pipeline(
                 if queries:
                     progress("Recherche de séquences vidéo", 45)
                     clips = fetch_stock_clips(queries)
+                    billed_clips = {}
                     for position, scene_index in enumerate(open_indices):
                         clip_path = clips.get(position)
-                        if clip_path:
+                        if clip_path and _bill_stock_asset():
                             visual_paths[scene_index] = clip_path
                             visual_types[scene_index] = "video"
+                            billed_clips[position] = clip_path
                     # Scenes footage didn't cover, and that have no image
                     # either (AI tier off/out of quota, empty libraries),
                     # take a real stock photograph rather than the synthetic
@@ -246,19 +270,19 @@ def run_video_pipeline(
                         if visual_types[scene_index] == "video" or visual_paths[scene_index]:
                             continue
                         photo_path = fetch_stock_photo(queries[position])
-                        if photo_path:
+                        if photo_path and _bill_stock_asset():
                             visual_paths[scene_index] = photo_path
                             photo_count += 1
                     if photo_count:
-                        logger.info(f"Stock photos: {photo_count} scene(s) filled from Pexels.")
-                    if clips:
-                        logger.info(f"Stock footage: {len(clips)} scene(s) filled from Pexels.")
+                        logger.info(f"Stock photos: {photo_count} scene(s) filled from Pexels ({photo_count * STOCK_MEDIA_CREDITS} credits billed).")
+                    if billed_clips:
+                        logger.info(f"Stock footage: {len(billed_clips)} scene(s) filled from Pexels ({len(billed_clips) * STOCK_MEDIA_CREDITS} credits billed).")
                         # Pexels' API terms require crediting the platform and
                         # recommend crediting the videographer — persisted here
                         # so the publisher can append real credits to the
                         # description (see youtube_metadata.stock_credits_block).
                         from src.pipeline.stock_video import collect_attributions
-                        credits = collect_attributions(list(clips.values()))
+                        credits = collect_attributions(list(billed_clips.values()))
                         if credits:
                             (source_dir / "stock_credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
 

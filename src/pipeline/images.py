@@ -688,13 +688,18 @@ def fetch_or_generate_images(
         # one combined pool of whichever of library/community are enabled —
         # get_image_pool already merges and shuffles both together, with
         # synthetic art as the final safety net if truly nothing is available.
+        # A manual unique_generation_count (see the "no AI" branch below for
+        # the full rationale) caps this pool to the same N distinct images
+        # before cycling, same as the AI branch above.
         still_needed = sum(1 for r in results if r is None)
         if still_needed:
-            pool = iter(get_image_pool(
-                output_dir, still_needed,
+            pool_target = min(still_needed, unique_generation_count) if unique_generation_count else still_needed
+            distinct_pool = get_image_pool(
+                output_dir, pool_target,
                 custom_library_path=library_path if "library" in enabled else None,
                 additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
-            ))
+            )
+            pool = iter(expand_randomly(distinct_pool, still_needed))
             for i, r in enumerate(results):
                 if r is None:
                     results[i] = next(pool, None)
@@ -726,12 +731,28 @@ def fetch_or_generate_images(
     # hard failure; validate_channel_visual_source in videos.py is the real
     # pre-flight gate that stops a channel with nothing at all configured
     # from ever reaching this point).
+    #
+    # The "Nombre précis" visual-count setting (image_style.max_unique_images)
+    # applies here too, not just to AI generation — it's a source-agnostic
+    # promise ("use at most N distinct visuals, repeat them") rather than an
+    # AI-only budget lever. It can only ever LIMIT which of the creator's own
+    # existing images get cycled, though: it has no way to conjure up new
+    # library/community images that were never uploaded in the first place —
+    # a small pool set to "auto" already uses everything available.
     community_files = _approved_community_library_files(niche) if "community" in enabled else []
     logger.info(
         f"No AI generation enabled — using {'library' if 'library' in enabled else ''}"
         f"{' + ' if 'library' in enabled and 'community' in enabled else ''}"
         f"{f'community ({len(community_files)} image(s))' if 'community' in enabled else ''} for {len(prompts)} segment(s)."
     )
+    if unique_generation_count:
+        distinct_pool = get_image_pool(
+            output_dir,
+            min(len(prompts), unique_generation_count),
+            custom_library_path=library_path if "library" in enabled else None,
+            additional_library_files=community_files,
+        )
+        return expand_randomly(distinct_pool, len(prompts))
     return get_image_pool(
         output_dir,
         len(prompts),

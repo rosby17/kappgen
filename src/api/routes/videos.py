@@ -1,8 +1,9 @@
 import uuid
 import re
+import json
 import shutil
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
@@ -10,7 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, CommunityLibraryFolder, CommunityLibraryImagePlacement
+from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
@@ -18,7 +19,7 @@ from src.pipeline.transcode import ensure_sd_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
 from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluate_script_compliance, build_compliance_dossier
-from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail
+from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail, generate_contextual_thumbnail_headline
 from src.utils.logger import logger
 from src.utils.auth import get_current_user
 from src.utils.billing import user_can_render, estimate_video_cost_credits
@@ -45,13 +46,10 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     nothing real to draw from at all.
 
     AI generation, once enabled and allowed by the account's tier, is
-    trusted without a pre-check here: it runs through free-tier Hugging
-    Face and already falls through gracefully per-image to whichever other
-    sources are enabled (and finally to generic synthetic art) on its own
-    failure — see fetch_or_generate_images — so there's nothing further to
-    validate upfront. Without AI enabled, at least one of library/community
-    must actually have real images now, or queuing is blocked with a clear
-    message instead of silently rendering placeholder-only art."""
+    trusted without a pre-check here. The community source is trusted too:
+    it means both curated creator media *and* KappGen's Pexels stock search,
+    which discovers free visuals per scene at render time. A niche therefore
+    does not need a pre-existing community upload to launch."""
     from src.pipeline.images import resolve_enabled_image_sources
     image_style = channel.image_style or {}
     media_mode = image_style.get("media_mode", "images")
@@ -76,6 +74,14 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
             )
         return
 
+    # "Bibliothèque communautaire" is not only an existing database folder.
+    # During assembly it also activates Pexels image/video search from each
+    # scene's content (or a safe visual fallback if a stock result is absent).
+    # Rejecting the launch merely because no contributor had uploaded to this
+    # exact niche contradicted the UI's promise of free ready-to-use media.
+    if "community" in enabled:
+        return
+
     has_real_source = False
     if media_mode != "videos" and "library" in enabled:
         library_path = str(image_style.get("library_path") or "")
@@ -87,20 +93,6 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
             item.is_file() and item.suffix.lower() in LIBRARY_IMAGE_EXTENSIONS
             for item in library_dir.iterdir()
         ))
-    if media_mode != "videos" and "community" in enabled:
-        has_approved_folder = db.query(CommunityLibraryFolder).filter(
-            CommunityLibraryFolder.status == "approved",
-            CommunityLibraryFolder.niche.ilike(channel.niche or ""),
-        ).first() is not None
-        if not has_approved_folder:
-            has_approved_folder = db.query(CommunityLibraryImagePlacement).join(
-                CommunityLibraryFolder,
-                CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
-            ).filter(
-                CommunityLibraryFolder.status == "approved",
-                CommunityLibraryImagePlacement.niche.ilike(channel.niche or ""),
-            ).first() is not None
-        has_real_source = has_real_source or has_approved_folder
     if media_mode == "videos":
         broll_path = str(image_style.get("broll_path") or "")
         expected_prefix = f"channels/{channel.id}/broll"
@@ -407,12 +399,38 @@ def _video_cost_transactions(db: Session, video: Video, user_id: str):
     return query.order_by(CreditTransaction.created_at.asc()).all()
 
 
+# Raw CreditTransaction.description strings (e.g. "voiceover_tts (46428 cr.
+# Izivoice x1.0)") are written for admin bookkeeping — provider name,
+# multiplier, real cost. A creator doesn't need to know it went through
+# Izivoice at x1.0, just what it paid for; matched by prefix and swapped for
+# a plain label here, admin's own view (which reuses the same
+# _video_cost_transactions helper) is untouched.
+_CLIENT_COST_LABELS = [
+    (re.compile(r"^ai_thumbnail_generation\b"), "Miniature générée par IA"),
+    (re.compile(r"^voiceover_tts\b"), "Voix off (synthèse vocale)"),
+    (re.compile(r"^transcription_stt\b"), "Transcription (sous-titres)"),
+    (re.compile(r"^ai_music_generation\b"), "Musique générée par IA"),
+    (re.compile(r"^music_video_generation\b"), "Génération de la vidéo musicale"),
+    (re.compile(r"^stock_media\b"), "Séquence / photo de stock (Pexels)"),
+    (re.compile(r"^Génération auto de script\b"), "Script généré automatiquement"),
+    (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de rendu"),
+    (re.compile(r"^Conservation vidéo\b"), "Conservation prolongée"),
+]
+
+
+def _client_cost_label(description: str) -> str:
+    for pattern, label in _CLIENT_COST_LABELS:
+        if pattern.match(description or ""):
+            return label
+    return description or "Autre"
+
+
 @router.get("/{video_id}/cost-recap")
 def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Itemized "what did this video cost" breakdown, shown right after a render finishes."""
     video = _get_owned_video(db, video_id, current_user)
     transactions = _video_cost_transactions(db, video, current_user.id)
-    items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
+    items = [{"description": _client_cost_label(t.description), "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
 def _download_filename(video: Video, suffix: str) -> str:
@@ -769,7 +787,7 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     # generate one from scratch for a legacy video that never got one.
     thumbnail_path = video_path.with_name("thumbnail.jpg")
     if not thumbnail_path.exists():
-        thumbnail_path = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
+        thumbnail_path, _ = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
@@ -796,7 +814,23 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             history_dir.mkdir(parents=True, exist_ok=True)
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
             shutil.copy2(current, archive)
-        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)
+        # A manual thumbnail regeneration is explicitly a fresh creative
+        # request. Re-read the actual script here instead of recycling the
+        # previous caption (which may have been an old, title-derived draft).
+        video.thumbnail_text = generate_contextual_thumbnail_headline(
+            script=video.script_text or "",
+            title=video.title or "",
+            niche=(channel.niche or ""),
+            draft=video.thumbnail_text or "",
+        )
+        db.commit()
+        # strict=True whenever the channel actually has a reference style —
+        # same "no generic placeholder" rule as the automatic pipeline (see
+        # queue_runner.py): a manual regeneration request should fail
+        # clearly, not silently swap one mediocre image for another.
+        thumbnail_style = channel.thumbnail_style or {}
+        strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
+        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
         succeeded = True
     except Exception as e:
         logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
@@ -810,6 +844,11 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
                     # after regenerating never reuses the old, now-stale image
                     # URL (see the field's own comment in db/models.py).
                     video.thumbnail_updated_at = datetime.utcnow()
+                    video.thumbnail_error = None
+                else:
+                    video.thumbnail_error = (
+                        "La miniature n'a pas pu être régénérée dans le style de la chaîne. Réessaie dans quelques minutes."
+                    )
                 db.commit()
         except Exception:
             pass
@@ -839,10 +878,19 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     video_path = STORAGE_PATH / video.output_path if video.output_path else None
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
-    if video.thumbnail_regenerating:
+    # A stuck flag from a server restart mid-regeneration (the background
+    # thread is a daemon with no persistence of its own) must never block
+    # every future attempt forever — past a generous timeout, treat it as
+    # orphaned and let this request take over rather than 409ing endlessly.
+    stale_cutoff = datetime.utcnow() - timedelta(minutes=5)
+    if video.thumbnail_regenerating and (
+        video.thumbnail_regenerating_started_at is None
+        or video.thumbnail_regenerating_started_at > stale_cutoff
+    ):
         raise HTTPException(status_code=409, detail="Une régénération est déjà en cours pour cette vidéo.")
 
     video.thumbnail_regenerating = True
+    video.thumbnail_regenerating_started_at = datetime.utcnow()
     db.commit()
     threading.Thread(target=_regenerate_thumbnail_background, args=(video_id,), daemon=True).start()
     return {"status": "started"}
@@ -898,10 +946,34 @@ def list_channel_videos(channel_id: str, current_user: User = Depends(get_curren
     _backfill_trust_scores(db, videos)
     return [v.to_dict() for v in videos]
 
+@router.post("/{video_id}/cancel")
+def cancel_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Lets a creator stop a video that's still queued or actively rendering
+    — so they're never stuck watching a render play out to a result they
+    already know they don't want. Just flips the status; the worker's own
+    update_progress checks it between pipeline stages (see queue_runner.py's
+    VideoCancelledError) and stops there, refunding whatever credits that
+    attempt already spent. A queued-but-not-yet-picked-up video is simply
+    never claimed by the worker (its claiming query filters status='queued')."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status not in (VideoStatus.QUEUED.value, VideoStatus.RENDERING.value):
+        raise HTTPException(status_code=409, detail="Cette vidéo n'est plus en cours de génération.")
+    video.status = VideoStatus.CANCELLED.value
+    video.progress_stage = "Annulée par le créateur"
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 @router.post("/{video_id}/retry")
 def retry_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
     channel = video.channel
+    # A retry isn't a new submission — the creator already waited once for
+    # this exact video. Bumping admin_priority puts it ahead of freshly
+    # launched (priority 0) videos in the worker's claiming order instead of
+    # going to the back of the whole queue behind newer requests.
+    video.admin_priority = max(video.admin_priority or 0, 1)
 
     estimated_cost = estimate_video_cost_credits(
         script_char_count=len((video.script_text or "").strip()) if video.input_type == "text" else 0,
@@ -926,23 +998,18 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
     if not (video.script_text or "").strip() and channel and channel.automation_mode == "auto" and channel.content_type != "music":
         from threading import Thread
         from src.worker.queue_runner import retry_auto_video_script_background
-        # RENDERING, not QUEUED: the render lane's picker claims any 'queued'
-        # row within ~2s of it appearing, but the script isn't written yet —
-        # retry_auto_video_script_background() below runs in the background
-        # and only flips this to QUEUED once it actually has one. Marking it
-        # QUEUED here let the render lane grab it mid-regeneration and crash
-        # on the "script is empty" guard in process_single_queued_video()
-        # (seen in production logs, e.g. video 06856f5a — picked up and
-        # failed twice, seconds after each retry, while the AI call was
-        # still in flight or had already failed silently in the background).
-        video.status = VideoStatus.RENDERING.value
+        # The render picker explicitly ignores automatic rows whose script is
+        # still empty. Keeping this retry QUEUED gives it its proper FIFO
+        # position before the background writer starts, rather than making a
+        # newer retry look active ahead of an older render.
+        video.status = VideoStatus.QUEUED.value
         # A manual retry starts a new interruption budget. Without this reset,
         # a video that already reached the automatic-restart ceiling fails
         # immediately on the very next server restart, making the Retry button
         # effectively useless.
         video.restart_count = 0
         video.error_message = None
-        video.progress_stage = "Régénération du script…"
+        video.progress_stage = "En attente dans la file"
         video.progress_percent = 0
         db.commit()
         Thread(target=retry_auto_video_script_background, args=(video.id,), daemon=True).start()
@@ -959,6 +1026,54 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
 
     return video.to_dict()
 
+
+@router.post("/{video_id}/retry-visuals")
+def retry_video_visuals(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-runs only the visual side of a rendered video — images/clips and
+    the final assembly — while keeping the already-generated voiceover
+    exactly as-is, for when the audio/narration is fine but the visuals
+    weren't (e.g. an empty stock-footage/library pool that fell all the way
+    through to plain synthetic gradient art). Unlike /retry (a full re-run)
+    or the scene-editor's is_reassembly path (re-muxes EXISTING clips
+    unchanged), this clears the images/clips/scenes.json so
+    run_video_pipeline's own checkpoint logic regenerates every scene's
+    visual fresh — while that same checkpoint logic reuses voiceover.mp3 +
+    transcript.json untouched, since neither is deleted here."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status not in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+        raise HTTPException(status_code=409, detail="Cette vidéo doit être terminée ou en échec pour relancer uniquement le montage.")
+    channel = video.channel
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    source_dir = video_dir / "source"
+    voiceover_path = source_dir / "voiceover.mp3"
+    if not voiceover_path.exists():
+        raise HTTPException(status_code=409, detail="La voix off de cette vidéo n'est plus disponible sur le serveur — utilise « Relancer » (rendu complet) à la place.")
+
+    for rel in ("images", "clips"):
+        target = source_dir / rel
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+    for filename in ("scenes.json", "subtitles.ass"):
+        target = source_dir / filename
+        if target.exists():
+            target.unlink()
+
+    video.status = VideoStatus.QUEUED.value
+    video.is_reassembly = False
+    video.restart_count = 0
+    # This video already finished once — a creator retrying its visuals
+    # shouldn't wait behind every freshly launched video ahead of it.
+    video.admin_priority = max(video.admin_priority or 0, 1)
+    video.error_message = None
+    video.progress_stage = "En attente (relance du montage — voix off conservée)"
+    video.progress_percent = 0
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 class VideoUpdate(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None
@@ -966,6 +1081,12 @@ class VideoUpdate(BaseModel):
     approved_for_publish: Optional[bool] = None
     extended_retention: Optional[bool] = None
     retention_days: Optional[int] = None
+    # Opportunistic script edit — see update_video below: only takes effect
+    # while the video is still 'queued', on a best-effort basis (no delay is
+    # introduced to let a creator "catch" it; the worker may already have
+    # claimed it by the time this request lands, in which case it's rejected
+    # with a clear message instead of silently doing nothing).
+    script_text: Optional[str] = None
 
 @router.patch("/{video_id}")
 def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -979,6 +1100,21 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
 
     if payload.approved_for_publish is not None:
         video.approved_for_publish = payload.approved_for_publish
+
+    if payload.script_text is not None:
+        # Opportunity window, not a gate: the worker isn't held up waiting
+        # for a creator to look — this only succeeds if the video is still
+        # sitting in 'queued' at the moment the request arrives. Once it's
+        # been claimed ('rendering' or later), the script is already
+        # committed to the pipeline and editing it here would silently do
+        # nothing useful — better to say so plainly.
+        if video.status != VideoStatus.QUEUED.value:
+            raise HTTPException(status_code=409, detail="Le rendu de cette vidéo a déjà démarré — le script ne peut plus être modifié.")
+        new_script = payload.script_text.strip()
+        if video.input_type == "text" and len(new_script) < 40:
+            raise HTTPException(status_code=400, detail="Le script est trop court (40 caractères minimum).")
+        video.script_text = new_script
+        video.estimated_duration_seconds = max(3.0, len(new_script.split()) / 2.5)
 
     if payload.retention_days is not None:
         from datetime import timedelta
@@ -1026,6 +1162,106 @@ def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
         )
     import json
     return json.loads(scenes_path.read_text(encoding="utf-8"))
+
+
+@router.get("/{video_id}/production-progress")
+def get_video_production_progress(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Expose safe, progressively-created production artifacts to the owner."""
+    video = _get_owned_video(db, video_id, current_user)
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    source_dir = video_dir / "source"
+    transcript_path = source_dir / "transcript.json"
+    scenes_path = source_dir / "scenes.json"
+    audio_path = source_dir / "voiceover.mp3"
+    subtitles_path = source_dir / "subtitles.ass"
+    output_path = video_dir / "output.mp4"
+
+    transcript = None
+    if transcript_path.exists():
+        try:
+            transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        except Exception:
+            transcript = None
+
+    scenes = []
+    if scenes_path.exists():
+        try:
+            manifest = json.loads(scenes_path.read_text(encoding="utf-8"))
+            scenes = [{
+                "index": item.get("index", index),
+                "start": item.get("start"),
+                "end": item.get("end"),
+                "duration": item.get("duration"),
+                "text": item.get("text") or "",
+                "visual_type": item.get("visual_type") or "image",
+                "image_url": f"/videos/{video.id}/production-assets/{Path(item.get('image_path') or item.get('visual_path') or '').name}",
+            } for index, item in enumerate(manifest)]
+        except Exception:
+            scenes = []
+
+    # scenes.json is written after clips are built. During visual generation,
+    # show the image files that already exist so the gallery grows live.
+    if not scenes:
+        images_dir = source_dir / "images"
+        if images_dir.exists():
+            for index, image_path in enumerate(sorted(p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_UPLOAD_EXTENSIONS)):
+                scenes.append({
+                    "index": index,
+                    "text": "",
+                    "visual_type": "image",
+                    "image_url": f"/videos/{video.id}/production-assets/{image_path.name}",
+                })
+
+    subtitle_preview = ""
+    if transcript:
+        subtitle_preview = transcript.get("text") or ""
+    elif subtitles_path.exists():
+        subtitle_preview = subtitles_path.read_text(encoding="utf-8", errors="ignore")[-12000:]
+
+    return {
+        "video_id": video.id,
+        "title": video.title,
+        "status": video.status,
+        "stage": video.progress_stage,
+        "percent": video.progress_percent,
+        "error": video.error_message,
+        "script": video.script_text or "",
+        "transcript": (transcript or {}).get("text") or "",
+        "subtitle_preview": subtitle_preview,
+        "audio_ready": audio_path.exists(),
+        "audio_url": f"/videos/{video.id}/production-audio" if audio_path.exists() else None,
+        "subtitles_ready": subtitles_path.exists() or bool(transcript),
+        "scenes": scenes,
+        "final_ready": output_path.exists() or bool(video.output_path),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.get("/{video_id}/production-audio")
+def get_video_production_audio(video_id: str, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    audio_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "source" / "voiceover.mp3"
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="L’audio n’est pas encore disponible.")
+    return FileResponse(audio_path, media_type="audio/mpeg", filename=f"kappgen-{video_id}-preview.mp3")
+
+
+@router.get("/{video_id}/production-assets/{filename}")
+def get_video_production_asset(video_id: str, filename: str, db: Session = Depends(get_db)):
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail="Ressource introuvable.")
+    source_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "source"
+    candidates = [source_dir / "images" / filename, source_dir / "stock" / filename, source_dir / filename]
+    asset = next((path for path in candidates if path.exists() and path.is_file()), None)
+    if not asset:
+        # Stock and B-roll files can live in provider-specific subfolders.
+        asset = next((path for path in source_dir.rglob(filename) if path.is_file()), None)
+    if not asset or asset.suffix.lower() not in IMAGE_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=404, detail="Ressource introuvable.")
+    return FileResponse(asset)
 
 
 # Cap on video.edit_history — a bounded undo stack, not a full audit log.
@@ -1144,6 +1380,9 @@ async def replace_scene_image(
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.error_message = None
     video.progress_stage = "En attente du réassemblage"
     video.progress_percent = 0
@@ -1180,6 +1419,9 @@ def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleU
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.pending_edit = {"type": "subtitle_text", "scene_index": scene_index, "text": text}
     video.error_message = None
     video.progress_stage = "En attente de la correction des sous-titres"
@@ -1214,6 +1456,9 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.pending_edit = {"type": "audio", "scene_index": scene_index, "text": text}
     video.error_message = None
     video.progress_stage = "En attente de la régénération de la voix"
@@ -1261,6 +1506,9 @@ def update_video_logo_position(video_id: str, payload: LogoPositionUpdate, curre
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.pending_edit = None
     video.error_message = None
     video.progress_stage = "En attente du repositionnement du logo"
@@ -1340,6 +1588,9 @@ def undo_last_edit(video_id: str, current_user: User = Depends(get_current_user)
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.error_message = None
     video.progress_percent = 0
     db.commit()

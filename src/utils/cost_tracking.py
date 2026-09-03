@@ -25,6 +25,12 @@ PRICING = {
         # writing: $3 input / $15 output.
         "input_per_token": 3.0 / 1_000_000,
         "output_per_token": 15.0 / 1_000_000,
+        # Anthropic's server-side web_search tool bills per search performed,
+        # separately from tokens — $10 per 1,000 searches as of writing. This
+        # is a real cost the account is charged regardless of how small, so
+        # it must flow into the creator's bill exactly like every other paid
+        # call — no call is ever "free" or invisible (see estimate_anthropic_cost).
+        "web_search_per_use": 10.0 / 1_000,
     },
     "openai": {
         # gpt-4o — OpenAI's published per-million-token rate as of writing:
@@ -65,9 +71,13 @@ PRICING = {
 }
 
 
-def estimate_anthropic_cost(input_tokens: int, output_tokens: int) -> float:
+def estimate_anthropic_cost(input_tokens: int, output_tokens: int, web_search_uses: int = 0) -> float:
     p = PRICING["anthropic"]
-    return input_tokens * p["input_per_token"] + output_tokens * p["output_per_token"]
+    return (
+        input_tokens * p["input_per_token"]
+        + output_tokens * p["output_per_token"]
+        + web_search_uses * p["web_search_per_use"]
+    )
 
 
 def estimate_openai_cost(input_tokens: int, output_tokens: int) -> float:

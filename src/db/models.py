@@ -164,6 +164,9 @@ class Channel(Base):
     # inventing from the model's training data alone — meant for news/current-
     # events-style channels where "what's happening right now" is the point.
     use_web_trends = Column(Boolean, nullable=False, default=False)
+    # Creator-supplied YouTube channel/video URLs. They are research sources
+    # for original topic selection, never a request to copy a competitor.
+    youtube_topic_sources = Column(Text, nullable=True)
     # How many videos the daily pipeline generates per day (automation_mode
     # "auto" only) — each gets its own randomized slot inside the window,
     # spread evenly so they don't all land back-to-back.
@@ -313,6 +316,7 @@ class Channel(Base):
             "automation_style_prompt": self.automation_style_prompt,
             "topic_examples": self.topic_examples,
             "use_web_trends": bool(self.use_web_trends),
+            "youtube_topic_sources": self.youtube_topic_sources,
             "videos_per_day": self.videos_per_day or 1,
             "automation_window_start_hour": self.automation_window_start_hour if self.automation_window_start_hour is not None else 7,
             "automation_window_end_hour": self.automation_window_end_hour if self.automation_window_end_hour is not None else 11,
@@ -418,8 +422,8 @@ class Video(Base):
     # warning and the actual deletion (see warn_expiring_videos, queue_runner.py).
     expiry_warning_sent_at = Column(DateTime, nullable=True)
     restart_count = Column(Integer, nullable=False, default=0)
-    # Admin override that jumps a queued video ahead of the normal
-    # paid-tier-then-FIFO render order (see queue_runner.py's
+    # Admin override that jumps a queued video ahead of the normal FIFO render
+    # order (see queue_runner.py's
     # process_single_queued_video and admin.py's _queued_video_positions,
     # both of which sort by this first). 0 = no override; a higher value
     # wins over a lower one, so bumping several videos still orders them by
@@ -476,6 +480,14 @@ class Video(Base):
     # job and returns immediately instead of blocking; the frontend polls
     # this flag rather than awaiting one long response.
     thumbnail_regenerating = Column(Boolean, nullable=False, default=False)
+    # When the flag above was set — the background thread doing the actual
+    # regeneration is a daemon thread with no persistence of its own, so a
+    # server restart (a deploy, a crash) while one is running kills it
+    # without ever reaching the `finally` that clears the flag, leaving it
+    # stuck true forever and every future regeneration attempt permanently
+    # blocked behind a 409. Lets the endpoint tell "genuinely in progress"
+    # apart from "orphaned by a restart" and treat a stale one as available.
+    thumbnail_regenerating_started_at = Column(DateTime, nullable=True)
     # Bumped every time thumbnail.jpg is (re)written — the actual file is
     # overwritten in place at a fixed path, so nothing about the video row
     # itself (finished_at, output_path, ...) changes when it's regenerated.
@@ -487,6 +499,15 @@ class Video(Base):
     # read as "it didn't actually save". This field changes on every
     # regeneration so the URL always changes too.
     thumbnail_updated_at = Column(DateTime, nullable=True)
+    # Set when a channel with a configured reference style (thumbnail_style)
+    # couldn't get a real AI thumbnail after both the parallel attempt and
+    # the post-render retry (see queue_runner.py). Deliberately no blank/
+    # generic placeholder is written in that case — publishing a mediocre
+    # image with none of the creator's actual style was worse than a clear
+    # "try again" state (see generate_thumbnail(strict=...) in
+    # youtube_metadata.py). Cleared automatically the moment a regeneration
+    # (auto-retry or the manual "Régénérer" button) succeeds.
+    thumbnail_error = Column(Text, nullable=True)
     # Set for recurring automatic/scheduled publication — the worker leaves
     # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)
@@ -548,6 +569,7 @@ class Video(Base):
             "thumbnail_text": self.thumbnail_text,
             "thumbnail_regenerating": self.thumbnail_regenerating,
             "thumbnail_updated_at": self.thumbnail_updated_at.isoformat() if self.thumbnail_updated_at else None,
+            "thumbnail_error": self.thumbnail_error,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "youtube_compliance_report": self.youtube_compliance_report,
@@ -909,6 +931,26 @@ class CommunityLibraryImagePlacement(Base):
     target_channel_id = Column(String(36), ForeignKey("channels.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CommunityLibraryImageTag(Base):
+    """What a vision model actually sees in one shared library image —
+    concrete keywords (subject, objects, setting), not the channel's niche
+    or an admin's classification. Public-library search matched only the
+    *source channel's* niche until now, so an image searched by what it
+    literally shows (e.g. "chessboard", "throne room") never surfaced unless
+    that happened to also be the channel's niche wording. Populated lazily by
+    a background worker pass (see queue_runner.py's tagging loop) rather than
+    at request time, so a slow/rate-limited vision call never blocks a
+    search."""
+    __tablename__ = "community_library_image_tags"
+    __table_args__ = (UniqueConstraint("channel_id", "filename", name="uq_community_image_tag_channel_filename"),)
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, index=True)
+    filename = Column(String(512), nullable=False)
+    tags_json = Column(Text, nullable=False)  # JSON list of lowercase English keywords
+    analyzed_at = Column(DateTime, default=datetime.utcnow)
 
 
 class CreditPot(Base):

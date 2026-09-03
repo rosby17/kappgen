@@ -58,6 +58,74 @@ def _thumbnail_font_path(font_family: str) -> str:
 _THUMBNAIL_ACCENT_COLORS = ["#ffd400", "#f7c600", "#ffcc33"]
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# A thumbnail headline is not the video's full title. Image models render a
+# few large words reliably; long copy is what led to cropped fragments such
+# as “EMPÊC” and “DÉGIVRE T” in otherwise good artwork.
+_THUMBNAIL_HEADLINE_MAX_WORDS = 5
+_THUMBNAIL_HEADLINE_MAX_CHARS = 38
+_TRAILING_CONNECTORS = {"à", "au", "aux", "avec", "dans", "de", "des", "du", "en", "et", "le", "la", "les", "pour", "sur", "un", "une", "vers"}
+
+
+def clean_thumbnail_headline(value: str) -> str:
+    """Keep only a short sequence of complete, natural-looking words.
+
+    A shortened fallback is preferable to truncating a word half way through:
+    it keeps the image clean and gives GPT Image 2 a headline it can fit.
+    """
+    headline = re.sub(r"\s+", " ", str(value or "").replace("\n", " ")).strip(" \"'“”«»")
+    headline = re.sub(r"[|•·…]+", " ", headline)
+    kept = []
+    for word in headline.split():
+        candidate = " ".join([*kept, word])
+        if len(kept) >= _THUMBNAIL_HEADLINE_MAX_WORDS or len(candidate) > _THUMBNAIL_HEADLINE_MAX_CHARS:
+            break
+        kept.append(word)
+    while len(kept) > 1 and kept[-1].casefold().strip(".,:;!?") in _TRAILING_CONNECTORS:
+        kept.pop()
+    return " ".join(kept) or "NOUVELLE VIDÉO"
+
+
+def _headline_fits_image(value: str) -> bool:
+    words = str(value or "").strip().split()
+    return 2 <= len(words) <= _THUMBNAIL_HEADLINE_MAX_WORDS and len(" ".join(words)) <= _THUMBNAIL_HEADLINE_MAX_CHARS
+
+
+def generate_contextual_thumbnail_headline(script: str, title: str, niche: str, draft: str = "") -> str:
+    """Write the *hook* for the image, not a shortened YouTube title.
+
+    The metadata model's JSON answer is useful for title/description, but a
+    thumbnail needs a distinct editorial decision. Giving that decision its
+    own small pass stops a long title's opening words becoming the headline.
+    """
+    if not any_text_provider_configured():
+        return clean_thumbnail_headline(draft or title)
+    prompt = f"""Tu es directeur éditorial de miniatures YouTube.
+Lis le sujet et le script, puis écris UNE accroche visuelle autonome dans la langue du script.
+
+Sujet de la vidéo : {title}
+Niche : {niche or 'générale'}
+Script : {(script or '')[:7000]}
+
+Règles impératives :
+- 2 à 5 mots, 38 caractères maximum ;
+- des mots entiers uniquement, sans points de suspension ni ponctuation ;
+- exprime le bénéfice, le résultat, le danger, la surprise ou le conflit le plus fort du contenu ;
+- ne reprends PAS simplement le début du titre et ne résume pas tout le titre ;
+- la phrase doit être compréhensible seule et donner envie de cliquer.
+
+Exemple : pour une vidéo sur une feuille d'aluminium dans le congélateur qui évite la buée, préfère « FINI LA BUÉE » à « UNE BANDE DE PAPIER ALUMINIUM ».
+Réponds uniquement par l'accroche, sans guillemets ni explication."""
+    try:
+        candidate = generate_text(prompt, max_tokens=60, operation="thumbnail_headline").strip()
+        candidate = re.sub(r"^['\"“”«»]+|['\"“”«»]+$", "", candidate).strip()
+        candidate = re.sub(r"\s+", " ", candidate)
+        if _headline_fits_image(candidate):
+            return candidate
+        logger.warning("Thumbnail headline pass returned an invalid length; using compact safe fallback.")
+    except Exception as exc:
+        logger.warning(f"Contextual thumbnail headline generation failed: {exc}")
+    return clean_thumbnail_headline(draft or title)
+
 
 def _fallback_metadata(video, channel) -> dict:
     raw_title = (video.title or video.script_text or "Nouvelle vidéo").strip().splitlines()[0]
@@ -66,13 +134,66 @@ def _fallback_metadata(video, channel) -> dict:
     # No KappGen mention here: this text is published on the creator's own
     # channel, under their own brand — the tool that produced the video has no
     # business signing it.
-    description = (
-        f"{title}\n\n"
-        f"Une vidéo originale de {channel.name}.\n\n"
-        f"Abonne-toi à la chaîne pour découvrir les prochaines vidéos."
-    )
+    description = _rich_fallback_description(video, channel, title)
     tags = [tag for tag in [niche, channel.name] if tag]
-    return {"title": title, "description": description, "tags": tags, "thumbnail_text": title[:55]}
+    return {"title": title, "description": description, "tags": tags, "thumbnail_text": clean_thumbnail_headline(title)}
+
+
+def _timestamp(seconds: float) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _chapter_anchors(duration_seconds: float) -> list:
+    """Return fixed, truthful timestamps for the metadata model to title.
+
+    YouTube chapters need a 0:00 entry and work best with useful editorial
+    sections rather than one timestamp per visual scene. The model is allowed
+    to name these anchors, but never to invent their timing.
+    """
+    duration = max(0, int(duration_seconds or 0))
+    if duration < 60:
+        return [0]
+    chapter_count = max(3, min(9, round(duration / 150) + 1))
+    step = duration / chapter_count
+    return [round(i * step) for i in range(chapter_count)]
+
+
+def _script_excerpt(script: str, max_chars: int = 620) -> str:
+    text = re.sub(r"\s+", " ", script or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return cut + "…"
+
+
+def _rich_fallback_description(video, channel, title: str) -> str:
+    """Useful deterministic copy when no text provider is configured.
+
+    The old fallback merely repeated the title and channel name, which made a
+    completed publication look unfinished. This version remains honest (no
+    invented claims or visuals), but still tells viewers what they will get.
+    """
+    script = (getattr(video, "script_text", None) or "").strip()
+    excerpt = _script_excerpt(script)
+    duration = float(getattr(video, "duration_seconds", None) or 0)
+    anchors = _chapter_anchors(duration)
+    sections = [
+        title,
+        excerpt or f"Cette vidéo explore « {title} » et en présente les éléments essentiels de manière progressive.",
+        "Au fil de la vidéo, le sujet se construit étape par étape, avec ses informations importantes, ses moments clés et ce qu’il faut en retenir. Le montage visuel accompagne la narration et donne un rythme clair à chaque partie du contenu.",
+    ]
+    if len(anchors) > 1:
+        generic_titles = ["Introduction", "Mise en contexte", "Développement", "Points clés", "À retenir", "Conclusion"]
+        chapter_lines = []
+        for index, anchor in enumerate(anchors):
+            label = generic_titles[min(index, len(generic_titles) - 1)] if index < len(anchors) - 1 else "Conclusion"
+            chapter_lines.append(f"{_timestamp(anchor)} {label}")
+        sections.append("Chapitres\n" + "\n".join(chapter_lines))
+    sections.append(f"Si cette analyse t’aide à voir le sujet autrement, abonne-toi à {channel.name} et partage ton point de vue en commentaire.")
+    return "\n\n".join(sections)[:5000]
 
 
 def generate_metadata(video, channel) -> dict:
@@ -94,19 +215,35 @@ def generate_metadata(video, channel) -> dict:
         return fallback
     try:
         script = (video.script_text or "")[:12000]
+        duration = float(getattr(video, "duration_seconds", None) or 0)
+        chapter_anchors = ", ".join(_timestamp(value) for value in _chapter_anchors(duration))
         prompt = f"""Tu es l'Agent éditorial KappGen. Prépare la publication YouTube de cette vidéo.
 Chaîne: {channel.name}. Niche: {channel.niche}. Langue du script à conserver.
+Durée réelle: {_timestamp(duration)}.
 Le contenu doit être original, fidèle au script, sans clickbait trompeur et conforme aux règles YouTube.
 Ne mentionne jamais KappGen ni aucun outil de production dans le titre ou la description : le texte est publié sous la marque du créateur.
 Script: {script}
 
-Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
-tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fidèle au sujet)."""
-        text = generate_text(prompt, max_tokens=1200, operation='youtube_metadata')
+La description doit être un vrai texte éditorial prêt à publier, et non une répétition du titre. Adapte entièrement le vocabulaire, le ton et les sections à la niche et au type réel de contenu : tutoriel, récit, documentaire, actualité, recette, sport, spiritualité, finance, santé, divertissement ou autre. Ne présume jamais qu'il s'agit d'une « analyse » si le script ne l'est pas. Elle doit contenir, dans cet ordre :
+1. une accroche originale de 2 ou 3 phrases qui formule la question ou le conflit central ;
+2. un résumé précis de ce que la vidéo montre, raconte, enseigne ou explique, en 2 paragraphes adaptés à son format ;
+3. une section courte sur le contenu visuel et l'atmosphère du montage. Décris uniquement ce qui peut honnêtement être déduit du script ; n'invente aucun plan précis, personne, lieu ou archive ;
+4. une section « Chapitres » utilisant EXACTEMENT les horodatages suivants, dans le même ordre, chacun une seule fois : {chapter_anchors}. Donne à chaque horodatage un intitulé court et spécifique au passage correspondant du script. Si seul 0:00 est fourni, omets la section ;
+5. un appel naturel à commenter et à s'abonner à {channel.name}, sans formule générique du type « Une vidéo originale de... ».
+Utilise des paragraphes aérés. Évite le remplissage, les promesses vagues et les affirmations absentes du script.
+
+Réponds uniquement en JSON valide avec: title (max 100 caractères), description (entre 700 et 3500 caractères, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
+tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 5 mots, 38 caractères maximum, phrase complète et naturelle, fidèle au sujet). Le texte est imprimé tel quel dans une image : ne le coupe jamais, ne le termine jamais par "...", et ne renvoie ni le titre complet ni un sous-titre."""
+        text = generate_text(prompt, max_tokens=1800, operation='youtube_metadata')
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         title = str(data.get("title") or fallback["title"]).strip()[:100]
         description = str(data.get("description") or fallback["description"]).strip()[:5000]
+        # A technically valid but editorially empty response must not recreate
+        # the old three-line placeholder. Prefer the informative fallback.
+        if len(description) < 350 or (description.casefold().startswith(title.casefold()) and len(description) < 700):
+            logger.warning("YouTube metadata description was too generic; using rich safe fallback.")
+            description = fallback["description"]
         # Belt-and-suspenders: even with the prompt instruction above, Claude
         # sometimes still tacks on its own hashtag line — strip any trailing
         # line(s) made up entirely of hashtags so the block we append next
@@ -118,11 +255,17 @@ tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 7 mots, fi
         tags = [str(tag).strip() for tag in data.get("tags", []) if str(tag).strip()][:12]
         if tags:
             description += "\n\n" + " ".join("#" + re.sub(r"[^\w]", "", tag) for tag in tags[:5])
+        headline = generate_contextual_thumbnail_headline(
+            script=script,
+            title=title,
+            niche=channel.niche or "",
+            draft=str(data.get("thumbnail_text") or ""),
+        )
         return {
             "title": title,
             "description": description[:5000],
             "tags": tags,
-            "thumbnail_text": str(data.get("thumbnail_text") or title).strip()[:70],
+            "thumbnail_text": headline,
         }
     except Exception as exc:
         logger.warning(f"YouTube metadata generation failed, using safe fallback: {exc}")
@@ -260,6 +403,7 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
     story with foreground, midground and background detail.
     """
     thumbnail_style = thumbnail_style or {}
+    text = clean_thumbnail_headline(text)
     style_prompt = (thumbnail_style.get("style_prompt") or "").strip() or (
         (image_style or {}).get("style_prompt") or ""
     ).strip()
@@ -313,14 +457,16 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
             f"Add the exact headline “{text}” in the reserved {text_side} area, reproducing this channel's "
             f"established headline treatment exactly: {typography}. The headline colours are mandatory: use those "
             f"exact text colours, accent-word colours and box/band fill colours — never substitute your own "
-            f"palette, never default to plain white or black text, never invert the contrast. Perfectly spelled, "
-            f"every word fully visible inside the frame, nothing cropped or cut off. "
+            f"palette, never default to plain white or black text, never invert the contrast. HARD TEXT RULE: render "
+            f"only this complete headline, word-for-word; do not add, omit, abbreviate, split or crop a word. Keep it "
+            f"within four short lines and a safe 8 percent margin on every edge. "
         )
     else:
         type_clause = (
             f"Add the exact headline “{text}” in the reserved {text_side} area, large bold condensed uppercase "
-            f"editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene, "
-            f"every word fully visible inside the frame, nothing cropped or cut off. "
+            f"editorial typography, perfectly spelled, high contrast, thick dark outline, integrated into the scene. "
+            f"HARD TEXT RULE: render only this complete headline, word-for-word; do not add, omit, abbreviate, split or "
+            f"crop a word. Keep it within four short lines and a safe 8 percent margin on every edge. "
         )
 
     return (
@@ -410,7 +556,14 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     return ai_path
 
 
-def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None) -> Path:
+def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None, strict: bool = False) -> tuple[Path, bool]:
+    """strict=True (channels with a configured reference style only — see
+    queue_runner.py) skips the frame-grab/solid-color fallbacks entirely on
+    an AI failure and just raises instead: publishing a generic, unstyled
+    placeholder was worse than a clear "couldn't make one, try again" state
+    to the creator. Non-strict callers (manual regen, the preview endpoint)
+    keep the old best-effort behavior."""
+    text = clean_thumbnail_headline(text)
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
     image = None
@@ -421,6 +574,8 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
             image = Image.open(ai_path).convert("RGB")
             ai_success = True
         except Exception as exc:
+            if strict:
+                raise RuntimeError(f"AI thumbnail generation failed: {exc}") from exc
             logger.warning(f"AI thumbnail background generation failed, falling back to a video frame: {exc}")
     if image is None:
         try:
@@ -529,7 +684,7 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
         result = image.convert("RGB")
         result.save(destination, "JPEG", quality=92, optimize=True)
         destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
-        return destination
+        return destination, True
 
     y = top
     for index, line in enumerate(lines):
@@ -556,4 +711,4 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     result.save(destination, "JPEG", quality=90, optimize=True)
     frame_path.unlink(missing_ok=True)
     destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
-    return destination
+    return destination, False

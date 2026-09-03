@@ -9,6 +9,11 @@ class VideoStatus(str, Enum):
     RENDERING = "rendering"
     DONE = "done"
     FAILED = "failed"
+    # Set by the creator via POST /{video_id}/cancel while a video is still
+    # queued or rendering — checked between pipeline stages (see
+    # queue_runner.py's update_progress) so an in-flight render stops at the
+    # next stage boundary instead of finishing into a result nobody wanted.
+    CANCELLED = "cancelled"
 
 class InputType(str, Enum):
     TEXT = "text"
@@ -146,6 +151,7 @@ class ChannelCreate(BaseModel):
     automation_style_prompt: Optional[str] = None
     topic_examples: Optional[str] = None  # example titles/topics, one per line — the creator's own or a channel to emulate
     use_web_trends: bool = False  # let topic selection use live web search (news/trend-driven niches)
+    youtube_topic_sources: Optional[str] = None  # YouTube channel/video URLs used as topic research sources
     videos_per_day: int = 1
     automation_window_start_hour: int = 7
     automation_window_end_hour: int = 11
@@ -191,6 +197,7 @@ class ChannelUpdate(BaseModel):
     automation_style_prompt: Optional[str] = None
     topic_examples: Optional[str] = None
     use_web_trends: Optional[bool] = None
+    youtube_topic_sources: Optional[str] = None
     videos_per_day: Optional[int] = None
     automation_window_start_hour: Optional[int] = None
     automation_window_end_hour: Optional[int] = None
