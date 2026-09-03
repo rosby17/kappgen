@@ -36,23 +36,11 @@ def _admin_video_title(video: Video) -> str:
 
 
 def _queued_video_positions(db: Session) -> tuple[dict[str, int], int]:
-    active_plan_price = (
-        db.query(func.coalesce(func.max(Plan.price_fcfa), 0))
-        .select_from(Subscription)
-        .join(Plan, Subscription.plan_id == Plan.id)
-        .filter(
-            Subscription.user_id == Channel.user_id,
-            Subscription.status == "active",
-            Subscription.expires_at > datetime.utcnow(),
-        )
-        .correlate(Channel)
-        .scalar_subquery()
-    )
     queued_ids = [row[0] for row in (
         db.query(Video.id)
         .join(Channel, Video.channel_id == Channel.id)
         .filter(Video.status == "queued")
-        .order_by(Video.admin_priority.desc(), active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
+        .order_by(Video.admin_priority.desc(), Video.created_at.asc(), Video.id.asc())
         .all()
     )]
     return {video_id: index + 1 for index, video_id in enumerate(queued_ids)}, len(queued_ids)
@@ -498,7 +486,7 @@ class VideoPriorityPayload(BaseModel):
 
 @router.put("/videos/{video_id}/priority")
 def admin_set_video_priority(video_id: str, payload: VideoPriorityPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Jumps a queued video ahead of the normal paid-tier-then-FIFO render
+    """Jumps a queued video ahead of the normal FIFO render
     order (see Video.admin_priority, honored by queue_runner.py's
     process_single_queued_video). Only meaningful while still queued —
     a video already rendering/done/failed has nothing left to jump ahead of."""

@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from sqlalchemy import or_, func
+from sqlalchemy import or_, and_
 from src.db.session import SessionLocal, init_db
-from src.db.models import Video, Channel, User, VoiceCloneJob, Subscription, Plan
+from src.db.models import Video, Channel, User, VoiceCloneJob
 from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
 from src.config import FRONTEND_BASE_URL
 from src.models.project import VideoStatus
@@ -113,28 +113,23 @@ def process_single_queued_video() -> bool:
     db = SessionLocal()
     video = None
     try:
-        # Admin manual override first (see Video.admin_priority — set from
-        # the admin Vidéos tab, e.g. "Prioriser cette vidéo"), then paid-tier
-        # priority, then FIFO within the same tier. The highest currently-
-        # active plan price wins; welcome-credit/free users have a priority
-        # value of zero and therefore wait behind every paid tier.
-        active_plan_price = (
-            db.query(func.coalesce(func.max(Plan.price_fcfa), 0))
-            .select_from(Subscription)
-            .join(Plan, Subscription.plan_id == Plan.id)
-            .filter(
-                Subscription.user_id == Channel.user_id,
-                Subscription.status == "active",
-                Subscription.expires_at > datetime.utcnow(),
-            )
-            .correlate(Channel)
-            .scalar_subquery()
+        # One public rule: first launched, first processed. A platform admin
+        # may explicitly set admin_priority for an exceptional intervention,
+        # but plan/tier is never an implicit queue priority.
+        #
+        # Automatic videos are inserted immediately with an empty script so
+        # their place is durable. Their background script writer owns that
+        # empty row; the render worker must wait until it has real content.
+        ready_for_render = or_(
+            Video.is_reassembly.is_(True),
+            Channel.automation_mode != "auto",
+            and_(Video.script_text.is_not(None), Video.script_text != ""),
         )
         video = (
             db.query(Video)
             .join(Channel, Video.channel_id == Channel.id)
-            .filter(Video.status == VideoStatus.QUEUED.value)
-            .order_by(Video.admin_priority.desc(), active_plan_price.desc(), Video.created_at.asc(), Video.id.asc())
+            .filter(Video.status == VideoStatus.QUEUED.value, ready_for_render)
+            .order_by(Video.admin_priority.desc(), Video.created_at.asc(), Video.id.asc())
             .with_for_update(skip_locked=True)
             .first()
         )
@@ -807,6 +802,46 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
 
 MAX_AUTO_RESTARTS = 4
 
+
+def _wait_for_auto_video_turn(db, video: Video) -> bool:
+    """Hold automatic script preparation in the same FIFO as rendering.
+
+    Auto videos get a durable queued row as soon as the creator launches
+    them. The script writer may only start once every older non-final video
+    has finished, unless an administrator explicitly gave this row a higher
+    priority. This avoids a newer video looking active while an older one is
+    waiting, and makes the full workflow (topic, script and render) FIFO.
+    """
+    while True:
+        db.refresh(video)
+        if video.status in (VideoStatus.DONE.value, VideoStatus.FAILED.value):
+            return False
+        current_priority = int(video.admin_priority or 0)
+        older_position = or_(
+            Video.created_at < video.created_at,
+            and_(Video.created_at == video.created_at, Video.id < video.id),
+        )
+        earlier_work = (
+            db.query(Video.id)
+            .filter(
+                Video.id != video.id,
+                Video.status.in_([VideoStatus.QUEUED.value, VideoStatus.RENDERING.value]),
+                or_(
+                    Video.admin_priority > current_priority,
+                    and_(Video.admin_priority == current_priority, older_position),
+                ),
+            )
+            .first()
+        )
+        if not earlier_work:
+            return True
+        video.status = VideoStatus.QUEUED.value
+        video.progress_stage = "En attente de la vidéo précédente"
+        video.progress_percent = 0
+        db.commit()
+        time.sleep(2)
+        db.expire_all()
+
 def requeue_orphaned_videos():
     """
     On worker startup, any video still marked 'rendering' was orphaned by a
@@ -824,6 +859,7 @@ def requeue_orphaned_videos():
     db = SessionLocal()
     try:
         orphaned = db.query(Video).filter(Video.status == VideoStatus.RENDERING.value).all()
+        restart_script_ids = []
         for video in orphaned:
             video.restart_count = (video.restart_count or 0) + 1
             if video.restart_count > MAX_AUTO_RESTARTS:
@@ -849,8 +885,15 @@ def requeue_orphaned_videos():
                 video.started_at = None
                 video.progress_stage = f"En reprise après interruption du serveur (tentative {video.restart_count + 1})"
                 video.progress_percent = 0
+                # An automatic video interrupted during topic/script writing
+                # has no script yet. It is intentionally excluded from the
+                # render picker, so restart its writer after this transaction.
+                if video.creation_source == "automatic" and not (video.script_text or "").strip():
+                    restart_script_ids.append(video.id)
         if orphaned:
             db.commit()
+        for video_id in restart_script_ids:
+            threading.Thread(target=retry_auto_video_script_background, args=(video_id,), daemon=True).start()
     finally:
         db.close()
 
@@ -1304,15 +1347,38 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         # the whole topic-research + script-writing window, which reads as
         # broken even though nothing has failed.
         title=f"{channel.name or channel.niche} — nouvelle vidéo",
-        status=VideoStatus.RENDERING.value,
-        progress_stage="Recherche du sujet",
-        progress_percent=1,
+        # A durable FIFO position is recorded before any AI work starts.
+        # The worker ignores auto rows with an empty script; this background
+        # writer claims the row only when every older video has finished.
+        status=VideoStatus.QUEUED.value,
+        progress_stage="En attente dans la file",
+        progress_percent=0,
         transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
         voice_id=getattr(channel, "voice_id", None),
     )
     db.add(video)
     db.commit()
     db.refresh(video)
+
+    if not _wait_for_auto_video_turn(db, video):
+        return None
+    video.status = VideoStatus.RENDERING.value
+    video.progress_stage = "Recherche du sujet"
+    video.progress_percent = 1
+    db.commit()
+
+    # A video may have waited minutes before its turn. Refresh its recent
+    # history now so the topic generator also avoids the titles produced by
+    # those earlier videos while it was waiting.
+    recent_video_history = (
+        db.query(Video)
+        .filter(Video.channel_id == channel.id, Video.id != video.id)
+        .order_by(Video.created_at.desc())
+        .limit(AUTOMATION_RECENT_TITLES_LIMIT)
+        .all()
+    )
+    recent_titles = [v.title or (v.script_text or "").split("\n")[0][:120] for v in recent_video_history]
+    recent_scripts = [v.script_text for v in recent_video_history if (v.script_text or "").strip()]
 
     def _on_script_progress(stage: str, percent: int) -> None:
         video.progress_stage = stage
@@ -1505,6 +1571,16 @@ def retry_auto_video_script_background(video_id: str):
             video.progress_stage = "Échec"
             db.commit()
             return
+
+        # Script retries obey exactly the same durable FIFO order as a new
+        # automatic launch. The render picker ignores this empty-script row
+        # until the writer has claimed its turn below.
+        if not _wait_for_auto_video_turn(db, video):
+            return
+        video.status = VideoStatus.RENDERING.value
+        video.progress_stage = "Régénération du script…"
+        video.progress_percent = 1
+        db.commit()
 
         recent_video_history = (
                 db.query(Video)

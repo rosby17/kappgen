@@ -927,23 +927,18 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
     if not (video.script_text or "").strip() and channel and channel.automation_mode == "auto" and channel.content_type != "music":
         from threading import Thread
         from src.worker.queue_runner import retry_auto_video_script_background
-        # RENDERING, not QUEUED: the render lane's picker claims any 'queued'
-        # row within ~2s of it appearing, but the script isn't written yet —
-        # retry_auto_video_script_background() below runs in the background
-        # and only flips this to QUEUED once it actually has one. Marking it
-        # QUEUED here let the render lane grab it mid-regeneration and crash
-        # on the "script is empty" guard in process_single_queued_video()
-        # (seen in production logs, e.g. video 06856f5a — picked up and
-        # failed twice, seconds after each retry, while the AI call was
-        # still in flight or had already failed silently in the background).
-        video.status = VideoStatus.RENDERING.value
+        # The render picker explicitly ignores automatic rows whose script is
+        # still empty. Keeping this retry QUEUED gives it its proper FIFO
+        # position before the background writer starts, rather than making a
+        # newer retry look active ahead of an older render.
+        video.status = VideoStatus.QUEUED.value
         # A manual retry starts a new interruption budget. Without this reset,
         # a video that already reached the automatic-restart ceiling fails
         # immediately on the very next server restart, making the Retry button
         # effectively useless.
         video.restart_count = 0
         video.error_message = None
-        video.progress_stage = "Régénération du script…"
+        video.progress_stage = "En attente dans la file"
         video.progress_percent = 0
         db.commit()
         Thread(target=retry_auto_video_script_background, args=(video.id,), daemon=True).start()
