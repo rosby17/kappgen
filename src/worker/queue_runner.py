@@ -1787,6 +1787,14 @@ def tag_untagged_community_images():
     images at a time, rather than on the search request itself: a vision call
     is too slow/rate-limited to sit in a search's critical path, and this way
     a burst of new shares doesn't spike search latency for everyone.
+
+    Every folder that has ever been shared is tagged here regardless of its
+    curation status (pending/approved/flagged) — search itself still only
+    reads from approved folders (see search_public_library), but classifying
+    only on approval meant a folder's very first search after being approved
+    found nothing until the tagging pass caught up. Getting there ahead of
+    approval means the catalogue is already searchable the moment an admin
+    flips the switch.
     """
     from src.config import STORAGE_PATH
     from src.db.models import CommunityLibraryFolder, CommunityLibraryImageTag
@@ -1796,7 +1804,7 @@ def tag_untagged_community_images():
 
     db = SessionLocal()
     try:
-        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status == "approved").all()
+        folders = db.query(CommunityLibraryFolder).all()
         already_tagged = {
             (row.channel_id, row.filename)
             for row in db.query(CommunityLibraryImageTag.channel_id, CommunityLibraryImageTag.filename).all()
