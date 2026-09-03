@@ -374,6 +374,21 @@ def run_video_pipeline(
                         if credits:
                             (source_dir / "stock_credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # Editorial continuity fallback: when a later video slot has no matching
+    # Pexels result at all, carry the last real video forward for a short span
+    # (maximum four video scenes). This is preferable to an abrupt generic
+    # frame and naturally stops as soon as a new clip is found.
+    last_video = None
+    held_scenes = 0
+    for scene_index in sorted(video_slot_indices):
+        if visual_paths[scene_index] and visual_types[scene_index] == "video":
+            last_video = visual_paths[scene_index]
+            held_scenes = 0
+        elif not visual_paths[scene_index] and last_video is not None and held_scenes < 4:
+            visual_paths[scene_index] = last_video
+            visual_types[scene_index] = "video"
+            held_scenes += 1
+
     # A stock query can legitimately return no video/photo, the API can be
     # unavailable, or a channel can use only its own B-roll. Never pass an
     # empty path to FFmpeg: fill only the unresolved slots with the normal
