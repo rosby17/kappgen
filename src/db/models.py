@@ -418,6 +418,13 @@ class Video(Base):
     # warning and the actual deletion (see warn_expiring_videos, queue_runner.py).
     expiry_warning_sent_at = Column(DateTime, nullable=True)
     restart_count = Column(Integer, nullable=False, default=0)
+    # Admin override that jumps a queued video ahead of the normal
+    # paid-tier-then-FIFO render order (see queue_runner.py's
+    # process_single_queued_video and admin.py's _queued_video_positions,
+    # both of which sort by this first). 0 = no override; a higher value
+    # wins over a lower one, so bumping several videos still orders them by
+    # when each was prioritized (see admin_set_video_priority).
+    admin_priority = Column(Integer, nullable=False, default=0)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
     is_reassembly = Column(Boolean, nullable=False, default=False)
@@ -555,6 +562,7 @@ class Video(Base):
             "publication_compliance_overridden_by": self.publication_compliance_overridden_by,
             "downloaded_at": self.downloaded_at.isoformat() if self.downloaded_at else None,
             "can_undo": bool(self.edit_history),
+            "admin_priority": self.admin_priority,
         }
 
 

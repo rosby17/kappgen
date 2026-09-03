@@ -86,6 +86,7 @@ def init_db():
             "downloaded_at": "ALTER TABLE videos ADD COLUMN downloaded_at TIMESTAMP",
             "thumbnail_regenerating": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating BOOLEAN DEFAULT FALSE NOT NULL",
             "thumbnail_updated_at": "ALTER TABLE videos ADD COLUMN thumbnail_updated_at TIMESTAMP",
+            "admin_priority": "ALTER TABLE videos ADD COLUMN admin_priority INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
