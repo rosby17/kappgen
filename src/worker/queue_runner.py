@@ -192,7 +192,7 @@ def process_single_queued_video() -> bool:
             youtube_metadata.generate_thumbnail,
             video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
             video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-            channel, video.id,
+            channel, video.id, strict=True,
         ) if thumbnail_enabled else None
 
         def await_parallel_thumbnail():
@@ -519,22 +519,30 @@ def process_single_queued_video() -> bool:
 
         _, thumbnail_ai_used = await_parallel_thumbnail()
         if not thumbnail_ai_used and thumbnail_enabled:
-            # The parallel attempt above started before the video existed, so
-            # on an AI failure it had no real frame to fall back to either
-            # (see await_parallel_thumbnail's docstring) — it just wrote a
-            # plain solid-color placeholder. Now that output_mp4 is a real,
-            # finished file, retry once for real: AI again (transient
-            # timeouts do happen), and this time a genuine representative
-            # frame of the actual video as the fallback instead of a blank.
+            # The parallel attempt above started before the video existed and
+            # failed its AI call — strict=True means it raised rather than
+            # writing a generic, unstyled placeholder (see
+            # generate_thumbnail's docstring: publishing something with none
+            # of the creator's actual reference style was worse than a clear
+            # "couldn't make one" state). Retry once for real now that
+            # output_mp4 exists — transient AI timeouts do happen — still
+            # strict, so a second failure leaves no thumbnail file at all
+            # rather than a mediocre one.
             try:
-                _, retried_ai_used = youtube_metadata.generate_thumbnail(
+                youtube_metadata.generate_thumbnail(
                     output_mp4, thumbnail_destination,
                     video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-                    channel, video.id,
+                    channel, video.id, strict=True,
                 )
-                logger.info(f"Post-render thumbnail retry for video {video.id} succeeded (ai_used={retried_ai_used}).")
+                video.thumbnail_error = None
+                logger.info(f"Post-render thumbnail retry for video {video.id} succeeded.")
             except Exception as exc:
-                logger.warning(f"Post-render thumbnail retry failed for video {video.id}, keeping the placeholder: {exc}")
+                video.thumbnail_error = (
+                    "La miniature n'a pas pu être générée dans le style de la chaîne. "
+                    "Réessaie dans quelques minutes, ou régénère-la manuellement."
+                )
+                logger.warning(f"Post-render thumbnail retry failed for video {video.id}, leaving no thumbnail: {exc}")
+            db.commit()
 
         # A Trust Score is part of the finished video, not something the
         # creator has to remember to request. Run this final, post-render

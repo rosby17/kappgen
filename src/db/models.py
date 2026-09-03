@@ -499,6 +499,15 @@ class Video(Base):
     # read as "it didn't actually save". This field changes on every
     # regeneration so the URL always changes too.
     thumbnail_updated_at = Column(DateTime, nullable=True)
+    # Set when a channel with a configured reference style (thumbnail_style)
+    # couldn't get a real AI thumbnail after both the parallel attempt and
+    # the post-render retry (see queue_runner.py). Deliberately no blank/
+    # generic placeholder is written in that case — publishing a mediocre
+    # image with none of the creator's actual style was worse than a clear
+    # "try again" state (see generate_thumbnail(strict=...) in
+    # youtube_metadata.py). Cleared automatically the moment a regeneration
+    # (auto-retry or the manual "Régénérer" button) succeeds.
+    thumbnail_error = Column(Text, nullable=True)
     # Set for recurring automatic/scheduled publication — the worker leaves
     # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)
@@ -560,6 +569,7 @@ class Video(Base):
             "thumbnail_text": self.thumbnail_text,
             "thumbnail_regenerating": self.thumbnail_regenerating,
             "thumbnail_updated_at": self.thumbnail_updated_at.isoformat() if self.thumbnail_updated_at else None,
+            "thumbnail_error": self.thumbnail_error,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "youtube_compliance_report": self.youtube_compliance_report,

@@ -87,6 +87,7 @@ def init_db():
             "thumbnail_regenerating": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating BOOLEAN DEFAULT FALSE NOT NULL",
             "thumbnail_regenerating_started_at": "ALTER TABLE videos ADD COLUMN thumbnail_regenerating_started_at TIMESTAMP",
             "thumbnail_updated_at": "ALTER TABLE videos ADD COLUMN thumbnail_updated_at TIMESTAMP",
+            "thumbnail_error": "ALTER TABLE videos ADD COLUMN thumbnail_error TEXT",
             "admin_priority": "ALTER TABLE videos ADD COLUMN admin_priority INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:

@@ -798,7 +798,13 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             draft=video.thumbnail_text or "",
         )
         db.commit()
-        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel)  # ai_success ignored here — a manual regen has no fallback to skip
+        # strict=True whenever the channel actually has a reference style —
+        # same "no generic placeholder" rule as the automatic pipeline (see
+        # queue_runner.py): a manual regeneration request should fail
+        # clearly, not silently swap one mediocre image for another.
+        thumbnail_style = channel.thumbnail_style or {}
+        strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
+        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
         succeeded = True
     except Exception as e:
         logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
@@ -812,6 +818,11 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
                     # after regenerating never reuses the old, now-stale image
                     # URL (see the field's own comment in db/models.py).
                     video.thumbnail_updated_at = datetime.utcnow()
+                    video.thumbnail_error = None
+                else:
+                    video.thumbnail_error = (
+                        "La miniature n'a pas pu être régénérée dans le style de la chaîne. Réessaie dans quelques minutes."
+                    )
                 db.commit()
         except Exception:
             pass

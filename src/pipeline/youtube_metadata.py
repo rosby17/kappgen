@@ -556,7 +556,13 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     return ai_path
 
 
-def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None) -> tuple[Path, bool]:
+def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None, strict: bool = False) -> tuple[Path, bool]:
+    """strict=True (channels with a configured reference style only — see
+    queue_runner.py) skips the frame-grab/solid-color fallbacks entirely on
+    an AI failure and just raises instead: publishing a generic, unstyled
+    placeholder was worse than a clear "couldn't make one, try again" state
+    to the creator. Non-strict callers (manual regen, the preview endpoint)
+    keep the old best-effort behavior."""
     text = clean_thumbnail_headline(text)
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
@@ -568,6 +574,8 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
             image = Image.open(ai_path).convert("RGB")
             ai_success = True
         except Exception as exc:
+            if strict:
+                raise RuntimeError(f"AI thumbnail generation failed: {exc}") from exc
             logger.warning(f"AI thumbnail background generation failed, falling back to a video frame: {exc}")
     if image is None:
         try:
