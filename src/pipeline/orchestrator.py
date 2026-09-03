@@ -22,6 +22,16 @@ def unresolved_visual_indices(visual_paths) -> list:
     return [index for index, path in enumerate(visual_paths) if not path]
 
 
+def unresolved_video_slot_indices(video_slot_indices, visual_paths) -> list:
+    """Return only planned video slots that still need stock footage.
+
+    Image slots must never be sent to Pexels: in image-only mode the creator
+    explicitly asked for stills, and in mixed mode those slots have already
+    been assigned to the selected image sources.
+    """
+    return [index for index in sorted(video_slot_indices) if not visual_paths[index]]
+
+
 def plan_visual_slots(scene_count: int, media_mode: str) -> tuple:
     """Decides, per scene, whether it wants an image or a video clip —
     before anything is downloaded/generated. Returns (video_slot_indices,
@@ -256,16 +266,15 @@ def run_video_pipeline(
     # Stock footage (Pexels) fills the scenes the creator's own clips don't
     # cover — real motion instead of a Ken Burns pan over a still, which is
     # the clearest visual difference between an automated montage and a
-    # hand-cut one. Rides along with the "community" source rather than
-    # being its own toggle: both are the same promise to the creator ("I
-    # don't have to provide these visuals myself"), and stock keeps that
-    # promise even for a niche whose shared pool is still empty. Pexels
+    # hand-cut one. It is driven by the montage mode, not by the community
+    # image-library checkbox: mixed/video mode is an explicit request for
+    # motion, even when the creator does not use shared still images. Pexels
     # itself is free to KappGen, but per product decision no asset renders
     # invisibly/for free to the creator — a token STOCK_MEDIA_CREDITS charge
     # applies per clip/photo actually used (debited only once it's confirmed
     # usable, so a failed download or an unaffordable balance never bills
     # anything and simply leaves that scene on its fallback image).
-    if "community" in enabled_sources:
+    if video_slot_indices:
         from src.config import PEXELS_API_KEY
         if not PEXELS_API_KEY:
             logger.info("Stock footage enabled for this channel but PEXELS_API_KEY is unset; scenes stay on images.")
@@ -288,7 +297,7 @@ def run_video_pipeline(
             # The path is the source of truth. A type label alone must never
             # make an empty scene look resolved (especially in video-only
             # mode, where every scene starts out wanting a video).
-            open_indices = unresolved_visual_indices(visual_paths)
+            open_indices = unresolved_video_slot_indices(video_slot_indices, visual_paths)
             if open_indices:
                 queries = build_stock_search_queries(
                     segment_texts=[prompts[i] if i < len(prompts) else "" for i in open_indices],
