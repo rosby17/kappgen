@@ -2412,6 +2412,93 @@ async def upload_channel_broll(channel_id: str, files: List[UploadFile] = File(.
     return channel.to_dict()
 
 
+MAX_BROLL_DIRECT_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 Go — the R2 direct-PUT path, for clips too big for the Cloudflare-proxied endpoint above.
+
+
+class BrollDirectUploadStart(BaseModel):
+    filename: str
+    content_type: Optional[str] = "video/mp4"
+
+
+@router.post("/{channel_id}/broll/direct-upload/start")
+def start_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUploadStart, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """For B-roll clips too large for our own API's Cloudflare-proxied request
+    body cap (~100 Mo) — the browser PUTs the file straight to R2 using the
+    URL returned here, never touching api.kappgen.com for the file bytes.
+    Once uploaded, call /direct-upload/confirm to pull it onto local disk so
+    the rest of the pipeline (which only knows local B-roll paths) needs no
+    changes at all."""
+    from src.utils import r2_storage
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    ext = Path(payload.filename or "").suffix.lower()
+    if ext not in ALLOWED_BROLL_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format non supporté (MP4, MOV, WebM ou M4V).")
+    if not r2_storage.is_r2_configured():
+        raise HTTPException(status_code=503, detail="L'envoi direct de gros fichiers n'est pas disponible pour le moment.")
+    object_key = f"staging/broll/{channel.id}/{uuid.uuid4().hex}{ext}"
+    upload_url = r2_storage.presigned_put_url(object_key, content_type=payload.content_type or "video/mp4")
+    if not upload_url:
+        raise HTTPException(status_code=502, detail="Impossible de préparer l'envoi direct. Réessaie.")
+    return {"upload_url": upload_url, "object_key": object_key}
+
+
+class BrollDirectUploadConfirm(BaseModel):
+    object_key: str
+    filename: Optional[str] = None
+
+
+@router.post("/{channel_id}/broll/direct-upload/confirm")
+def confirm_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUploadConfirm, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Called once the browser's direct PUT to R2 has finished. Downloads the
+    object from R2 into the channel's normal local B-roll folder (a
+    server-to-R2 transfer, not routed through Cloudflare's inbound proxy, so
+    the size cap doesn't apply here either) then deletes the R2 staging copy
+    — after this the clip is a completely ordinary local B-roll file, so
+    nothing downstream (orchestrator, list/delete endpoints) needs to know
+    it ever went through R2."""
+    from src.utils import r2_storage
+    from src.config import R2_PUBLIC_URL_BASE
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    object_key = (payload.object_key or "").strip()
+    if not object_key.startswith(f"staging/broll/{channel.id}/"):
+        raise HTTPException(status_code=400, detail="Référence d'envoi invalide.")
+    ext = Path(object_key).suffix.lower()
+    if ext not in ALLOWED_BROLL_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format non supporté.")
+    broll_dir = STORAGE_PATH / "channels" / channel.id / "broll"
+    broll_dir.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(payload.filename or "broll").stem)[:60] or "broll"
+    dest = broll_dir / f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
+    public_url = f"{R2_PUBLIC_URL_BASE}/{object_key}"
+    total = 0
+    try:
+        with httpx.stream("GET", public_url, timeout=300.0) as resp:
+            resp.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_bytes(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_BROLL_DIRECT_UPLOAD_BYTES:
+                        raise ValueError("too_large")
+                    f.write(chunk)
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        r2_storage.delete_video(object_key)
+        detail = "Fichier trop volumineux (2 Go max)." if str(exc) == "too_large" else "Échec de la récupération du fichier envoyé. Réessaie."
+        raise HTTPException(status_code=400 if str(exc) == "too_large" else 502, detail=detail)
+    r2_storage.delete_video(object_key)
+    style = dict(channel.image_style or {})
+    style["broll_path"] = f"channels/{channel.id}/broll"
+    style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])
+    channel.image_style = style
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
 @router.get("/{channel_id}/broll")
 def list_channel_broll(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
