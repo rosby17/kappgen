@@ -32,6 +32,34 @@ _limit_submit = rate_limit("video_submit", max_attempts=30, window_seconds=3600)
 
 LIBRARY_IMAGE_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 
+def _video_is_remote(video: Video) -> bool:
+    ref = str(video.output_path or "")
+    return video.storage_backend in ("b2", "r2") or ref.startswith(("http://", "https://"))
+
+
+def _ensure_local_thumbnail(video: Video) -> Path:
+    """Ensure a thumbnail exists locally, rebuilding it from B2/R2 when the
+    render itself has already been moved off the worker disk."""
+    target = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+    if not _video_is_remote(video):
+        target = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
+    if target.exists():
+        return target
+    if not _video_is_remote(video) or not video.output_path:
+        raise FileNotFoundError("Thumbnail not found")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="kappgen-thumbnail-source-") as tmp:
+        source = Path(tmp) / "output.mp4"
+        with httpx.stream("GET", str(video.output_path), timeout=600.0, follow_redirects=True) as response:
+            response.raise_for_status()
+            with source.open("wb") as handle:
+                for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                    handle.write(chunk)
+        generate_thumbnail(source, target, video.thumbnail_text or video.title or "Nouvelle vidéo", channel=video.channel)
+    if not target.exists():
+        raise FileNotFoundError("Thumbnail not found")
+    return target
+
 # At the capped ~4.2Mbps render bitrate a 60min video lands around ~2GB —
 # generous for long-form content while stopping runaway renders (and the
 # very long CPU-bound renders that caused them) before they even start.
@@ -566,11 +594,10 @@ def download_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     # not a local STORAGE_PATH-relative path — thumbnail.jpg always stays
     # local regardless (see _finalize_output_storage), sitting next to
     # wherever this video's other local render artifacts live.
-    if video.storage_backend in ("b2", "r2"):
-        thumbnail_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
-    else:
-        thumbnail_path = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
-    if not thumbnail_path.exists():
+    try:
+        thumbnail_path = _ensure_local_thumbnail(video)
+    except Exception as exc:
+        logger.warning("Could not recover thumbnail for video %s: %s", video_id, exc)
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
     return FileResponse(thumbnail_path, media_type="image/jpeg", filename=_download_filename(video, "thumbnail").replace(".mp4", ".jpg"))
@@ -584,13 +611,10 @@ def serve_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
     video_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output.mp4"
-    thumbnail_path = video_path.with_name("thumbnail.jpg")
-    if not thumbnail_path.exists() and video_path.exists():
-        try:
-            generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or "Nouvelle vidéo", channel=None)
-        except Exception as exc:
-            logger.warning("Could not repair thumbnail for video %s: %s", video_id, exc)
-    if not thumbnail_path.exists():
+    try:
+        thumbnail_path = _ensure_local_thumbnail(video)
+    except Exception as exc:
+        logger.warning("Could not recover thumbnail for video %s: %s", video_id, exc)
         raise HTTPException(status_code=404, detail="Thumbnail not found")
     return FileResponse(thumbnail_path, media_type="image/jpeg")
 
@@ -947,17 +971,36 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
     from src.db.session import SessionLocal
     db = SessionLocal()
     succeeded = False
+    temp_dir = None
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
             return
         channel = video.channel
-        video_path = STORAGE_PATH / video.output_path if video.output_path else None
+        output_ref = str(video.output_path or "")
+        is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+        if is_remote:
+            temp_dir = tempfile.TemporaryDirectory(prefix="kappgen-thumbnail-")
+            video_path = Path(temp_dir.name) / "output.mp4"
+            with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                with video_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+            # Thumbnails and their history remain local even when the MP4 is
+            # stored remotely, so the app can serve them without downloading
+            # the full video on every card refresh.
+            current = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+            current.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            video_path = STORAGE_PATH / output_ref if output_ref else None
+            if not channel or not video_path or not video_path.exists():
+                return
+            current = video_path.with_name("thumbnail.jpg")
         if not channel or not video_path or not video_path.exists():
             return
-        current = video_path.with_name("thumbnail.jpg")
         if current.exists():
-            history_dir = video_path.parent / "thumbnail_history"
+            history_dir = current.parent / "thumbnail_history"
             history_dir.mkdir(parents=True, exist_ok=True)
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
             shutil.copy2(current, archive)
@@ -1000,6 +1043,8 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         except Exception:
             pass
         db.close()
+        if temp_dir:
+            temp_dir.cleanup()
 
 
 @router.post("/{video_id}/thumbnail/regenerate")
@@ -1022,8 +1067,10 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     channel = video.channel
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    video_path = STORAGE_PATH / video.output_path if video.output_path else None
-    if not video_path or not video_path.exists():
+    output_ref = str(video.output_path or "")
+    is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+    video_path = STORAGE_PATH / output_ref if output_ref and not is_remote else None
+    if video_path is not None and not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
     # Each regeneration archives the thumbnail it's about to replace into
     # thumbnail_history/ (see _regenerate_thumbnail_background below) BEFORE
@@ -1066,8 +1113,10 @@ def get_thumbnail_regenerate_status(video_id: str, current_user: User = Depends(
 @router.get("/{video_id}/thumbnail/history")
 def list_video_thumbnail_history(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    video_path = STORAGE_PATH / video.output_path if video.output_path else None
-    history_dir = video_path.parent / "thumbnail_history" if video_path else None
+    output_ref = str(video.output_path or "")
+    is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+    video_path = STORAGE_PATH / output_ref if output_ref and not is_remote else STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output.mp4"
+    history_dir = video_path.parent / "thumbnail_history"
     items = []
     if history_dir and history_dir.is_dir():
         items = [{"filename": p.name, "url": f"/api/videos/{video.id}/thumbnail/history/{p.name}"} for p in sorted(history_dir.glob('*.jpg'), reverse=True)]
