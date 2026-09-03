@@ -168,6 +168,22 @@ def process_single_queued_video() -> bool:
         # to spend thumbnail credits; a legacy boolean alone is never enough.
         thumbnail_style = channel.thumbnail_style or {}
         thumbnail_enabled = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
+        # video.thumbnail_text is only ever populated by the post-render
+        # metadata step further down — at this point, before render has even
+        # started, it's still empty, so this used to fall back straight to
+        # video.title (the full headline, often 10+ words). GPT Image 2 tries
+        # to cram all of it into the reserved ~42% text area and, past a
+        # certain length, starts dropping/truncating words mid-render
+        # ("EMPÊC", "DÉGIVRE T") instead of the short 2-7 word punchline it's
+        # actually designed for. Generating the short thumbnail_text now
+        # (cheap, single call) costs a few seconds up front but keeps the
+        # much longer parallel image render fed with text that actually fits.
+        if not video.thumbnail_text:
+            try:
+                video.thumbnail_text = youtube_metadata.generate_metadata(video, channel).get("thumbnail_text")
+                db.commit()
+            except Exception as exc:
+                logger.warning(f"Early thumbnail_text generation failed for video {video.id}, falling back to the full title: {exc}")
         thumbnail_future = thumbnail_executor.submit(
             youtube_metadata.generate_thumbnail,
             video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
@@ -1277,6 +1293,11 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         input_type="text",
         creation_source="automatic",
         script_text="",
+        # Placeholder until generate_daily_script returns the real one below
+        # — without it the row shows "(sans titre)" in "Mes Vidéos"/admin for
+        # the whole topic-research + script-writing window, which reads as
+        # broken even though nothing has failed.
+        title=f"{channel.name or channel.niche} — nouvelle vidéo",
         status=VideoStatus.RENDERING.value,
         progress_stage="Recherche du sujet",
         progress_percent=1,
@@ -1661,16 +1682,39 @@ def run_daily_automation():
                 if local_minutes < target_minutes:
                     continue
 
+            # Reserve the slot BEFORE generating, with a conditional UPDATE
+            # keyed on the value just read (optimistic lock), not after —
+            # generate_and_queue_auto_video can run for minutes (a
+            # multi-part script is several sequential Claude calls), and the
+            # old and new worker containers briefly overlap during every
+            # deploy (Coolify starts the replacement before killing the
+            # original). Both processes used to read the same stale
+            # `already` count, both pass the `already >= quota` check, and
+            # both generate — this channel got a 2nd unwanted video the same
+            # day this way more than once. Only the process whose UPDATE
+            # actually matches a row (rowcount > 0) may proceed; the loser
+            # sees rowcount 0 and skips, exactly as if it were over quota.
+            reserved = db.query(Channel).filter(
+                Channel.id == channel.id,
+                Channel.auto_videos_generated_today == already,
+            ).update({"auto_videos_generated_today": already + 1})
+            db.commit()
+            if not reserved:
+                continue
+
             video = generate_and_queue_auto_video(db, channel)
             if not video:
-                # Leave the counter untouched so this slot is retried on the
-                # next check within today's window instead of silently
-                # skipping it on a transient Claude failure.
+                # Generation failed (or was legitimately skipped, e.g.
+                # insufficient credit) — release the slot so this is
+                # retried on the next check within today's window instead
+                # of silently burning it on a transient failure.
+                db.query(Channel).filter(Channel.id == channel.id).update(
+                    {"auto_videos_generated_today": already}
+                )
+                db.commit()
                 logger.warning(f"Daily automation: script generation failed for channel {channel.id} ('{channel.name}'); will retry.")
                 continue
 
-            channel.auto_videos_generated_today = already + 1
-            db.commit()
             logger.info(f"Daily automation: queued auto-generated video {already + 1}/{quota} for channel {channel.id} ('{channel.name}') — \"{video.title}\".")
 
             # Only pace actual launches, not skipped channels — otherwise a
