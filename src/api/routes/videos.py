@@ -1382,6 +1382,45 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
     db.refresh(video)
     return video.to_dict()
 
+def _resolve_scene_thumbnail(video: Video, scene: Dict[str, Any]) -> Path:
+    """A real image file to show for this scene's thumbnail.
+
+    Scenes built from an AI-generated or uploaded image have `image_path`
+    pointing straight at that file. But a video-slot scene (B-roll/user clip
+    — see orchestrator.py's scenes_manifest) has `image_path` set to None by
+    design; both the live "Suivi" panel and the post-render Studio editor
+    were still trying to load a still image for those scenes and silently
+    showing a broken <img> for every one of them on any channel using video
+    or mixed visuals. Grab a single frame out of the scene's own video
+    source instead, cached on disk so repeated polls don't re-run ffmpeg.
+    """
+    image_path = scene.get("image_path")
+    if image_path and Path(image_path).exists():
+        return Path(image_path)
+
+    visual_path = scene.get("visual_path")
+    if not visual_path:
+        raise HTTPException(status_code=404, detail="Aucune image pour cette scène.")
+    video_source = Path(visual_path)
+    if not video_source.exists():
+        raise HTTPException(status_code=404, detail="Le fichier source de cette scène est introuvable.")
+
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    thumbs_dir = video_dir / "source" / "thumbnails"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = thumbs_dir / f"scene_{scene.get('index', 0)}.jpg"
+    if not thumb_path.exists() or thumb_path.stat().st_mtime < video_source.stat().st_mtime:
+        try:
+            run_ffmpeg([
+                "ffmpeg", "-y", "-ss", "0.3", "-i", str(video_source),
+                "-frames:v", "1", "-q:v", "3", str(thumb_path),
+            ])
+        except Exception as e:
+            logger.warning(f"Scene thumbnail extraction failed for video {video.id} scene {scene.get('index')}: {e}")
+            raise HTTPException(status_code=404, detail="Aperçu indisponible pour cette scène.")
+    return thumb_path
+
+
 def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     scenes_path = video_dir / "source" / "scenes.json"
@@ -1424,7 +1463,12 @@ def get_video_production_progress(video_id: str, current_user: User = Depends(ge
                 "duration": item.get("duration"),
                 "text": item.get("text") or "",
                 "visual_type": item.get("visual_type") or "image",
-                "image_url": f"/videos/{video.id}/production-assets/{Path(item.get('image_path') or item.get('visual_path') or '').name}",
+                # Routed through the same thumbnail endpoint as the
+                # post-render editor (not production-assets/{filename}
+                # directly) — a video-slot scene (B-roll/user clip) has no
+                # still image file to serve as-is, and that endpoint only
+                # ever grabs one frame out of the video source on demand.
+                "image_url": f"/videos/{video.id}/scenes/{item.get('index', index)}/image",
             } for index, item in enumerate(manifest)]
         except Exception:
             scenes = []
@@ -1540,10 +1584,7 @@ def get_scene_image(video_id: str, scene_index: int, db: Session = Depends(get_d
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
-    image_path = Path(scene["image_path"])
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Scene image file not found on disk")
-    return FileResponse(image_path)
+    return FileResponse(_resolve_scene_thumbnail(video, scene))
 
 
 @router.post("/{video_id}/scenes/{scene_index}/image")
