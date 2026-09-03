@@ -136,6 +136,7 @@ def build_video_clip(
     output_clip_path: Path,
     duration: float,
     fps: int = 30,
+    start_offset: float = 0.0,
     **_unused_image_only_kwargs,
 ) -> Path:
     """Prepare a creator-provided B-roll or fetched stock clip for one
@@ -144,6 +145,15 @@ def build_video_clip(
     The source is looped when shorter than the scene and center-cropped to the
     same 1920x1080 canvas as image scenes. Audio from the B-roll is discarded;
     the narration/mix remains the single authoritative audio track.
+
+    start_offset (seconds) lets a single long "pillar" clip — e.g. a talking-
+    head avatar recording used as the channel's only visual source — play
+    through continuously across every scene it's assigned to, instead of every
+    scene independently restarting the clip from 0:00 (which read as the
+    avatar visibly snapping back to the start at each cut). orchestrator.py
+    tracks a running cursor per source clip and passes each scene's own
+    starting point here; -stream_loop keeps that cursor valid (wraps back to
+    the beginning) even once it runs past the clip's own actual length.
 
     `**_unused_image_only_kwargs` absorbs the Ken-Burns-only parameters
     (zoom_min_pct, zoom_max_pct, energy, scene_index, editing_profile) that
@@ -158,12 +168,18 @@ def build_video_clip(
     # every single video scene (creator B-roll included) before any output
     # was written.
     filter_graph = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps={},format=yuv420p".format(fps)
-    cmd = [
-        "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(video_path),
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(video_path)]
+    if start_offset > 0:
+        # Output-position seek (placed after -i, not before) — with
+        # -stream_loop the source is effectively an infinite stream, so this
+        # correctly wraps to the beginning again once start_offset exceeds
+        # the clip's own real duration, instead of erroring or freezing.
+        cmd.extend(["-ss", f"{start_offset:.3f}"])
+    cmd.extend([
         "-t", f"{duration:.3f}", "-vf", filter_graph,
         "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
         str(output_clip_path),
-    ]
+    ])
     output_clip_path.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(cmd)
     return output_clip_path

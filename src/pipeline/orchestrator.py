@@ -257,10 +257,23 @@ def run_video_pipeline(
         storage_root = STORAGE_PATH.resolve()
         if storage_root in candidate_dir.parents and candidate_dir.is_dir():
             broll_paths = sorted([p for p in candidate_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}])
+    # Per-scene starting offset (seconds) into whichever B-roll clip that scene
+    # ends up using — plays a single long "pillar" clip (e.g. a talking-head
+    # avatar recording) through continuously across every scene it's assigned
+    # to instead of restarting from 0:00 at each scene cut, which read as the
+    # avatar visibly snapping back to the start every few seconds. Looped
+    # (via build_video_clip's -stream_loop) once a clip's own runtime is
+    # exhausted, so a short clip still just keeps playing rather than freezing
+    # on its last frame.
+    visual_video_start_offsets = [0.0] * len(segments)
     if broll_paths:
+        broll_cursor = {p: 0.0 for p in broll_paths}
         for i in sorted(video_slot_indices):
-            visual_paths[i] = broll_paths[(i // 3) % len(broll_paths)]
+            clip_path = broll_paths[(i // 3) % len(broll_paths)]
+            visual_paths[i] = clip_path
             visual_types[i] = "video"
+            visual_video_start_offsets[i] = broll_cursor[clip_path]
+            broll_cursor[clip_path] += segments[i]["duration"]
         logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
 
     # Stock footage (Pexels) fills the scenes the creator's own clips don't
@@ -424,7 +437,7 @@ def run_video_pipeline(
         futures = [
             pool.submit(
                 build_video_clip if visual_types[i] == "video" else build_image_clip,
-                **({"video_path": visual_paths[i]} if visual_types[i] == "video" else {"image_path": visual_paths[i]}),
+                **({"video_path": visual_paths[i], "start_offset": visual_video_start_offsets[i]} if visual_types[i] == "video" else {"image_path": visual_paths[i]}),
                 output_clip_path=clip_paths[i],
                 duration=seg["duration"],
                 zoom_min_pct=zoom_min,
