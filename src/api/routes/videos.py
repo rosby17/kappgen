@@ -399,12 +399,38 @@ def _video_cost_transactions(db: Session, video: Video, user_id: str):
     return query.order_by(CreditTransaction.created_at.asc()).all()
 
 
+# Raw CreditTransaction.description strings (e.g. "voiceover_tts (46428 cr.
+# Izivoice x1.0)") are written for admin bookkeeping — provider name,
+# multiplier, real cost. A creator doesn't need to know it went through
+# Izivoice at x1.0, just what it paid for; matched by prefix and swapped for
+# a plain label here, admin's own view (which reuses the same
+# _video_cost_transactions helper) is untouched.
+_CLIENT_COST_LABELS = [
+    (re.compile(r"^ai_thumbnail_generation\b"), "Miniature générée par IA"),
+    (re.compile(r"^voiceover_tts\b"), "Voix off (synthèse vocale)"),
+    (re.compile(r"^transcription_stt\b"), "Transcription (sous-titres)"),
+    (re.compile(r"^ai_music_generation\b"), "Musique générée par IA"),
+    (re.compile(r"^music_video_generation\b"), "Génération de la vidéo musicale"),
+    (re.compile(r"^stock_media\b"), "Séquence / photo de stock (Pexels)"),
+    (re.compile(r"^Génération auto de script\b"), "Script généré automatiquement"),
+    (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de rendu"),
+    (re.compile(r"^Conservation vidéo\b"), "Conservation prolongée"),
+]
+
+
+def _client_cost_label(description: str) -> str:
+    for pattern, label in _CLIENT_COST_LABELS:
+        if pattern.match(description or ""):
+            return label
+    return description or "Autre"
+
+
 @router.get("/{video_id}/cost-recap")
 def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Itemized "what did this video cost" breakdown, shown right after a render finishes."""
     video = _get_owned_video(db, video_id, current_user)
     transactions = _video_cost_transactions(db, video, current_user.id)
-    items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
+    items = [{"description": _client_cost_label(t.description), "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
 def _download_filename(video: Video, suffix: str) -> str:
