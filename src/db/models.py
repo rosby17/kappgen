@@ -396,13 +396,14 @@ class Video(Base):
     finished_at = Column(DateTime, nullable=True)
 
     output_path = Column(String(512), nullable=True)
-    # "local" (default — output_path is STORAGE_PATH-relative) or "r2"
-    # (output_path is a full public URL on Cloudflare R2). See
-    # src/utils/r2_storage.py for the hybrid-storage decision; frontend's
-    # getVideoUrl() already passes full URLs through unchanged, so nothing
-    # else needs to know which backend a given video landed on.
+    # "local" (default — output_path is STORAGE_PATH-relative), "b2" (output_path
+    # is a full public URL on Backblaze B2 — current primary remote store), or
+    # "r2" (legacy Cloudflare R2 rows from before the Sept 2026 migration — see
+    # src/utils/b2_storage.py / src/utils/r2_storage.py). getVideoUrl() already
+    # passes full URLs through unchanged, so nothing else needs to know which
+    # backend a given video landed on.
     storage_backend = Column(String(10), nullable=False, default="local")
-    output_size_bytes = Column(Integer, nullable=True)  # output.mp4 size — feeds current_r2_usage_bytes()
+    output_size_bytes = Column(Integer, nullable=True)  # output.mp4 size — feeds current_b2_usage_bytes()
     # Opt-in per-video: skip the default retention purge entirely and prefer
     # uploading to R2 instead of local disk (see _finalize_output_storage /
     # purge_old_videos_and_uploads, queue_runner.py). Meant to be a paid

@@ -34,6 +34,22 @@ R2_PUBLIC_URL_BASE = os.getenv("R2_PUBLIC_URL_BASE", "").rstrip("/")
 # once on a paid plan (or set very high to effectively remove the cap).
 R2_FREE_TIER_CAP_BYTES = int(os.getenv("R2_FREE_TIER_CAP_BYTES", str(9_500_000_000)))
 
+# Backblaze B2 (S3-compatible) — replaces R2 as of Sept 2026, primary
+# rendered-video + B-roll storage (not a capped fallback like R2 was):
+# ~1/5 the storage cost of R2, free egress up to 3x the stored volume/day.
+# All five must be set for B2 to be used at all.
+B2_ENDPOINT = os.getenv("B2_ENDPOINT", "")  # e.g. s3.us-west-002.backblazeb2.com
+B2_REGION = os.getenv("B2_REGION", "us-west-002")
+B2_KEY_ID = os.getenv("B2_KEY_ID", "")
+B2_APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY", "")
+B2_BUCKET_NAME = os.getenv("B2_BUCKET_NAME", "")
+# Public bucket URL (path-style S3 endpoint works directly for a public
+# bucket, no custom domain needed) — videos are served directly from here.
+B2_PUBLIC_URL_BASE = os.getenv("B2_PUBLIC_URL_BASE", "").rstrip("/")
+# 0/unset = no cap (B2 is cheap enough to just always use it once configured,
+# unlike R2's free-tier-first fallback behavior).
+B2_FREE_TIER_CAP_BYTES = int(os.getenv("B2_FREE_TIER_CAP_BYTES", "0"))
+
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty

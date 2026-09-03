@@ -28,18 +28,15 @@ from src.config import STORAGE_PATH, AUTOMATION_LAUNCH_SPACING_SECONDS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 
-# Tightened to 48h after the VPS disk filled up (200GB, rendered videos alone
-# were 84GB) and started failing deploys mid-build — every video, regardless
-# of plan, gets purged this fast by default now. The escape hatch is
-# Video.extended_retention (an explicit per-video opt-in, meant to become a
-# paid feature later — see videos.py's PATCH endpoint): those videos are
-# excluded from this purge entirely and get uploaded to R2 instead of local
-# disk (see _finalize_output_storage below), so "keep it longer" doesn't
-# just mean "sit on the same small VPS disk longer."
+# RETIRED Sept 2026: the old policy (every video purged from local disk
+# after 48h, unless Video.extended_retention was set) existed because the
+# VPS disk kept filling up. That's no longer the fix — every finished
+# render now moves to Backblaze B2 automatically regardless of
+# extended_retention (see _finalize_output_storage), which is what actually
+# keeps the VPS disk light, so there's no more reason to delete a creator's
+# video on a clock. purge_old_videos_and_uploads() no longer uses these;
+# kept only so any lingering reference/migration doesn't explode.
 VIDEO_RETENTION_HOURS = 48
-# How long before the 48h purge a creator gets emailed a heads-up — enough
-# time to notice and download, not so early the warning arrives while the
-# video is barely finished rendering.
 VIDEO_EXPIRY_WARNING_HOURS_BEFORE = 6
 # Editable scene assets (images/clips kept for the post-render editor) get
 # their own, separate purge — either at this deadline, or immediately if the
@@ -999,28 +996,28 @@ def requeue_orphaned_voice_clone_jobs():
 
 def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     """Sets video.output_path (+ storage_backend/output_size_bytes) for a
-    just-finished render. Only videos with extended_retention set even
-    attempt R2 — everything else gets auto-purged from local disk within
-    VIDEO_RETENTION_HOURS anyway, so there's no point spending R2's free-tier
-    quota on something that won't outlive it. Uploads when there's tracked
-    room under the free-tier cap (see r2_storage.should_upload_to_r2);
-    otherwise — R2 not configured, over the cap, or the upload itself
-    failed — falls back to the local STORAGE_PATH-relative path exactly like
-    before R2 existed. Local file is only deleted after a confirmed-successful
-    R2 upload."""
-    from src.utils import r2_storage
+    just-finished render. Since the Sept 2026 move to Backblaze B2 (~1/5 the
+    cost of R2, no meaningful free-tier cap to ration), EVERY finished render
+    uploads to B2 by default — not just extended_retention ones — freeing the
+    VPS's own small shared disk immediately instead of only after a 48h purge
+    window (that destructive auto-delete policy is gone; see
+    purge_old_videos_and_uploads). Falls back to the local
+    STORAGE_PATH-relative path only when B2 isn't configured or the upload
+    itself failed — never lose a render because B2 had a bad moment. Local
+    file is only deleted after a confirmed-successful B2 upload."""
+    from src.utils import b2_storage
 
     try:
         size_bytes = output_mp4.stat().st_size
     except OSError:
         size_bytes = None
 
-    if video.extended_retention and size_bytes and r2_storage.should_upload_to_r2(db, size_bytes):
+    if size_bytes and b2_storage.should_upload_to_b2(db, size_bytes):
         object_key = f"channels/{video.channel_id}/videos/{video.id}/output.mp4"
-        url = r2_storage.upload_video(output_mp4, object_key)
+        url = b2_storage.upload_video(output_mp4, object_key)
         if url:
             video.output_path = url
-            video.storage_backend = "r2"
+            video.storage_backend = "b2"
             video.output_size_bytes = size_bytes
             try:
                 output_mp4.unlink()
@@ -1042,11 +1039,19 @@ def purge_old_render_output(video: Video) -> None:
     history/stats stay intact. The local video directory is moved wholesale
     into storage/trash/{channel_id}/{video_id}/ — recoverable server-side,
     not destroyed — one shared trash folder for every user by default, no
-    opt-in needed. Only the R2-hosted output.mp4 (when storage_backend is
-    "r2") is still actually deleted from R2 itself, since that's a paid
-    object store with its own separate lifecycle, not local disk this trash
-    folder is meant to declutter."""
-    if video.storage_backend == "r2" and video.output_path:
+    opt-in needed. Only the remote-hosted output.mp4 (storage_backend "b2",
+    or legacy "r2" for videos uploaded before the Sept 2026 migration) is
+    still actually deleted from the object store itself, since that's a paid
+    resource with its own separate lifecycle, not local disk this trash
+    folder is meant to declutter. Not on the automatic clock any more (the
+    old 48h auto-purge is gone — see purge_old_videos_and_uploads) — this
+    now only runs for an explicit user-triggered deletion."""
+    if video.storage_backend == "b2" and video.output_path:
+        from src.utils import b2_storage
+        object_key = b2_storage.object_key_from_url(video.output_path)
+        if object_key:
+            b2_storage.delete_video(object_key)
+    elif video.storage_backend == "r2" and video.output_path:
         from src.utils import r2_storage
         object_key = r2_storage.object_key_from_url(video.output_path)
         if object_key:
@@ -1210,52 +1215,21 @@ def warn_expiring_videos():
 
 def purge_old_videos_and_uploads():
     """
-    Frees disk space on the shared VPS:
-    - Deletes rendered video files (output.mp4 + source assets) for videos
-      finished more than VIDEO_RETENTION_HOURS ago — unless the video has
-      extended_retention set, in which case it's skipped entirely (those
-      live on R2, not this disk, and aren't meant to be auto-deleted).
-      Also skipped if the creator hasn't downloaded it or published it to
-      YouTube yet — a video can sit "done" for a couple of days while the
-      creator is still deciding whether to publish it, and auto-deleting
-      their only copy out from under them just because the clock ran out
-      is exactly the kind of surprise this retention job shouldn't cause.
-      Once either downloaded_at or youtube_published_at is set, the file
-      has a copy living elsewhere and is safe to purge on the usual schedule.
-      The DB record is kept (purged_at is set, output_path cleared) so
-      history/counters remain.
+    Frees disk space on the shared VPS WITHOUT touching a creator's finished
+    videos any more. Since Sept 2026 (the move to Backblaze B2, cheap enough
+    to be the default store rather than a rationed opt-in — see
+    _finalize_output_storage) every finished render already leaves local
+    disk right away; the old policy of destructively deleting a video's
+    output.mp4 after VIDEO_RETENTION_HOURS was dropped, so creators keep
+    their videos indefinitely with no clock running on them any more.
+    What's left here:
     - Deletes uploaded source audio files older than UPLOAD_RETENTION_HOURS —
       they're only needed once, at render time, and are never reused after.
+      This is temp working storage, not a user's finished output — the one
+      category of thing that can still legitimately saturate the VPS disk
+      and is safe to clear automatically.
     """
-    db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(hours=VIDEO_RETENTION_HOURS)
-        stale_videos = (
-            db.query(Video)
-            .filter(Video.status == VideoStatus.DONE.value)
-            .filter(Video.purged_at.is_(None))
-            .filter(or_(Video.extended_retention.is_(False), Video.retention_until <= datetime.utcnow()))
-            .filter(Video.finished_at.isnot(None))
-            .filter(Video.finished_at < cutoff)
-            .filter(or_(Video.downloaded_at.isnot(None), Video.youtube_published_at.isnot(None)))
-            .all()
-        )
-        for video in stale_videos:
-            try:
-                purge_old_render_output(video)
-                video.output_path = None
-                video.source_assets_path = None
-                video.purged_at = datetime.utcnow()
-                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {VIDEO_RETENTION_HOURS}h).")
-            except Exception as purge_err:
-                logger.warning(f"Failed to purge video {video.id}: {purge_err}")
-        if stale_videos:
-            db.commit()
-
-        # Uploaded source audio is only needed once, at render time (it gets
-        # copied into the video's own source/ dir when picked up by the
-        # worker); anything older than the retention window is safe to drop
-        # even if a video record still points at it.
         uploads_dir = STORAGE_PATH / "uploads"
         if uploads_dir.exists():
             upload_cutoff = time.time() - (UPLOAD_RETENTION_HOURS * 3600)
@@ -1264,8 +1238,6 @@ def purge_old_videos_and_uploads():
                     f.unlink(missing_ok=True)
     except Exception as e:
         logger.warning(f"Storage purge pass failed: {e}")
-    finally:
-        db.close()
 
 
 AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
@@ -2130,7 +2102,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     while not _shutdown_requested:
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
-            warn_expiring_videos()
+            # warn_expiring_videos() dropped along with the 48h auto-delete
+            # policy it existed to warn about — videos aren't purged on a
+            # clock any more (see purge_old_videos_and_uploads).
             purge_old_videos_and_uploads()
             purge_stale_edit_assets()
             last_purge = now

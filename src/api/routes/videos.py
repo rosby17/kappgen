@@ -516,11 +516,11 @@ def download_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # output_path is a full R2 URL for videos stored there, not a local
-    # STORAGE_PATH-relative path — thumbnail.jpg always stays local
-    # regardless (see _finalize_output_storage), sitting next to wherever
-    # this video's other local render artifacts live.
-    if video.storage_backend == "r2":
+    # output_path is a full B2 (or legacy R2) URL for videos stored there,
+    # not a local STORAGE_PATH-relative path — thumbnail.jpg always stays
+    # local regardless (see _finalize_output_storage), sitting next to
+    # wherever this video's other local render artifacts live.
+    if video.storage_backend in ("b2", "r2"):
         thumbnail_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
     else:
         thumbnail_path = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")

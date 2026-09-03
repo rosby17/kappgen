@@ -2428,17 +2428,17 @@ def start_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUploa
     Once uploaded, call /direct-upload/confirm to pull it onto local disk so
     the rest of the pipeline (which only knows local B-roll paths) needs no
     changes at all."""
-    from src.utils import r2_storage
+    from src.utils import b2_storage
     channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
     ext = Path(payload.filename or "").suffix.lower()
     if ext not in ALLOWED_BROLL_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Format non supporté (MP4, MOV, WebM ou M4V).")
-    if not r2_storage.is_r2_configured():
+    if not b2_storage.is_b2_configured():
         raise HTTPException(status_code=503, detail="L'envoi direct de gros fichiers n'est pas disponible pour le moment.")
     object_key = f"staging/broll/{channel.id}/{uuid.uuid4().hex}{ext}"
-    upload_url = r2_storage.presigned_put_url(object_key, content_type=payload.content_type or "video/mp4")
+    upload_url = b2_storage.presigned_put_url(object_key, content_type=payload.content_type or "video/mp4")
     if not upload_url:
         raise HTTPException(status_code=502, detail="Impossible de préparer l'envoi direct. Réessaie.")
     return {"upload_url": upload_url, "object_key": object_key}
@@ -2458,8 +2458,8 @@ def confirm_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUpl
     — after this the clip is a completely ordinary local B-roll file, so
     nothing downstream (orchestrator, list/delete endpoints) needs to know
     it ever went through R2."""
-    from src.utils import r2_storage
-    from src.config import R2_PUBLIC_URL_BASE
+    from src.utils import b2_storage
+    from src.config import B2_PUBLIC_URL_BASE
     channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
@@ -2473,7 +2473,7 @@ def confirm_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUpl
     broll_dir.mkdir(parents=True, exist_ok=True)
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(payload.filename or "broll").stem)[:60] or "broll"
     dest = broll_dir / f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
-    public_url = f"{R2_PUBLIC_URL_BASE}/{object_key}"
+    public_url = f"{B2_PUBLIC_URL_BASE}/{object_key}"
     total = 0
     try:
         with httpx.stream("GET", public_url, timeout=300.0) as resp:
@@ -2486,10 +2486,10 @@ def confirm_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUpl
                     f.write(chunk)
     except Exception as exc:
         dest.unlink(missing_ok=True)
-        r2_storage.delete_video(object_key)
+        b2_storage.delete_video(object_key)
         detail = "Fichier trop volumineux (2 Go max)." if str(exc) == "too_large" else "Échec de la récupération du fichier envoyé. Réessaie."
         raise HTTPException(status_code=400 if str(exc) == "too_large" else 502, detail=detail)
-    r2_storage.delete_video(object_key)
+    b2_storage.delete_video(object_key)
     style = dict(channel.image_style or {})
     style["broll_path"] = f"channels/{channel.id}/broll"
     style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])
