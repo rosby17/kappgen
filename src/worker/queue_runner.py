@@ -1609,6 +1609,20 @@ def run_daily_automation():
             Channel.content_type != "music",
         ).all()
         for channel in channels:
+            # Re-fetch this channel's current state right before using it —
+            # the sweep loads every eligible channel once up front, then
+            # works through them one by one with a real delay between each
+            # (AUTOMATION_LAUNCH_SPACING_SECONDS, plus however long script
+            # generation itself takes), so a channel far down the list can
+            # be minutes stale by the time its turn comes. A voice (or
+            # niche, script structure, etc.) the creator just configured
+            # mid-sweep must be picked up by the very next channel processed,
+            # not only on the next sweep — an explicit refresh removes any
+            # doubt, regardless of SQLAlchemy's own expire-on-commit timing.
+            try:
+                db.refresh(channel)
+            except Exception:
+                continue  # channel was deleted/became unreachable mid-sweep
             today_str, seconds_into_day = _channel_local_date_and_seconds(channel)
             if channel.last_auto_run_date != today_str:
                 channel.last_auto_run_date = today_str
