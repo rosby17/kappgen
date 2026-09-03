@@ -168,6 +168,22 @@ def process_single_queued_video() -> bool:
         # to spend thumbnail credits; a legacy boolean alone is never enough.
         thumbnail_style = channel.thumbnail_style or {}
         thumbnail_enabled = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
+        # video.thumbnail_text is only ever populated by the post-render
+        # metadata step further down — at this point, before render has even
+        # started, it's still empty, so this used to fall back straight to
+        # video.title (the full headline, often 10+ words). GPT Image 2 tries
+        # to cram all of it into the reserved ~42% text area and, past a
+        # certain length, starts dropping/truncating words mid-render
+        # ("EMPÊC", "DÉGIVRE T") instead of the short 2-7 word punchline it's
+        # actually designed for. Generating the short thumbnail_text now
+        # (cheap, single call) costs a few seconds up front but keeps the
+        # much longer parallel image render fed with text that actually fits.
+        if not video.thumbnail_text:
+            try:
+                video.thumbnail_text = youtube_metadata.generate_metadata(video, channel).get("thumbnail_text")
+                db.commit()
+            except Exception as exc:
+                logger.warning(f"Early thumbnail_text generation failed for video {video.id}, falling back to the full title: {exc}")
         thumbnail_future = thumbnail_executor.submit(
             youtube_metadata.generate_thumbnail,
             video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
