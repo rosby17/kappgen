@@ -651,10 +651,16 @@ def _installed_font_families() -> tuple[str, ...]:
     The picker is deliberately backed by fontconfig rather than a large
     hard-coded list: every displayed family can therefore be resolved by the
     same renderer that burns the subtitles into the finished video.
+
+    Filtered to families that cover French (``:lang=fr``) — the render
+    container also ships full script coverage (Tamil, Thai, CJK, etc.) for
+    non-Latin niches, which otherwise buries the picker under dozens of
+    "Noto Sans <Script> UI <Weight>" variants nobody writing French
+    subtitles would ever pick.
     """
     try:
         result = subprocess.run(
-            ["fc-list", "--format=%{family}\n"],
+            ["fc-list", ":lang=fr", "--format=%{family}\n"],
             capture_output=True,
             text=True,
             timeout=15,
