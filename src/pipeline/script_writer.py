@@ -184,8 +184,8 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
             operation='script_topic', cost_sink=cost_sink,
             enable_web_search=bool(use_web_trends or youtube_sources_block),
             # Topic selection is a short auxiliary task; keep Sonnet for the
-            # long-form narration itself and use the cheaper provider first.
-            preferred_provider='deepseek',
+            # long-form narration itself and use Gemini's free tier first.
+            preferred_provider='gemini',
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
@@ -246,9 +246,9 @@ Originality guardrail: older videos from this channel commonly used the followin
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
         # Short utility sections (hook/conclusion) do not need Sonnet-level
-        # reasoning. DeepSeek is preferred for those; long sections remain on
-        # Claude for quality and continuity, with normal fallback behavior.
-        preferred_provider = "deepseek" if word_count <= 400 else None
+        # reasoning. Gemini's free tier is preferred for those; long sections
+        # remain on Claude for quality and continuity, with normal fallback.
+        preferred_provider = "gemini" if word_count <= 400 else None
         text = generate_text(
             instruction,
             max_tokens=max_tokens,
