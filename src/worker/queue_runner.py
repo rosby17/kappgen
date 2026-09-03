@@ -40,8 +40,11 @@ VIDEO_RETENTION_HOURS = 48
 VIDEO_EXPIRY_WARNING_HOURS_BEFORE = 6
 # Editable scene assets (images/clips kept for the post-render editor) get
 # their own, separate purge — either at this deadline, or immediately if the
-# user explicitly closes the editor.
-EDIT_ASSETS_RETENTION_DAYS = 7
+# user explicitly closes the editor. Tightened from 7 to 3 days (Sept 2026):
+# now that purge_edit_assets archives to B2 before deleting (never a real
+# loss), there's no reason to let 3 extra days of editable-window footprint
+# pile up on local disk.
+EDIT_ASSETS_RETENTION_DAYS = 3
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
 
