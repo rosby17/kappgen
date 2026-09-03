@@ -956,14 +956,22 @@ def search_public_library(
                 # community thumbnail, while Pexels items (whose URLs are
                 # already absolute) loaded fine and hid the bug.
                 asset_url = f"/channels/public-library/community/{folder.channel_id}/{quote(asset.name)}"
+                # _persist_generated_images_to_channel_library (images.py) names
+                # every scene image it auto-copies into a channel's shared
+                # library "generated_N.ext" — a reliable, already-existing
+                # marker for "KappGen's own AI made this", as opposed to
+                # something the creator uploaded themselves. Surfaced as a
+                # distinct provider so a browsing creator can tell which is
+                # which, rather than both reading as generic "community".
+                is_ai_generated = asset.name.startswith("generated_")
                 items.append({
                     "id": f"community-{folder.channel_id}-{asset.name}",
                     "type": "photos",
-                    "provider": "community",
+                    "provider": "ai_generated" if is_ai_generated else "community",
                     "thumbnail_url": asset_url,
                     "asset_url": asset_url,
                     "source_url": None,
-                    "author": "Communauté KappGen",
+                    "author": "KappGen AI" if is_ai_generated else "Communauté KappGen",
                     "author_url": None,
                     "width": None,
                     "height": None,
