@@ -943,10 +943,6 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     channel = video.channel
     if not channel or not channel.youtube_refresh_token:
         raise HTTPException(status_code=409, detail="Chaîne non connectée à YouTube.")
-    video_path = STORAGE_PATH / video.output_path if video.output_path else None
-    if not video_path or not video_path.exists():
-        raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
-
     access_token = youtube_publisher.get_valid_access_token(channel)
     if not access_token:
         raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
@@ -956,9 +952,10 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     # regenerated) instead of generating yet another new one, which used to
     # silently diverge from what was actually visible in the app. Only
     # generate one from scratch for a legacy video that never got one.
-    thumbnail_path = video_path.with_name("thumbnail.jpg")
-    if not thumbnail_path.exists():
-        thumbnail_path, _ = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
+    try:
+        thumbnail_path = _ensure_local_thumbnail(video)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Impossible de récupérer la vidéo depuis le stockage : {str(exc)[:200]}")
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
@@ -1126,7 +1123,7 @@ def list_video_thumbnail_history(video_id: str, current_user: User = Depends(get
 @router.get("/{video_id}/thumbnail/history/{filename}")
 def get_video_thumbnail_history(video_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    base = (STORAGE_PATH / video.output_path).parent / "thumbnail_history"
+    base = (STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail_history") if _video_is_remote(video) else (STORAGE_PATH / video.output_path).parent / "thumbnail_history"
     path = base / filename
     if not path.exists() or not path.is_relative_to(base):
         raise HTTPException(status_code=404, detail="Version introuvable")
@@ -1135,7 +1132,7 @@ def get_video_thumbnail_history(video_id: str, filename: str, current_user: User
 @router.post("/{video_id}/thumbnail/history/{filename}/restore")
 def restore_video_thumbnail_history(video_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    current = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
+    current = (STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg") if _video_is_remote(video) else (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
     base = current.parent / "thumbnail_history"
     source = base / filename
     if not source.exists() or not source.is_relative_to(base):
