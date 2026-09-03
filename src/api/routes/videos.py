@@ -55,6 +55,16 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     media_mode = image_style.get("media_mode", "images")
     enabled = resolve_enabled_image_sources(image_style)
 
+    # Mixed/video montage can source its motion footage from Pexels even when
+    # the creator has not uploaded B-roll or explicitly enabled the public
+    # image library. The montage mode itself is the creator's request for
+    # stock video; do not reject a valid configuration before the worker can
+    # perform that search.
+    if media_mode in ("mixed", "videos"):
+        from src.config import PEXELS_API_KEY
+        if PEXELS_API_KEY:
+            return
+
     if "ai_generated" in enabled and media_mode != "videos":
         # Scene images (unlike thumbnails, which can use a paid
         # reference-image-conditioned provider) are generated exclusively
@@ -607,6 +617,22 @@ def get_youtube_compliance(video_id: str, current_user: User = Depends(get_curre
     return _refresh_compliance_report(db, video)
 
 
+@router.get("/{video_id}/youtube/status")
+def get_youtube_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Cheap, read-only check the video card uses before deciding whether
+    "Voir sur YouTube" should just open the link or route through the
+    publish-review modal to offer a republish (see POST .../youtube/publish,
+    which does the authoritative check + republish itself — this endpoint
+    only decides which UI to show, never mutates anything)."""
+    video = _get_owned_video(db, video_id, current_user)
+    if not video.youtube_video_id:
+        return {"published": False, "exists": False}
+    channel = video.channel
+    access_token = channel and youtube_publisher.get_valid_access_token(channel)
+    exists = youtube_publisher.video_exists(access_token, video.youtube_video_id) if access_token else True
+    return {"published": True, "exists": exists, "youtube_video_id": video.youtube_video_id}
+
+
 @router.get("/{video_id}/youtube/compliance/dossier")
 def get_youtube_compliance_dossier(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
@@ -656,15 +682,29 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
     video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value or not video.output_path:
         raise HTTPException(status_code=409, detail="La vidéo doit être prête avant sa publication.")
-    if video.youtube_video_id:
-        return {
-            "status": "already_published",
-            "youtube_video_id": video.youtube_video_id,
-            "youtube_url": f"https://youtu.be/{video.youtube_video_id}",
-            "video": video.to_dict(),
-        }
 
     channel = video.channel
+    if video.youtube_video_id:
+        # Before refusing as "already published", confirm it's actually still
+        # live — a creator who deleted the video on YouTube (or had it taken
+        # down) has no other way to get it back online otherwise. Reuses the
+        # exact same publish flow below with the video's existing title/
+        # description/thumbnail, since try_publish_to_youtube already prefers
+        # those over regenerating when they're already set.
+        access_token = channel and youtube_publisher.get_valid_access_token(channel)
+        still_live = youtube_publisher.video_exists(access_token, video.youtube_video_id) if access_token else True
+        if still_live:
+            return {
+                "status": "already_published",
+                "youtube_video_id": video.youtube_video_id,
+                "youtube_url": f"https://youtu.be/{video.youtube_video_id}",
+                "video": video.to_dict(),
+            }
+        _append_compliance_event(video, "youtube_video_missing_republishing", {"previous_youtube_video_id": video.youtube_video_id})
+        video.youtube_video_id = None
+        video.youtube_published_at = None
+        db.commit()
+
     if not channel or not channel.youtube_refresh_token:
         auth_url = None
         if channel and youtube_publisher.is_configured():

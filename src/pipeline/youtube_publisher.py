@@ -28,6 +28,7 @@ from src.utils.logger import logger
 OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
+YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 YOUTUBE_THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 
@@ -128,6 +129,31 @@ def get_valid_access_token(channel) -> Optional[str]:
     except Exception as e:
         logger.warning(f"YouTube token refresh failed for channel {channel.id}: {e}")
         return None
+
+
+def video_exists(access_token: str, video_id: str) -> bool:
+    """Checks whether a previously-published video is still live on YouTube.
+    Used to offer "republish" once a creator notices a video is gone (deleted
+    by them, taken down by YouTube, copyright strike, etc.) — YouTube's
+    videos.list simply omits the id from `items` instead of erroring, so an
+    empty result IS the "gone" signal, not an exception to catch.
+    Returns True on an inconclusive API failure (network error, expired
+    token) — never treat "we couldn't check" as "go ahead and republish",
+    since that risks uploading a duplicate of a video that's actually fine.
+    """
+    try:
+        resp = httpx.get(
+            YOUTUBE_VIDEOS_URL,
+            params={"part": "id", "id": video_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items") or []
+        return len(items) > 0
+    except Exception as e:
+        logger.warning(f"YouTube video_exists check failed for {video_id}, assuming still live: {e}")
+        return True
 
 
 def upload_video(
