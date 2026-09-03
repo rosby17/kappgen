@@ -17,6 +17,11 @@ from src.pipeline.assembler import assemble_final_video, check_ffmpeg_filter
 from src.pipeline.editing_direction import resolve_editing_profile
 
 
+def unresolved_visual_indices(visual_paths) -> list:
+    """A scene is resolved only when it has a concrete media path."""
+    return [index for index, path in enumerate(visual_paths) if not path]
+
+
 def _media_checkpoint_is_valid(path: Path, expected_duration: float, tolerance: float = 0.75) -> bool:
     """Whether a completed media artifact can safely be reused after restart.
 
@@ -201,7 +206,11 @@ def run_video_pipeline(
     visual_types = ["image"] * len(visual_paths)
     if media_mode == "videos":
         visual_paths = [None] * len(segments)
-        visual_types = ["video"] * len(segments)
+        # "videos" expresses the creator's desired source, not that a real
+        # clip has already been resolved. Marking these empty slots as video
+        # made the Pexels pass below believe every scene was already filled,
+        # so it performed zero searches and later tried to render None paths.
+        visual_types = ["image"] * len(segments)
     elif len(visual_paths) < len(segments):
         visual_paths.extend([None] * (len(segments) - len(visual_paths)))
         visual_types.extend(["image"] * (len(segments) - len(visual_types)))
@@ -244,7 +253,10 @@ def run_video_pipeline(
                 return debit_izivoice_usage_by_user_id(user_id, STOCK_MEDIA_CREDITS, "stock_media", video_id=video_id)
 
             # Only scenes still without footage are worth a query/download.
-            open_indices = [i for i in range(len(segments)) if visual_types[i] != "video"]
+            # The path is the source of truth. A type label alone must never
+            # make an empty scene look resolved (especially in video-only
+            # mode, where every scene starts out wanting a video).
+            open_indices = unresolved_visual_indices(visual_paths)
             if open_indices:
                 queries = build_stock_search_queries(
                     segment_texts=[prompts[i] if i < len(prompts) else "" for i in open_indices],
@@ -267,11 +279,12 @@ def run_video_pipeline(
                     from src.pipeline.stock_video import fetch_stock_photo
                     photo_count = 0
                     for position, scene_index in enumerate(open_indices):
-                        if visual_types[scene_index] == "video" or visual_paths[scene_index]:
+                        if visual_paths[scene_index]:
                             continue
                         photo_path = fetch_stock_photo(queries[position])
                         if photo_path and _bill_stock_asset():
                             visual_paths[scene_index] = photo_path
+                            visual_types[scene_index] = "image"
                             photo_count += 1
                     if photo_count:
                         logger.info(f"Stock photos: {photo_count} scene(s) filled from Pexels ({photo_count * STOCK_MEDIA_CREDITS} credits billed).")
@@ -286,6 +299,29 @@ def run_video_pipeline(
                         if credits:
                             (source_dir / "stock_credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # A stock query can legitimately return no video/photo, the API can be
+    # unavailable, or a channel can use only its own B-roll. Never pass an
+    # empty path to FFmpeg: fill only the unresolved slots with the normal
+    # image pipeline (which itself ends in safe synthetic fallback artwork).
+    unresolved_indices = unresolved_visual_indices(visual_paths)
+    if unresolved_indices:
+        logger.warning(f"{len(unresolved_indices)} scene(s) still have no video; using image fallback assets.")
+        fallback_images = fetch_or_generate_images(
+            [prompts[i] if i < len(prompts) else (script_text or "")[:200] for i in unresolved_indices],
+            images_dir,
+            image_style_cfg,
+            unique_generation_count=min(len(unresolved_indices), unique_visual_count) if unique_visual_count else None,
+            user_id=channel_config.get("user_id"),
+            niche=channel_config.get("niche"),
+            channel_id=channel_config.get("id"),
+        )
+        for position, scene_index in enumerate(unresolved_indices):
+            if position < len(fallback_images):
+                visual_paths[scene_index] = fallback_images[position]
+                visual_types[scene_index] = "image"
+    if any(not path for path in visual_paths):
+        raise RuntimeError("Impossible de trouver ou de créer un visuel pour toutes les scènes.")
+
     # 5. Generate Subtitles ASS file
     logger.info("Step 4/7: Formatting ASS subtitles...")
     progress("Création des sous-titres", 55)
@@ -298,14 +334,15 @@ def run_video_pipeline(
     
     # Check if FFmpeg has libass 'subtitles' filter; if not, overlay text directly onto images
     has_libass = check_ffmpeg_filter("ass") or check_ffmpeg_filter("subtitles")
-    subtitled_image_paths = []
     subtitles_enabled = channel_config.get("subtitle_style", {}).get("enabled", True)
     
     if subtitles_enabled and not has_libass:
         logger.info("Applying direct subtitle burn onto image frames...")
         words = transcript_info.get("words", [])
         chunk_size = 6
-        for i, img_p in enumerate(image_paths):
+        for i, img_p in enumerate(visual_paths):
+            if visual_types[i] != "image":
+                continue
             sub_img = images_dir / f"subtitled_{i+1:03d}.png"
             if words:
                 start_idx = (i * chunk_size) % len(words)
@@ -313,9 +350,7 @@ def run_video_pipeline(
             else:
                 sub_text = script_text[:40]
             overlay_subtitles_on_image(img_p, sub_img, sub_text, channel_config.get("subtitle_style", {}))
-            subtitled_image_paths.append(sub_img)
-    else:
-        subtitled_image_paths = image_paths
+            visual_paths[i] = sub_img
 
     # 6. Build Dynamic Motion Video Clips
     logger.info("Step 5/7: Rendering motion video clips (Ken Burns effect)...")
@@ -348,7 +383,7 @@ def run_video_pipeline(
         futures = [
             pool.submit(
                 build_video_clip if visual_types[i] == "video" else build_image_clip,
-                **({"video_path": visual_paths[i]} if visual_types[i] == "video" else {"image_path": subtitled_image_paths[i]}),
+                **({"video_path": visual_paths[i]} if visual_types[i] == "video" else {"image_path": visual_paths[i]}),
                 output_clip_path=clip_paths[i],
                 duration=seg["duration"],
                 zoom_min_pct=zoom_min,
