@@ -196,16 +196,23 @@ def process_single_queued_video() -> bool:
         ) if thumbnail_enabled else None
 
         def await_parallel_thumbnail():
+            """Returns (path, ai_used) — ai_used=False means generate_thumbnail
+            fell all the way through to its own fallback (a plain solid-color
+            frame, since __thumbnail_source__.mp4 never exists this early —
+            the parallel job starts before the video is rendered, so it has
+            no real frame to grab either). The caller re-attempts a proper
+            thumbnail once the real output.mp4 exists — see the ai_used check
+            right after this is awaited below."""
             if thumbnail_future is None:
                 thumbnail_executor.shutdown(wait=False, cancel_futures=True)
-                return None
+                return None, False
             try:
-                result = thumbnail_future.result()
-                logger.info("Parallel GPT Image 2 thumbnail ready for video %s", video.id)
-                return result
+                result, ai_used = thumbnail_future.result()
+                logger.info("Parallel thumbnail ready for video %s (ai_used=%s)", video.id, ai_used)
+                return result, ai_used
             except Exception as exc:
                 logger.warning("Parallel thumbnail failed for video %s: %s", video.id, exc)
-                return None
+                return None, False
             finally:
                 thumbnail_executor.shutdown(wait=False, cancel_futures=False)
 
@@ -510,7 +517,24 @@ def process_single_queued_video() -> bool:
         except Exception as e:
             logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
-        await_parallel_thumbnail()
+        _, thumbnail_ai_used = await_parallel_thumbnail()
+        if not thumbnail_ai_used and thumbnail_enabled:
+            # The parallel attempt above started before the video existed, so
+            # on an AI failure it had no real frame to fall back to either
+            # (see await_parallel_thumbnail's docstring) — it just wrote a
+            # plain solid-color placeholder. Now that output_mp4 is a real,
+            # finished file, retry once for real: AI again (transient
+            # timeouts do happen), and this time a genuine representative
+            # frame of the actual video as the fallback instead of a blank.
+            try:
+                _, retried_ai_used = youtube_metadata.generate_thumbnail(
+                    output_mp4, thumbnail_destination,
+                    video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
+                    channel, video.id,
+                )
+                logger.info(f"Post-render thumbnail retry for video {video.id} succeeded (ai_used={retried_ai_used}).")
+            except Exception as exc:
+                logger.warning(f"Post-render thumbnail retry failed for video {video.id}, keeping the placeholder: {exc}")
 
         # A Trust Score is part of the finished video, not something the
         # creator has to remember to request. Run this final, post-render
@@ -802,7 +826,7 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         try:
             video.progress_stage = "Génération de la miniature"
             db.commit()
-            thumbnail_path = youtube_metadata.generate_thumbnail(
+            thumbnail_path, _ = youtube_metadata.generate_thumbnail(
                 output_mp4, existing_thumbnail, meta.get("thumbnail_text") or meta["title"], channel=channel, video_id=video.id
             )
         except Exception as e:
