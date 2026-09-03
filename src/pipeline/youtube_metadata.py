@@ -134,13 +134,66 @@ def _fallback_metadata(video, channel) -> dict:
     # No KappGen mention here: this text is published on the creator's own
     # channel, under their own brand — the tool that produced the video has no
     # business signing it.
-    description = (
-        f"{title}\n\n"
-        f"Une vidéo originale de {channel.name}.\n\n"
-        f"Abonne-toi à la chaîne pour découvrir les prochaines vidéos."
-    )
+    description = _rich_fallback_description(video, channel, title)
     tags = [tag for tag in [niche, channel.name] if tag]
     return {"title": title, "description": description, "tags": tags, "thumbnail_text": clean_thumbnail_headline(title)}
+
+
+def _timestamp(seconds: float) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _chapter_anchors(duration_seconds: float) -> list:
+    """Return fixed, truthful timestamps for the metadata model to title.
+
+    YouTube chapters need a 0:00 entry and work best with useful editorial
+    sections rather than one timestamp per visual scene. The model is allowed
+    to name these anchors, but never to invent their timing.
+    """
+    duration = max(0, int(duration_seconds or 0))
+    if duration < 60:
+        return [0]
+    chapter_count = max(3, min(9, round(duration / 150) + 1))
+    step = duration / chapter_count
+    return [round(i * step) for i in range(chapter_count)]
+
+
+def _script_excerpt(script: str, max_chars: int = 620) -> str:
+    text = re.sub(r"\s+", " ", script or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return cut + "…"
+
+
+def _rich_fallback_description(video, channel, title: str) -> str:
+    """Useful deterministic copy when no text provider is configured.
+
+    The old fallback merely repeated the title and channel name, which made a
+    completed publication look unfinished. This version remains honest (no
+    invented claims or visuals), but still tells viewers what they will get.
+    """
+    script = (getattr(video, "script_text", None) or "").strip()
+    excerpt = _script_excerpt(script)
+    duration = float(getattr(video, "duration_seconds", None) or 0)
+    anchors = _chapter_anchors(duration)
+    sections = [
+        title,
+        excerpt or f"Cette vidéo explore « {title} » et en présente les éléments essentiels de manière progressive.",
+        "Au fil de la vidéo, le sujet se construit étape par étape, avec ses informations importantes, ses moments clés et ce qu’il faut en retenir. Le montage visuel accompagne la narration et donne un rythme clair à chaque partie du contenu.",
+    ]
+    if len(anchors) > 1:
+        generic_titles = ["Introduction", "Mise en contexte", "Développement", "Points clés", "À retenir", "Conclusion"]
+        chapter_lines = []
+        for index, anchor in enumerate(anchors):
+            label = generic_titles[min(index, len(generic_titles) - 1)] if index < len(anchors) - 1 else "Conclusion"
+            chapter_lines.append(f"{_timestamp(anchor)} {label}")
+        sections.append("Chapitres\n" + "\n".join(chapter_lines))
+    sections.append(f"Si cette analyse t’aide à voir le sujet autrement, abonne-toi à {channel.name} et partage ton point de vue en commentaire.")
+    return "\n\n".join(sections)[:5000]
 
 
 def generate_metadata(video, channel) -> dict:
@@ -162,19 +215,35 @@ def generate_metadata(video, channel) -> dict:
         return fallback
     try:
         script = (video.script_text or "")[:12000]
+        duration = float(getattr(video, "duration_seconds", None) or 0)
+        chapter_anchors = ", ".join(_timestamp(value) for value in _chapter_anchors(duration))
         prompt = f"""Tu es l'Agent éditorial KappGen. Prépare la publication YouTube de cette vidéo.
 Chaîne: {channel.name}. Niche: {channel.niche}. Langue du script à conserver.
+Durée réelle: {_timestamp(duration)}.
 Le contenu doit être original, fidèle au script, sans clickbait trompeur et conforme aux règles YouTube.
 Ne mentionne jamais KappGen ni aucun outil de production dans le titre ou la description : le texte est publié sous la marque du créateur.
 Script: {script}
 
-Réponds uniquement en JSON valide avec: title (max 100 caractères), description (max 5000, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
+La description doit être un vrai texte éditorial prêt à publier, et non une répétition du titre. Adapte entièrement le vocabulaire, le ton et les sections à la niche et au type réel de contenu : tutoriel, récit, documentaire, actualité, recette, sport, spiritualité, finance, santé, divertissement ou autre. Ne présume jamais qu'il s'agit d'une « analyse » si le script ne l'est pas. Elle doit contenir, dans cet ordre :
+1. une accroche originale de 2 ou 3 phrases qui formule la question ou le conflit central ;
+2. un résumé précis de ce que la vidéo montre, raconte, enseigne ou explique, en 2 paragraphes adaptés à son format ;
+3. une section courte sur le contenu visuel et l'atmosphère du montage. Décris uniquement ce qui peut honnêtement être déduit du script ; n'invente aucun plan précis, personne, lieu ou archive ;
+4. une section « Chapitres » utilisant EXACTEMENT les horodatages suivants, dans le même ordre, chacun une seule fois : {chapter_anchors}. Donne à chaque horodatage un intitulé court et spécifique au passage correspondant du script. Si seul 0:00 est fourni, omets la section ;
+5. un appel naturel à commenter et à s'abonner à {channel.name}, sans formule générique du type « Une vidéo originale de... ».
+Utilise des paragraphes aérés. Évite le remplissage, les promesses vagues et les affirmations absentes du script.
+
+Réponds uniquement en JSON valide avec: title (max 100 caractères), description (entre 700 et 3500 caractères, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
 tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 5 mots, 38 caractères maximum, phrase complète et naturelle, fidèle au sujet). Le texte est imprimé tel quel dans une image : ne le coupe jamais, ne le termine jamais par "...", et ne renvoie ni le titre complet ni un sous-titre."""
-        text = generate_text(prompt, max_tokens=1200, operation='youtube_metadata')
+        text = generate_text(prompt, max_tokens=1800, operation='youtube_metadata')
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         title = str(data.get("title") or fallback["title"]).strip()[:100]
         description = str(data.get("description") or fallback["description"]).strip()[:5000]
+        # A technically valid but editorially empty response must not recreate
+        # the old three-line placeholder. Prefer the informative fallback.
+        if len(description) < 350 or (description.casefold().startswith(title.casefold()) and len(description) < 700):
+            logger.warning("YouTube metadata description was too generic; using rich safe fallback.")
+            description = fallback["description"]
         # Belt-and-suspenders: even with the prompt instruction above, Claude
         # sometimes still tacks on its own hashtag line — strip any trailing
         # line(s) made up entirely of hashtags so the block we append next
