@@ -415,13 +415,18 @@ def _video_cost_transactions(db: Session, video: Video, user_id: str):
 # Izivoice at x1.0, just what it paid for; matched by prefix and swapped for
 # a plain label here, admin's own view (which reuses the same
 # _video_cost_transactions helper) is untouched.
+# A creator was able to regenerate the same video's AI thumbnail unlimited
+# times (one account ran up 7 regenerations, 14 000 cr., on a single video)
+# before this cap existed — see regenerate_video_thumbnail below.
+MAX_THUMBNAIL_REGENERATIONS = 3
+
 _CLIENT_COST_LABELS = [
     (re.compile(r"^ai_thumbnail_generation\b"), "Miniature générée par IA"),
     (re.compile(r"^voiceover_tts\b"), "Voix off (synthèse vocale)"),
     (re.compile(r"^transcription_stt\b"), "Transcription (sous-titres)"),
     (re.compile(r"^ai_music_generation\b"), "Musique générée par IA"),
     (re.compile(r"^music_video_generation\b"), "Génération de la vidéo musicale"),
-    (re.compile(r"^stock_media\b"), "Séquence / photo de stock (Pexels)"),
+    (re.compile(r"^stock_media\b"), "Image & vidéos d'illustration"),
     (re.compile(r"^Génération auto de script\b"), "Script généré automatiquement"),
     (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de rendu"),
     (re.compile(r"^Conservation vidéo\b"), "Conservation prolongée"),
@@ -934,6 +939,20 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     video_path = STORAGE_PATH / video.output_path if video.output_path else None
     if not video_path or not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+    # Each regeneration archives the thumbnail it's about to replace into
+    # thumbnail_history/ (see _regenerate_thumbnail_background below) BEFORE
+    # generating the new one — so the archive count IS the number of past
+    # regenerations, independent of whether a given attempt was free (Hugging
+    # Face) or paid (2000 cr., see THUMBNAIL_CREDITS below): a creator was
+    # able to regenerate the same video's thumbnail 7 times (14 000 cr.)
+    # before this cap existed.
+    history_dir = video_path.parent / "thumbnail_history"
+    past_regenerations = len(list(history_dir.glob("*.jpg"))) if history_dir.exists() else 0
+    if past_regenerations >= MAX_THUMBNAIL_REGENERATIONS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Limite de {MAX_THUMBNAIL_REGENERATIONS} régénérations de miniature atteinte pour cette vidéo.",
+        )
     # A stuck flag from a server restart mid-regeneration (the background
     # thread is a daemon with no persistence of its own) must never block
     # every future attempt forever — past a generous timeout, treat it as
