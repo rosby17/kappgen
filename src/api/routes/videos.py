@@ -932,6 +932,11 @@ def cancel_video(video_id: str, current_user: User = Depends(get_current_user), 
 def retry_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
     channel = video.channel
+    # A retry isn't a new submission — the creator already waited once for
+    # this exact video. Bumping admin_priority puts it ahead of freshly
+    # launched (priority 0) videos in the worker's claiming order instead of
+    # going to the back of the whole queue behind newer requests.
+    video.admin_priority = max(video.admin_priority or 0, 1)
 
     estimated_cost = estimate_video_cost_credits(
         script_char_count=len((video.script_text or "").strip()) if video.input_type == "text" else 0,
@@ -1021,6 +1026,9 @@ def retry_video_visuals(video_id: str, current_user: User = Depends(get_current_
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = False
     video.restart_count = 0
+    # This video already finished once — a creator retrying its visuals
+    # shouldn't wait behind every freshly launched video ahead of it.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.error_message = None
     video.progress_stage = "En attente (relance du montage — voix off conservée)"
     video.progress_percent = 0
@@ -1335,6 +1343,9 @@ async def replace_scene_image(
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.error_message = None
     video.progress_stage = "En attente du réassemblage"
     video.progress_percent = 0
@@ -1371,6 +1382,9 @@ def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleU
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.pending_edit = {"type": "subtitle_text", "scene_index": scene_index, "text": text}
     video.error_message = None
     video.progress_stage = "En attente de la correction des sous-titres"
@@ -1405,6 +1419,9 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.pending_edit = {"type": "audio", "scene_index": scene_index, "text": text}
     video.error_message = None
     video.progress_stage = "En attente de la régénération de la voix"
@@ -1452,6 +1469,9 @@ def update_video_logo_position(video_id: str, payload: LogoPositionUpdate, curre
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.pending_edit = None
     video.error_message = None
     video.progress_stage = "En attente du repositionnement du logo"
@@ -1531,6 +1551,9 @@ def undo_last_edit(video_id: str, current_user: User = Depends(get_current_user)
 
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = True
+    # Already-finished video, quick reassembly — shouldn't queue behind
+    # freshly launched (priority 0) full renders.
+    video.admin_priority = max(video.admin_priority or 0, 1)
     video.error_message = None
     video.progress_percent = 0
     db.commit()
