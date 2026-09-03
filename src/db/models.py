@@ -164,6 +164,9 @@ class Channel(Base):
     # inventing from the model's training data alone — meant for news/current-
     # events-style channels where "what's happening right now" is the point.
     use_web_trends = Column(Boolean, nullable=False, default=False)
+    # Creator-supplied YouTube channel/video URLs. They are research sources
+    # for original topic selection, never a request to copy a competitor.
+    youtube_topic_sources = Column(Text, nullable=True)
     # How many videos the daily pipeline generates per day (automation_mode
     # "auto" only) — each gets its own randomized slot inside the window,
     # spread evenly so they don't all land back-to-back.
@@ -313,6 +316,7 @@ class Channel(Base):
             "automation_style_prompt": self.automation_style_prompt,
             "topic_examples": self.topic_examples,
             "use_web_trends": bool(self.use_web_trends),
+            "youtube_topic_sources": self.youtube_topic_sources,
             "videos_per_day": self.videos_per_day or 1,
             "automation_window_start_hour": self.automation_window_start_hour if self.automation_window_start_hour is not None else 7,
             "automation_window_end_hour": self.automation_window_end_hour if self.automation_window_end_hour is not None else 11,

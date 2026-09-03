@@ -781,6 +781,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         automation_style_prompt=payload.automation_style_prompt,
         topic_examples=payload.topic_examples,
         use_web_trends=bool(payload.use_web_trends),
+        youtube_topic_sources=payload.youtube_topic_sources,
         videos_per_day=max(1, payload.videos_per_day or 1),
         automation_window_start_hour=payload.automation_window_start_hour if payload.automation_window_start_hour is not None else 7,
         automation_window_end_hour=payload.automation_window_end_hour if payload.automation_window_end_hour is not None else 11,
@@ -1034,6 +1035,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.topic_examples = payload.topic_examples
     if payload.use_web_trends is not None:
         channel.use_web_trends = payload.use_web_trends
+    if payload.youtube_topic_sources is not None:
+        channel.youtube_topic_sources = payload.youtube_topic_sources
     if payload.videos_per_day is not None:
         channel.videos_per_day = max(1, payload.videos_per_day)
     if payload.automation_window_start_hour is not None:

@@ -175,6 +175,7 @@ def init_db():
             "music_channel_config": "ALTER TABLE channels ADD COLUMN music_channel_config JSON",
             "topic_examples": "ALTER TABLE channels ADD COLUMN topic_examples TEXT",
             "use_web_trends": "ALTER TABLE channels ADD COLUMN use_web_trends BOOLEAN DEFAULT FALSE NOT NULL",
+            "youtube_topic_sources": "ALTER TABLE channels ADD COLUMN youtube_topic_sources TEXT",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():
