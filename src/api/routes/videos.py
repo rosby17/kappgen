@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, CommunityLibraryFolder, CommunityLibraryImagePlacement
+from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
@@ -45,13 +45,10 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     nothing real to draw from at all.
 
     AI generation, once enabled and allowed by the account's tier, is
-    trusted without a pre-check here: it runs through free-tier Hugging
-    Face and already falls through gracefully per-image to whichever other
-    sources are enabled (and finally to generic synthetic art) on its own
-    failure — see fetch_or_generate_images — so there's nothing further to
-    validate upfront. Without AI enabled, at least one of library/community
-    must actually have real images now, or queuing is blocked with a clear
-    message instead of silently rendering placeholder-only art."""
+    trusted without a pre-check here. The community source is trusted too:
+    it means both curated creator media *and* KappGen's Pexels stock search,
+    which discovers free visuals per scene at render time. A niche therefore
+    does not need a pre-existing community upload to launch."""
     from src.pipeline.images import resolve_enabled_image_sources
     image_style = channel.image_style or {}
     media_mode = image_style.get("media_mode", "images")
@@ -76,6 +73,14 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
             )
         return
 
+    # "Bibliothèque communautaire" is not only an existing database folder.
+    # During assembly it also activates Pexels image/video search from each
+    # scene's content (or a safe visual fallback if a stock result is absent).
+    # Rejecting the launch merely because no contributor had uploaded to this
+    # exact niche contradicted the UI's promise of free ready-to-use media.
+    if "community" in enabled:
+        return
+
     has_real_source = False
     if media_mode != "videos" and "library" in enabled:
         library_path = str(image_style.get("library_path") or "")
@@ -87,20 +92,6 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
             item.is_file() and item.suffix.lower() in LIBRARY_IMAGE_EXTENSIONS
             for item in library_dir.iterdir()
         ))
-    if media_mode != "videos" and "community" in enabled:
-        has_approved_folder = db.query(CommunityLibraryFolder).filter(
-            CommunityLibraryFolder.status == "approved",
-            CommunityLibraryFolder.niche.ilike(channel.niche or ""),
-        ).first() is not None
-        if not has_approved_folder:
-            has_approved_folder = db.query(CommunityLibraryImagePlacement).join(
-                CommunityLibraryFolder,
-                CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
-            ).filter(
-                CommunityLibraryFolder.status == "approved",
-                CommunityLibraryImagePlacement.niche.ilike(channel.niche or ""),
-            ).first() is not None
-        has_real_source = has_real_source or has_approved_folder
     if media_mode == "videos":
         broll_path = str(image_style.get("broll_path") or "")
         expected_prefix = f"channels/{channel.id}/broll"

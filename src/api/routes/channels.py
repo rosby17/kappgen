@@ -19,7 +19,7 @@ import httpx
 from src.db.session import get_db
 from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, Voice
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
 from datetime import datetime
 from src.pipeline import youtube_publisher
@@ -883,10 +883,82 @@ def community_library_availability(niche: str, db: Session = Depends(get_db)):
     ).count()
     image_count = max(0, sum(f.image_count for f in folders) - moved_out_count) + moved_count
     return {
-        "available": image_count > 0,
+        # Pexels is the public source behind this option, so it is usable
+        # even before another KappGen creator shares media for this niche.
+        "available": bool(PEXELS_API_KEY) or image_count > 0,
         "folder_count": len(folders),
         "image_count": image_count,
     }
+
+
+@router.get("/public-library/search")
+def search_public_library(
+    query: str = "",
+    media_type: str = "photos",
+    page: int = 1,
+    per_page: int = 24,
+    current_user: User = Depends(get_current_user),
+):
+    """Browse the free Pexels catalogue without exposing its API key.
+
+    This is deliberately separate from each user's private media library.
+    The same public source is used by the community visual option at render
+    time, while this endpoint gives creators a tangible catalogue to browse.
+    """
+    del current_user  # Authentication is required; no per-user data is read.
+    if not PEXELS_API_KEY:
+        raise HTTPException(status_code=503, detail="La bibliothèque publique est momentanément indisponible.")
+    if media_type not in {"photos", "videos"}:
+        raise HTTPException(status_code=400, detail="Type de média invalide.")
+    clean_query = " ".join((query or "").split())[:120]
+    if not clean_query:
+        clean_query = "cinematic background"
+    safe_page = max(1, min(int(page or 1), 100))
+    safe_per_page = max(8, min(int(per_page or 24), 40))
+    url = "https://api.pexels.com/v1/search" if media_type == "photos" else "https://api.pexels.com/videos/search"
+    params = {"query": clean_query, "page": safe_page, "per_page": safe_per_page, "orientation": "landscape"}
+    try:
+        response = httpx.get(url, headers={"Authorization": PEXELS_API_KEY}, params=params, timeout=12.0)
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPError as exc:
+        logger.warning("Pexels public library search failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Impossible de charger les ressources publiques. Réessaie dans un instant.")
+
+    raw_items = payload.get("photos", []) if media_type == "photos" else payload.get("videos", [])
+    items = []
+    for item in raw_items:
+        if media_type == "photos":
+            source = item.get("src") or {}
+            thumbnail = source.get("large") or source.get("medium") or source.get("original")
+            author = item.get("photographer") or "Pexels"
+            author_url = item.get("photographer_url")
+            duration = None
+        else:
+            pictures = item.get("image") or ""
+            files = item.get("video_files") or []
+            playable = next((f.get("link") for f in files if f.get("quality") in {"sd", "hd"} and f.get("link")), None)
+            thumbnail = pictures
+            author = (item.get("user") or {}).get("name") or "Pexels"
+            author_url = (item.get("user") or {}).get("url")
+            duration = item.get("duration")
+            source = {"original": playable}
+        if not thumbnail:
+            continue
+        items.append({
+            "id": str(item.get("id")),
+            "type": media_type,
+            "thumbnail_url": thumbnail,
+            "source_url": item.get("url"),
+            "asset_url": source.get("original"),
+            "author": author,
+            "author_url": author_url,
+            "width": item.get("width"),
+            "height": item.get("height"),
+            "duration": duration,
+            "alt": item.get("alt") or clean_query,
+        })
+    return {"query": clean_query, "media_type": media_type, "page": safe_page, "per_page": safe_per_page, "items": items, "has_next": bool(payload.get("next_page"))}
 
 @router.put("/{channel_id}")
 def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
