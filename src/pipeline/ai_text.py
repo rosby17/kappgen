@@ -373,6 +373,15 @@ def generate_text(
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]
+    if enable_web_search and "anthropic" in order:
+        # Web search only works through Anthropic's server-side tool (see the
+        # docstring) — every other provider silently ignores it. The admin's
+        # general priority order (e.g. Gemini/Groq first, both free) has no
+        # idea this call needs it, so left alone it would run the "search the
+        # web for trends" instruction on a provider that can't search the
+        # web, quietly no-opping the whole feature. Force Anthropic first
+        # for this one call only, regardless of where it normally ranks.
+        order = ["anthropic"] + [pid for pid in order if pid != "anthropic"]
     last_exc = None
     for name in order:
         # A 429 means "you're going too fast", not "this provider is dead" —
