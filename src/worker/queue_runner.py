@@ -159,6 +159,18 @@ def process_single_queued_video() -> bool:
         from src.utils.credentials import izivoice_key_for_user
         izivoice_api_key = izivoice_key_for_user(channel.user)
 
+        # Facecam videos (uploaded talking-head recording, cut/verified/
+        # b-roll'd/carded by facecam_editor.py) follow a completely different
+        # shape than the faceless script->TTS->stock pipeline below — no
+        # thumbnail-from-frame prefetch, no compliance preflight, no scene
+        # list. Branch out early and let this function's existing except
+        # block (FAILED status + credit refund) cover it same as any other
+        # video on exception.
+        if video.input_type == "facecam":
+            from src.pipeline.facecam_editor import run_facecam_pipeline
+            run_facecam_pipeline(video.id, db)
+            return True
+
         video_dir = STORAGE_PATH / "channels" / str(channel.id) / "videos" / str(video.id)
 
         # Thumbnail art is independent of the assembled MP4: GPT Image 2 only

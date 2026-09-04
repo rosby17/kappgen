@@ -55,16 +55,43 @@ Plan d'adoption incrémentale :
 ### Statut
 SFX en cours de conception (recherche du code existant faite). Illustrations réelles et motion design (HyperFrames en overlay isolé) : à venir, dans cet ordre.
 
-## Pipeline montage facecam (rushes humains) — idée future, interface séparée
+## Pipeline montage facecam (rushes humains) — construit, v1
 
-Inspiré de la même vidéo de référence (système multi-agents Claude Code pour du montage de rush humain brut : suppression des blancs par niveau sonore, dédoublonnage des prises répétées, sous-titres animés, SFX, illustrations, motion design, boucle de retours horodatés frame par frame). Distinct du pipeline actuel (avatar/narration, sans visage) — sera une **interface séparée** dans KappGen pour les créateurs qui filment leur propre visage.
+Distinct du pipeline actuel (avatar/narration, sans visage) — **interface séparée** dans KappGen
+("Facecam" dans le sélecteur de produit) pour les créateurs qui filment leur propre visage.
+Contrairement à la note précédente, la détection de silence se fait bien **par les mots**
+(transcript-driven, comme la vidéo de référence le fait réellement) et non par niveau sonore
+`silencedetect` seul — plus précis, cohérent avec le reste du pipeline KappGen qui a déjà les
+timestamps mot-par-mot pour les sous-titres.
 
-Phases envisagées (à détailler quand ce chantier sera priorisé) :
-1. Montage parole : transcription (Izivoice, déjà intégré) + détection de silence par niveau sonore (`ffmpeg silencedetect`, pas par les mots) + détection de prises répétées via passe LLM sur la transcription.
-2. Sous-titres + SFX : réutilise le moteur ASS existant + le chantier SFX ci-dessus.
-3. Illustrations réelles (recherche Google Images/logos/captures d'écran).
-4. Motion design : candidat naturel pour HyperFrames (skills `/talking-head-recut`, `/embedded-captions`, `/motion-graphics`).
-5. Boucle de retours horodatés (frame par frame) qui ne redéclenche que l'étape concernée.
+Implémenté (`backend/src/pipeline/facecam_*.py`, branché dans `queue_runner.py` sur
+`Video.input_type == "facecam"`) :
+1. **Transcription** : `faster-whisper` local (`facecam_transcribe.py`), pas Izivoice STT (pas
+   besoin d'API externe payante pour ce step, contrairement au reste du pipeline).
+2. **Coupes** (`facecam_cuts.py`) : silences par les mots + bégaiements mécaniques + reprises
+   détectées par similarité Jaccard, arbitrées par un vrai appel LLM (`ai_text.generate_text`,
+   remplace la "lecture éditoriale" humaine de l'outil de référence). Un seul encodage
+   ffmpeg trim+concat depuis la source originale.
+3. **Vérification** (`facecam_verify.py`) : 3 passes mécaniques post-rendu (silences résiduels,
+   comptage d'occurrences des phrases coupées, cohérence de l'EDL) — un échec route la vidéo en
+   `status="needs_review"` au lieu de `"completed"`.
+4. **B-roll** (`facecam_broll.py`) : détecteurs à base de règles (URLs, noms d'outils, noms
+   propres, formulations "imagine que"), source : bibliothèque communautaire approuvée → Pexels →
+   **Google Custom Search (images)** (nouveau, clé `GOOGLE_CSE_API_KEY`/`GOOGLE_CSE_CX`), facturé
+   comme les autres b-roll (`STOCK_MEDIA_CREDITS`).
+5. **Motion design / cartes de titre** (`facecam_cards.py`) : **HyperFrames en overlay isolé**,
+   exactement le plan d'adoption incrémentale décrit plus haut — un clip transparent
+   (`.mov`/ProRes 4444) rendu par composition, superposé sur la sortie ffmpeg via
+   `overlay=enable='between(t,...)'`. 3 templates (kicker/headline, stat, lower-third),
+   sélection déterministe (RNG seedée par vidéo). Nécessite Node.js + Chrome headless dans
+   `backend/Dockerfile` (ajouté) — seule brèche Node/Chromium du backend, strictement isolée à
+   cette étape.
+6. **Mux final** : réutilise `assembler.py::assemble_final_video` (branding/logo/watermark).
+
+Pas encore fait (v2) : boucle de retours horodatés frame par frame, connecteurs cloud OAuth
+complets (v1 = coller un lien de partage Drive/Dropbox, téléchargé côté serveur), étape de revue
+UI avant rendu final (coupes/b-roll proposés, à approuver — la vidéo se rend directement pour
+l'instant).
 
 ### Statut
-Idée future, pas encore priorisée — reprendre après les chantiers SFX/illustrations/motion design du pipeline actuel.
+V1 en place, à tester en conditions réelles après déploiement.

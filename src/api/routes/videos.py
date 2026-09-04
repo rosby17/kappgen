@@ -377,6 +377,108 @@ async def submit_video_subject(
 
         return [video.to_dict()]
 
+
+ALLOWED_FACECAM_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
+
+@router.post("/facecam/upload")
+async def submit_facecam_video(
+    channel_id: str = Form(...),
+    title: Optional[str] = Form(None),
+    raw_file: Optional[UploadFile] = File(None),
+    cloud_link: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    _rl=Depends(_limit_submit),
+):
+    """Entry point for the Facecam product: upload a raw talking-head
+    recording (direct file, or a Drive/Dropbox share link downloaded
+    server-side) and queue it for facecam_editor.py's auto-edit pipeline
+    (silence/mistake cuts, verification, b-roll, motion-graphic cards).
+    """
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    if not channel.is_active:
+        raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
+    if not raw_file and not cloud_link:
+        raise HTTPException(status_code=400, detail="Fournis un fichier vidéo ou un lien cloud (Drive/Dropbox).")
+
+    can_render, reason = user_can_render(db, current_user)
+    if not can_render:
+        raise HTTPException(status_code=402, detail=reason)
+
+    uploads_dir = STORAGE_PATH / "uploads" / "facecam"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    if raw_file:
+        if not raw_file.filename:
+            raise HTTPException(status_code=400, detail="Fichier vidéo invalide.")
+        ext = Path(raw_file.filename).suffix.lower() or ".mp4"
+        if ext not in ALLOWED_FACECAM_VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"Format non supporté ({ext}). Utilise MP4, MOV, MKV ou WEBM.")
+        dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
+        contents = await raw_file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Le fichier vidéo est vide.")
+        dest_file.write_bytes(contents)
+    else:
+        # v1: a pasted share link, not a full per-provider OAuth folder sync
+        # (a much bigger integration, deferred until the need is confirmed).
+        # Drive/Dropbox share links both redirect to the real file when a
+        # direct-download query param is added, which httpx follows.
+        link = cloud_link.strip()
+        direct_link = link
+        if "drive.google.com" in link:
+            match = re.search(r"/d/([\w-]+)", link)
+            if match:
+                direct_link = f"https://drive.google.com/uc?export=download&id={match.group(1)}"
+        elif "dropbox.com" in link:
+            direct_link = link.replace("?dl=0", "?dl=1")
+        dest_file = uploads_dir / f"upload_{uuid.uuid4()}.mp4"
+        try:
+            with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+                with client.stream("GET", direct_link) as resp:
+                    resp.raise_for_status()
+                    with open(dest_file, "wb") as f:
+                        for chunk in resp.iter_bytes():
+                            f.write(chunk)
+        except Exception as exc:
+            dest_file.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Téléchargement du lien cloud impossible : {exc}")
+        if dest_file.stat().st_size == 0:
+            dest_file.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Le lien cloud n'a renvoyé aucun contenu (vérifie qu'il est bien public/partagé).")
+
+    try:
+        estimated_duration = get_audio_duration(dest_file)
+    except Exception:
+        estimated_duration = None
+
+    if estimated_duration and estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+        dest_file.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cette vidéo dure {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min.",
+        )
+
+    video = Video(
+        channel_id=channel.id,
+        title=(title.strip()[:100] if title and title.strip() else None) or clean_filename_title(dest_file.name),
+        input_type="facecam",
+        creation_source="facecam",
+        raw_asset_path=str(dest_file.relative_to(STORAGE_PATH)),
+        status=VideoStatus.QUEUED.value,
+        estimated_duration_seconds=estimated_duration,
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 @router.get("")
 def list_all_videos(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     videos = (

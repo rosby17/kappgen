@@ -48,6 +48,11 @@ THUMBNAIL_CREDITS = 2000
 STOCK_MEDIA_CREDITS = 100
 # On-demand 4K upscale/export from the finished 1080p master.
 FOUR_K_EXPORT_CREDITS = 5000
+# Base cost of an automated facecam edit (transcription + silence/mistake
+# cuts + verification pass), debited once when the pipeline starts — separate
+# from STOCK_MEDIA_CREDITS (b-roll) and the LLM cost of the editorial retake
+# read, which are billed per-use as they occur. See facecam_editor.py.
+FACECAM_EDIT_CREDITS = 3000
 
 
 def random_image_credit_cost() -> int:

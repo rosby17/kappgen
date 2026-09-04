@@ -1,5 +1,23 @@
 FROM python:3.11-slim-bookworm
 
+# Node.js 22 + the HyperFrames CLI, used in isolated overlay mode only by the
+# facecam pipeline's motion-graphic title cards (facecam_cards.py) — never a
+# dependency of the existing faceless render. Adopted deliberately despite
+# the extra runtime (see ROADMAP.md): HyperFrames renders HTML/CSS/GSAP
+# compositions via headless Chrome, which the base ffmpeg pipeline has no
+# equivalent for. Chrome's own shared-lib dependencies are installed right
+# after Node so `hyperframes browser ensure` (below) can actually launch it
+# at build time instead of failing/downloading on a video's first render.
+RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g hyperframes \
+    && apt-get install -y --no-install-recommends \
+        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+        libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
+        libpangocairo-1.0-0 libpango-1.0-0 libcairo2 libx11-6 libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fontconfig \
@@ -89,6 +107,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 RUN mkdir -p storage data
+
+# Bakes the headless-Chrome binary HyperFrames renders with into the image,
+# so a facecam video's first card render doesn't pay a cold-start download.
+RUN npx --yes hyperframes browser ensure
 
 EXPOSE 8000
 

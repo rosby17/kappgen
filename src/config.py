@@ -150,6 +150,12 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 # never charges the creator any KappGen credits. Unset simply disables the
 # stock-footage source; every other visual source keeps working.
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+# Google Programmable Search Engine (Custom Search JSON API), image search
+# mode — extra b-roll source for the facecam pipeline (facecam_broll.py),
+# alongside Pexels and the community library. Both are required together;
+# either missing disables this source only, every other source keeps working.
+GOOGLE_CSE_API_KEY = os.getenv("GOOGLE_CSE_API_KEY", "")
+GOOGLE_CSE_CX = os.getenv("GOOGLE_CSE_CX", "")
 # Low-cost/free text-generation providers, both OpenAI-compatible — see
 # src/pipeline/ai_text.py. Neither is required; the admin picks which
 # configured provider goes first via the "Ressources" tab (falls back
