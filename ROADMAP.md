@@ -34,8 +34,11 @@ Absent aujourd'hui. Plan (recherche déjà faite sur le code existant, patterns 
 - Matching : appel LLM (`generate_text()` de `src/pipeline/ai_text.py`, pattern JSON structuré déjà utilisé dans `scene_director.py`) sur la transcription (mots + timestamps, déjà disponibles dans `transcript_info` au même endroit du pipeline que le mixage audio) → liste `{start, sfx_tag}` en piochant uniquement dans les effets réellement uploadés pour la chaîne. Si aucun SFX n'est uploadé pour une chaîne, l'étape est sautée (pas de coût, pas d'appel LLM inutile).
 - Mixage : étendre `build_studio_mix_filter`/`mix_audio_tracks` (`src/pipeline/audio_mixer.py`) pour accepter des paires `(sfx_path, start_time)` en plus de voix+musique, via `adelay` + un `amix` à N entrées au lieu de 2.
 
-### 2. Recherche d'illustrations réelles (Google Images) — à faire après les SFX
-En complément des sources actuelles (bibliothèque, génération IA), pas en remplacement — utile pour des logos de marque, captures d'écran, visages réels que les banques d'images stock ne couvrent pas.
+### 2. Recherche d'illustrations réelles (Google Images) — fait
+4ᵉ source visuelle cochable ("Option D"), en complément des sources actuelles (bibliothèque, génération IA, communauté), pas en remplacement — pour des logos de marque, outils cités, captures d'écran réelles que l'IA ne peut pas dessiner (bridée pour ne jamais produire de texte/logo) et que Pexels n'indexe pas.
+- `src/pipeline/images.py` : `fetch_google_images()` réutilise directement `facecam_broll.fetch_google_image()` (même cache disque par requête) plutôt que dupliquer l'appel Google Custom Search.
+- Pas de plafond arbitraire : borné uniquement par le réglage "Nombre de visuels" déjà existant (`image_style.max_unique_images`, commun à toutes les sources), chaque image effectivement utilisée facturée en crédits (`STOCK_MEDIA_CREDITS`, même principe qu'une photo/vidéo Pexels) plutôt que rationnée par nous.
+- Repli automatique vers bibliothèque/communauté/synthétique si Google échoue ou si son quota gratuit partagé (100 requêtes/jour pour toute l'appli) est atteint (`fetch_google_image` gère déjà le 429 proprement).
 
 ### 3. Motion design (titres animés, transitions stylées) — décision d'architecture prise
 Après avoir regardé l'outil utilisé dans la vidéo de référence (**HyperFrames**, github.com/heygen-com/hyperframes, HeyGen, open source Apache 2.0 — "Write HTML, render video", pensé pour être piloté par un agent Claude), décision : **adoption progressive, pas de bascule complète du moteur de rendu.**
@@ -53,7 +56,7 @@ Plan d'adoption incrémentale :
 - Si après quelques semaines l'usage isolé tient la route, migration progressive **chaîne par chaîne** envisageable, jamais d'un coup sur toute la production.
 
 ### Statut
-SFX en cours de conception (recherche du code existant faite). Illustrations réelles et motion design (HyperFrames en overlay isolé) : à venir, dans cet ordre.
+SFX et illustrations réelles (Google Images) livrés et déployés. Motion design (HyperFrames en overlay isolé) pour ce pipeline sans visage : pas encore fait ici — mais déjà implémenté et fonctionnel dans le pipeline facecam ci-dessous (`facecam_cards.py`), qui sert maintenant de référence directe pour le porter ici.
 
 ## Pipeline montage facecam (rushes humains) — construit, v1
 
