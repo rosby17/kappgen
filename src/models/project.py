@@ -146,6 +146,7 @@ class EffectsConfig(BaseModel):
     particle_speed: int = 50            # 0-100, calm drift to faster movement
     particle_dispersion: int = 50       # 0-100, compact to wide distribution
     particle_direction: str = "auto"    # auto | up | down | left | right
+    effect_settings: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
     watermark_enabled: bool = True       # large centered official logo at low opacity — free-tier default

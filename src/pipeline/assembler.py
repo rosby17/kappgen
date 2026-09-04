@@ -83,25 +83,37 @@ def _build_particle_layers(effects: Dict[str, Any], active_particles: List[str])
     Older configs default to a single layer per effect, preserving their visual
     result. Extra, offset layers only begin above the density midpoint.
     """
-    density = _bounded_number(effects.get("particle_density", 50), 50, 0, 100)
-    copies = 1 if density <= 50 else 2 if density <= 82 else 3
+    settings_by_effect = effects.get("effect_settings") or {}
+    densities = {
+        particle_id: _bounded_number(
+            (settings_by_effect.get(particle_id) or {}).get("density", effects.get("particle_density", 50)),
+            50, 0, 100,
+        )
+        for particle_id in active_particles
+    }
+    copies_by_effect = {
+        particle_id: 1 if density <= 50 else 2 if density <= 82 else 3
+        for particle_id, density in densities.items()
+    }
     # Give each chosen effect its base layer first. Extra depth is then shared
     # fairly, so enabling stars + dust + snow never makes the later selections
     # disappear merely because an earlier effect consumed the layer budget.
-    layers = [{"id": particle_id, "depth": 0, "copies": copies} for particle_id in active_particles]
+    layers = [{"id": particle_id, "depth": 0, "copies": copies_by_effect[particle_id]} for particle_id in active_particles]
     layers = layers[:MAX_PARTICLE_LAYERS]
-    for depth in range(1, copies):
+    for depth in range(1, 3):
         for particle_id in active_particles:
+            if copies_by_effect[particle_id] <= depth:
+                continue
             if len(layers) >= MAX_PARTICLE_LAYERS:
                 actual_counts = {pid: sum(item["id"] == pid for item in layers) for pid in active_particles}
                 for item in layers:
                     item["copies"] = actual_counts[item["id"]]
                 return layers, density
-            layers.append({"id": particle_id, "depth": depth, "copies": copies})
+            layers.append({"id": particle_id, "depth": depth, "copies": copies_by_effect[particle_id]})
     actual_counts = {pid: sum(item["id"] == pid for item in layers) for pid in active_particles}
     for item in layers:
         item["copies"] = actual_counts[item["id"]]
-    return layers, density
+    return layers, densities
 
 # Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
 # a gimmick" rather than a smooth blend between scenes.
@@ -255,21 +267,21 @@ def assemble_final_video(
     if not effects_enabled:
         overlay_effects = []
 
-    grain_frac = max(0, min(100, effects.get("grain_intensity", 50))) / 100
-    vignette_frac = max(0, min(100, effects.get("vignette_intensity", 50))) / 100
-    particle_frac = _bounded_number(effects.get("particle_intensity", 50), 50, 0, 100) / 100
+    effect_settings = effects.get("effect_settings") or {}
+    def effect_intensity(effect_id: str, legacy_value: Any) -> float:
+        return _bounded_number((effect_settings.get(effect_id) or {}).get("intensity", legacy_value), 50, 0, 100) / 100
+
+    grain_frac = effect_intensity("grain", effects.get("grain_intensity", 50))
+    vignette_frac = effect_intensity("vignette", effects.get("vignette_intensity", 50))
     active_particles = [pid for pid in ("stars", "dust", "snow", "rain", "sparks") if pid in overlay_effects and PARTICLE_ASSETS[pid].exists()]
-    particle_layers, _particle_density = _build_particle_layers(effects, active_particles)
-    particle_size = _bounded_number(effects.get("particle_size", 50), 50, 0, 100)
-    particle_speed = _bounded_number(effects.get("particle_speed", 50), 50, 0, 100)
-    particle_dispersion = _bounded_number(effects.get("particle_dispersion", 50), 50, 0, 100)
+    particle_layers, _particle_densities = _build_particle_layers(effects, active_particles)
     particle_direction = effects.get("particle_direction", "auto")
     if particle_direction not in {"auto", "up", "down", "left", "right"}:
         particle_direction = "auto"
 
     # alls ranges chosen so 50% lands near the old fixed defaults (8 / 22)
     grain_alls = round(2 + grain_frac * 28)
-    white_noise_alls = round(4 + grain_frac * 46)
+    white_noise_alls = round(4 + effect_intensity("white_noise", effects.get("grain_intensity", 50)) * 46)
     # ffmpeg's vignette "angle": smaller = stronger. PI/4 was the old fixed
     # default (~50%); sweep from a barely-there PI/2.2 up to a heavy PI/9.
     vignette_angle = (math.pi / 2.2) - (math.pi / 2.2 - math.pi / 9) * vignette_frac
@@ -288,26 +300,30 @@ def assemble_final_video(
     # quick stylistic toggles rather than sliders like grain/vignette above.
     if "chromatic_aberration" in overlay_effects:
         # Shifts the red/blue channels apart horizontally — the classic lens/VHS fringe look.
-        video_filters.append("rgbashift=rh=3:bh=-3")
+        chromatic_frac = effect_intensity("chromatic_aberration", 50)
+        shift = max(1, round(1 + chromatic_frac * 5))
+        video_filters.append(f"rgbashift=rh={shift}:bh=-{shift}")
     if "old_film" in overlay_effects:
         # Composite: heavy grain + tight vignette + desaturation, like scanned archival footage.
-        video_filters.append("noise=alls=22:allf=t+u,vignette=0.35,eq=saturation=0.7:contrast=1.05")
+        old_film_frac = effect_intensity("old_film", 50)
+        video_filters.append(f"noise=alls={round(8 + old_film_frac * 28)}:allf=t+u,vignette={0.65 - old_film_frac * 0.46:.3f},eq=saturation={0.9 - old_film_frac * 0.4:.3f}:contrast={1.0 + old_film_frac * 0.1:.3f}")
     if "flicker" in overlay_effects:
         # Subtle time-varying brightness pulse — projector/old-film flicker.
-        video_filters.append("eq=eval=frame:brightness='0.035*sin(2*PI*t*3)'")
+        flicker_frac = effect_intensity("flicker", 50)
+        video_filters.append(f"eq=eval=frame:brightness='{0.008 + flicker_frac * 0.055:.3f}*sin(2*PI*t*3)'")
     if "soft_focus" in overlay_effects:
         # Gentle blur only (no blend) — a cheap, real "dreamy" filmic softness.
-        video_filters.append("gblur=sigma=1.4")
+        video_filters.append(f"gblur=sigma={0.25 + effect_intensity('soft_focus', 50) * 2.3:.2f}")
     if "sharpen" in overlay_effects:
         # Crisper "HD clarity" look — the opposite end of the texture spectrum from grain.
-        video_filters.append("unsharp=5:5:0.8:5:5:0.0")
+        video_filters.append(f"unsharp=5:5:{0.15 + effect_intensity('sharpen', 50) * 1.25:.2f}:5:5:0.0")
 
     # Atmospheric and genre effects. These use native FFmpeg filters only, so
     # they remain available on every renderer without downloading overlay
     # footage. Strength follows the shared particle/atmosphere slider.
-    particle_noise = round(3 + particle_frac * 25)
     if "black_noise" in overlay_effects:
-        video_filters.append(f"noise=alls={round(5 + particle_frac * 35)}:allf=t+u,eq=brightness={-(0.015 + particle_frac * 0.045):.3f}")
+        black_noise_frac = effect_intensity("black_noise", effects.get("particle_intensity", 50))
+        video_filters.append(f"noise=alls={round(5 + black_noise_frac * 35)}:allf=t+u,eq=brightness={-(0.015 + black_noise_frac * 0.045):.3f}")
     # stars/dust/snow/rain/sparks used to be abstract noise+brightness tweaks
     # here — they never actually looked like their name, just a vague film
     # grain. They're now real animated overlay clips (assets/particles/*.mp4,
@@ -316,17 +332,23 @@ def assemble_final_video(
     # uses. fog stays a pure blur/brightness filter — a haze genuinely is a
     # blur, not discrete particles, so the old approach already suited it.
     if "fog" in overlay_effects:
-        video_filters.append(f"gblur=sigma={0.4 + particle_frac * 1.2:.2f},eq=brightness={0.025 + particle_frac * 0.045:.3f}:contrast={1.0 - particle_frac * 0.12:.3f}:saturation=0.88")
+        fog_frac = effect_intensity("fog", effects.get("particle_intensity", 50))
+        video_filters.append(f"gblur=sigma={0.4 + fog_frac * 1.2:.2f},eq=brightness={0.025 + fog_frac * 0.045:.3f}:contrast={1.0 - fog_frac * 0.12:.3f}:saturation=0.88")
     if "light_leak" in overlay_effects:
-        video_filters.append(f"colorbalance=rh={0.05 + particle_frac * 0.18:.3f}:gh={0.02 + particle_frac * 0.06:.3f}:bs=-0.04,eq=brightness={particle_frac * 0.025:.3f}:saturation=1.08")
+        light_leak_frac = effect_intensity("light_leak", effects.get("particle_intensity", 50))
+        video_filters.append(f"colorbalance=rh={0.05 + light_leak_frac * 0.18:.3f}:gh={0.02 + light_leak_frac * 0.06:.3f}:bs=-0.04,eq=brightness={light_leak_frac * 0.025:.3f}:saturation=1.08")
     if "dream_glow" in overlay_effects:
-        video_filters.append(f"gblur=sigma={0.6 + particle_frac * 1.8:.2f},eq=brightness={0.015 + particle_frac * 0.035:.3f}:saturation=1.05")
+        dream_glow_frac = effect_intensity("dream_glow", effects.get("particle_intensity", 50))
+        video_filters.append(f"gblur=sigma={0.6 + dream_glow_frac * 1.8:.2f},eq=brightness={0.015 + dream_glow_frac * 0.035:.3f}:saturation=1.05")
     if "horror" in overlay_effects:
-        video_filters.append("colorbalance=rs=0.10:gs=-0.10:bs=-0.08,eq=contrast=1.22:brightness=-0.06:saturation=0.72,vignette=0.32")
+        horror_frac = effect_intensity("horror", 50)
+        video_filters.append(f"colorbalance=rs={0.03 + horror_frac * 0.14:.3f}:gs=-{0.03 + horror_frac * 0.14:.3f}:bs=-{0.02 + horror_frac * 0.12:.3f},eq=contrast={1.04 + horror_frac * 0.36:.3f}:brightness=-{0.015 + horror_frac * 0.09:.3f}:saturation={0.95 - horror_frac * 0.46:.3f},vignette={0.7 - horror_frac * 0.5:.3f}")
     if "vhs_glitch" in overlay_effects:
-        video_filters.append(f"rgbashift=rh={round(2 + particle_frac * 5)}:bh=-{round(2 + particle_frac * 5)},noise=alls={max(6, particle_noise // 2)}:allf=t+u,eq=contrast=1.08:saturation=0.9")
+        vhs_frac = effect_intensity("vhs_glitch", effects.get("particle_intensity", 50))
+        video_filters.append(f"rgbashift=rh={round(2 + vhs_frac * 5)}:bh=-{round(2 + vhs_frac * 5)},noise=alls={max(6, round((3 + vhs_frac * 25) / 2))}:allf=t+u,eq=contrast=1.08:saturation=0.9")
     if "film_scratches" in overlay_effects:
-        video_filters.append(f"noise=alls={round(10 + particle_frac * 22)}:allf=t,eq=saturation=0.65:contrast=1.08")
+        scratches_frac = effect_intensity("film_scratches", effects.get("particle_intensity", 50))
+        video_filters.append(f"noise=alls={round(10 + scratches_frac * 22)}:allf=t,eq=saturation=0.65:contrast=1.08")
 
     # Check if FFmpeg build has libass 'subtitles' filter, and whether the client
     # wants subtitles burned in at all (subtitle_style.enabled, default True).
@@ -499,16 +521,24 @@ def assemble_final_video(
             base_label = "v_eff"
         # Layered, slightly offset particle fields create a natural sense of
         # depth instead of a single, obvious stock texture over the frame.
-        size_factor = 0.76 + (particle_size / 100) * 0.62
-        speed_factor = 0.55 + (particle_speed / 100) * 1.45
-        spread_factor = particle_dispersion / 100
-        direction_filter = {
-            "auto": "", "down": "", "up": ",vflip",
-            "left": ",transpose=1", "right": ",transpose=2",
-        }[particle_direction]
         for i, layer in enumerate(particle_layers):
             idx = particles_base_index + i
             scaled_label = f"part{i}"
+            particle_settings = effect_settings.get(layer["id"]) or {}
+            layer_intensity = _bounded_number(particle_settings.get("intensity", effects.get("particle_intensity", 50)), 50, 0, 100) / 100
+            particle_size = _bounded_number(particle_settings.get("size", effects.get("particle_size", 50)), 50, 0, 100)
+            particle_speed = _bounded_number(particle_settings.get("speed", effects.get("particle_speed", 50)), 50, 0, 100)
+            particle_dispersion = _bounded_number(particle_settings.get("dispersion", effects.get("particle_dispersion", 50)), 50, 0, 100)
+            direction = particle_settings.get("direction", particle_direction)
+            if direction not in {"auto", "up", "down", "left", "right"}:
+                direction = "auto"
+            direction_filter = {
+                "auto": "", "down": "", "up": ",vflip",
+                "left": ",transpose=1", "right": ",transpose=2",
+            }[direction]
+            size_factor = 0.76 + (particle_size / 100) * 0.62
+            speed_factor = 0.55 + (particle_speed / 100) * 1.45
+            spread_factor = particle_dispersion / 100
             depth = layer["depth"]
             layer_scale = size_factor * (0.88 + depth * 0.16)
             scaled_w = max(64, round(1920 * layer_scale))
@@ -528,7 +558,7 @@ def assemble_final_video(
             out_label = f"v_part{i}"
             # One layer retains the previous strength. Added depth layers are
             # attenuated so density adds atmosphere rather than a white veil.
-            layer_opacity = particle_frac / (1 if layer["copies"] == 1 else layer["copies"] ** 0.68)
+            layer_opacity = layer_intensity / (1 if layer["copies"] == 1 else layer["copies"] ** 0.68)
             filter_parts.append(f"[{base_label}][{scaled_label}]blend=all_mode=screen:all_opacity={layer_opacity:.3f}[{out_label}]")
             base_label = out_label
 
