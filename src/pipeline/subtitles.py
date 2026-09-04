@@ -110,6 +110,61 @@ def _wrap_paragraph(words: List[str], words_per_line: int) -> str:
     )
 
 
+def _measure_text_block(lines: List[str], font_path: str, font_size: int, bold: bool, letter_spacing: float) -> tuple:
+    """Pixel size (width, height) of a possibly multi-line subtitle chunk, used
+    to size the background box so it hugs the actual text instead of a fixed
+    guess. Approximate on two fronts PIL can't match libass exactly on — no
+    letter-spacing support (added back manually per line) and no bold variant
+    of the resolved font file (compensated with a small width multiplier) —
+    fine for a box that only needs to comfortably contain the text, not pixel-
+    perfect kerning."""
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except (IOError, OSError):
+        font = ImageFont.truetype(_DEJAVU_BOLD_FALLBACK, font_size)
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    bold_factor = 1.06 if bold else 1.0
+    max_w = 0.0
+    for line in lines:
+        bbox = dummy_draw.textbbox((0, 0), line or " ", font=font)
+        w = (bbox[2] - bbox[0]) * bold_factor + max(0, len(line) - 1) * letter_spacing
+        max_w = max(max_w, w)
+    ascent, descent = font.getmetrics()
+    line_h = (ascent + descent) * 1.15
+    return max_w, line_h * max(1, len(lines))
+
+
+def _rounded_rect_ass_path(w: float, h: float, radius: float) -> str:
+    """ASS vector-drawing (\\p1) path for a w×h rectangle with corner radius
+    `radius`, corners approximated with cubic beziers (kappa ≈ 0.5523, the
+    standard constant for a bezier quarter-circle). radius<=0 draws a plain
+    sharp-cornered rectangle."""
+    r = max(0, min(radius, w / 2, h / 2))
+    if r < 1:
+        return f"m 0 0 l {w:.0f} 0 l {w:.0f} {h:.0f} l 0 {h:.0f}"
+    k = r * 0.5523
+    return (
+        f"m {r:.0f} 0 "
+        f"l {w - r:.0f} 0 "
+        f"b {w - r + k:.0f} 0 {w:.0f} {r - k:.0f} {w:.0f} {r:.0f} "
+        f"l {w:.0f} {h - r:.0f} "
+        f"b {w:.0f} {h - r + k:.0f} {w - r + k:.0f} {h:.0f} {w - r:.0f} {h:.0f} "
+        f"l {r:.0f} {h:.0f} "
+        f"b {r - k:.0f} {h:.0f} 0 {h - r + k:.0f} 0 {h - r:.0f} "
+        f"l 0 {r:.0f} "
+        f"b 0 {r - k:.0f} {r - k:.0f} 0 {r:.0f} 0"
+    )
+
+
+def _split_ass_alpha_color(ass_color: str) -> tuple:
+    """"&HAABBGGRR" -> ("AA", "BBGGRR") for use in inline \\1a/\\1c override
+    tags, which take alpha and color as two separate values (unlike the
+    combined form used in the [V4+ Styles] table)."""
+    hexpart = ass_color[2:] if ass_color.upper().startswith("&H") else "00000000"
+    hexpart = hexpart.rstrip("&")
+    return hexpart[0:2] or "00", hexpart[2:8] or "000000"
+
+
 def generate_ass_subtitles(
     transcript_info: Dict[str, Any],
     style_config: Dict[str, Any],
@@ -156,14 +211,24 @@ def generate_ass_subtitles(
     if highlight_mode not in ("word", "line", "none"):
         highlight_mode = "word" if style_config.get("karaoke", True) else "line"
 
-    # An opaque background box behind the text (BorderStyle 3) instead of a
-    # plain outline — libass draws it as a sharp rectangle sized to the text
-    # plus the "Outline" value as padding. Note: ASS/libass has no concept of
-    # rounded corners, independent box width/height, or a box offset separate
-    # from the text position — those aren't representable in this renderer.
+    # A background box behind the text is drawn ourselves as a separate ASS
+    # vector shape (\p1), not via BorderStyle 3 (libass's built-in "opaque
+    # box" mode) — BorderStyle 3 can only produce a sharp rectangle sized to
+    # text+uniform padding, with no independent width/height and no rounded
+    # corners. Drawing it manually lets width, height (via independent
+    # x/y padding) and corner radius all be set separately, and keeps it
+    # fully decoupled from the text's own outline/shadow styling instead of
+    # replacing them.
     box_color_raw = str(style_config.get("box_color") or "").strip()
     has_box = bool(box_color_raw) and box_color_raw.lower() != "transparent"
-    box_padding = max(0, int(style_config.get("box_padding", 10)))
+    legacy_padding = max(0, int(style_config.get("box_padding", 10)))
+    box_padding_x = max(0, int(style_config.get("box_padding_x", legacy_padding)))
+    box_padding_y = max(0, int(style_config.get("box_padding_y", legacy_padding)))
+    # 0 = square corners — matches every box ever actually rendered before
+    # this option existed (BorderStyle 3 never had rounding), even though the
+    # editor's live preview drew a rounded corner via CSS the real render
+    # couldn't produce.
+    box_radius = max(0, int(style_config.get("box_radius", 0)))
 
     # Alignment is a single ASS numpad value (1-9) combining vertical position
     # (bottom/center/top row) with horizontal alignment (left/center/right column):
@@ -178,14 +243,9 @@ def generate_ass_subtitles(
     # not cover them. Top subtitles also retain a comfortable screen margin.
     margin_v = 150 if position == "bottom" else (80 if position == "top" else 0)
 
-    if has_box:
-        border_style = 3
-        outline_value = box_padding
-        back_color = to_ass_color(box_color_raw, "&H80000000", opacity)
-    else:
-        border_style = 1
-        outline_value = outline_width
-        back_color = to_ass_color(shadow_color_hex, "&H80000000", opacity) if has_shadow else "&H80000000"
+    border_style = 1
+    outline_value = outline_width
+    back_color = to_ass_color(shadow_color_hex, "&H80000000", opacity) if has_shadow else "&H80000000"
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -201,16 +261,33 @@ Style: Default,{font_name},{font_size},{base_color},{accent_color},{outline_colo
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-    # \pos() pins the line at an exact point instead of relying on margins —
-    # used whenever a manual x/y nudge is set, so "move it exactly where I
-    # want" works on top of the coarse top/center/bottom + left/center/right presets.
+    # \pos() pins the line at an exact point instead of relying on margins.
+    # Normally only engaged for a manual x/y nudge — but a background box
+    # needs it unconditionally: the box is a *separate* dialogue event from
+    # the text, and the only way to guarantee both anchor to the exact same
+    # point (so the box stays centered under text of any width) is to give
+    # them an identical explicit \pos + the same style Alignment corner, and
+    # let libass anchor each one's own bounding box (text's auto-measured;
+    # the box's the drawn shape) to that corner the same way.
     pos_tag = ""
-    if x_offset or y_offset:
+    if x_offset or y_offset or has_box:
         px = 960 + (col - 2) * 860 + x_offset
         py = {0: 900, 3: 540, 6: 100}[row] + y_offset
         pos_tag = f"\\pos({px},{py})"
     rotate_tag = f"\\frz{rotation}" if rotation else ""
     prefix_tags = pos_tag + rotate_tag
+    text_layer = 1 if has_box else 0  # box sits on layer 0, text always drawn on top of it
+
+    font_path = _resolve_font_file(font_name)
+    box_alpha_hex, box_bgr_hex = _split_ass_alpha_color(to_ass_color(box_color_raw, "&H80000000", opacity)) if has_box else (None, None)
+
+    def _box_event(start_str: str, end_str: str, lines: List[str]) -> str:
+        text_w, text_h = _measure_text_block(lines, font_path, font_size, bool(style_config.get("bold")), letter_spacing)
+        box_w = text_w + box_padding_x * 2
+        box_h = text_h + box_padding_y * 2
+        path = _rounded_rect_ass_path(box_w, box_h, box_radius)
+        tags = f"{{{prefix_tags}\\1a&H{box_alpha_hex}&\\1c&H{box_bgr_hex}&\\bord0\\shad0\\p1}}"
+        return f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{tags}{path}{{\\p0}}"
 
     words = transcript_info.get("words", [])
     events = []
@@ -224,8 +301,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             paragraph_text = _wrap_paragraph(cleaned, line_words)
             start_str = format_ass_time(chunk[0]["start"])
             end_str = format_ass_time(chunk[-1]["end"])
+            if has_box:
+                plain_lines = [" ".join(cleaned[i:i + line_words]) for i in range(0, len(cleaned), line_words)]
+                events.append(_box_event(start_str, end_str, plain_lines))
             events.append(
-                f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,"
+                f"Dialogue: {text_layer},{start_str},{end_str},Default,,0,0,0,,"
                 f"{{{prefix_tags}\\c{base_color}}}{paragraph_text}"
             )
     elif words:
@@ -235,6 +315,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             line_start = chunk[0]["start"]
             line_end = chunk[-1]["end"]
             cleaned = [apply_text_case(w["word"].replace("{", "").replace("}", ""), text_case) for w in chunk]
+
+            if has_box:
+                events.append(_box_event(format_ass_time(line_start), format_ass_time(line_end), [" ".join(cleaned)]))
 
             if highlight_mode == "word":
                 # One event per word: the same full chunk text, but only the
@@ -255,7 +338,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     # back on between every word.
                     next_start = chunk[idx + 1]["start"] if idx + 1 < len(chunk) else line_end
                     end_str = format_ass_time(max(next_start, w["end"]))
-                    events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{{{prefix_tags}}}{line_text}")
+                    events.append(f"Dialogue: {text_layer},{start_str},{end_str},Default,,0,0,0,,{{{prefix_tags}}}{line_text}")
             else:
                 # "line" shows the accent color for the whole chunk; "none"
                 # just uses the neutral base color — both are a single event.
@@ -263,7 +346,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 line_text = f"{{{prefix_tags}\\c{text_color}}}" + " ".join(cleaned)
                 start_str = format_ass_time(line_start)
                 end_str = format_ass_time(line_end)
-                events.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{line_text}")
+                events.append(f"Dialogue: {text_layer},{start_str},{end_str},Default,,0,0,0,,{line_text}")
 
     else:
         text = apply_text_case(transcript_info.get("text", ""), text_case)
@@ -277,7 +360,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for i, s in enumerate(sentences):
             start_time = i * time_per_sentence
             end_time = (i + 1) * time_per_sentence
-            events.append(f"Dialogue: 0,{format_ass_time(start_time)},{format_ass_time(end_time)},Default,,0,0,0,,{{{prefix_tags}\\c{text_color}}}{s}")
+            start_str = format_ass_time(start_time)
+            end_str = format_ass_time(end_time)
+            if has_box:
+                events.append(_box_event(start_str, end_str, [s]))
+            events.append(f"Dialogue: {text_layer},{start_str},{end_str},Default,,0,0,0,,{{{prefix_tags}\\c{text_color}}}{s}")
 
     output_ass_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_ass_path, "w", encoding="utf-8") as f:

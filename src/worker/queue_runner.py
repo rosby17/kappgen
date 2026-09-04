@@ -2005,7 +2005,33 @@ def run_daily_automation():
             if not reserved:
                 continue
 
-            video = generate_and_queue_auto_video(db, channel)
+            try:
+                video = generate_and_queue_auto_video(db, channel)
+            except Exception as exc:
+                # An unhandled exception here (e.g. a DB session error mid
+                # script-write) used to propagate straight out of this
+                # for-loop and abort run_daily_automation entirely — not just
+                # for this channel, for every channel still left in this
+                # sweep's list too. Rolling back and continuing keeps one
+                # channel's bad luck from stalling the rest. The empty-script
+                # row this attempt already committed (see generate_and_queue_
+                # auto_video's early db.add/db.commit) is also cleaned up
+                # here so it doesn't sit forever as a queued ghost the render
+                # worker will never touch (see ready_for_render) — this is
+                # exactly what left 7 channels' auto videos stuck for up to
+                # 19h on 2026-09-04 before this fix.
+                logger.warning(f"Daily automation: exception generating video for channel {channel.id} ('{channel.name}'): {exc}")
+                db.rollback()
+                db.query(Video).filter(
+                    Video.channel_id == channel.id,
+                    Video.status == VideoStatus.QUEUED.value,
+                    or_(Video.script_text.is_(None), Video.script_text == ""),
+                ).update(
+                    {"status": VideoStatus.FAILED.value, "error_message": "Génération automatique interrompue par une erreur inattendue."},
+                    synchronize_session=False,
+                )
+                db.commit()
+                video = None
             if not video:
                 # Generation failed (or was legitimately skipped, e.g.
                 # insufficient credit) — release the slot so this is
