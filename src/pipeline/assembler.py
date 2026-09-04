@@ -538,6 +538,8 @@ def assemble_final_video(
             particle_size = _bounded_number(particle_settings.get("size", effects.get("particle_size", 50)), 50, 0, 100)
             particle_speed = _bounded_number(particle_settings.get("speed", effects.get("particle_speed", 50)), 50, 0, 100)
             particle_dispersion = _bounded_number(particle_settings.get("dispersion", effects.get("particle_dispersion", 50)), 50, 0, 100)
+            particle_softness = _bounded_number(particle_settings.get("softness", 50), 50, 0, 100)
+            particle_turbulence = _bounded_number(particle_settings.get("turbulence", 50), 50, 0, 100)
             direction = particle_settings.get("direction", particle_direction)
             if direction not in {"auto", "up", "down", "left", "right"}:
                 direction = "auto"
@@ -546,7 +548,7 @@ def assemble_final_video(
                 "left": ",transpose=1", "right": ",transpose=2",
             }[direction]
             size_factor = 0.76 + (particle_size / 100) * 0.62
-            speed_factor = 0.55 + (particle_speed / 100) * 1.45
+            speed_factor = (0.55 + (particle_speed / 100) * 1.45) * (0.8 + particle_turbulence * 0.004)
             spread_factor = particle_dispersion / 100
             depth = layer["depth"]
             layer_scale = size_factor * (0.88 + depth * 0.16)
@@ -562,7 +564,7 @@ def assemble_final_video(
                 framing = "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black"
             filter_parts.append(
                 f"[{idx}:v]setpts=PTS/{speed_factor:.3f}{direction_filter},"
-                f"scale={scaled_w}:{scaled_h},{framing}[{scaled_label}]"
+                f"scale={scaled_w}:{scaled_h},{framing},gblur=sigma={particle_softness * 0.018:.2f}[{scaled_label}]"
             )
             out_label = f"v_part{i}"
             # One layer retains the previous strength. Added depth layers are
