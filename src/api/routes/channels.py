@@ -122,13 +122,22 @@ def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str
     at that moment (often a plain circle+initial), even after a real photo
     was set later — this runs on every identity sync (every ~6h), so a
     changed avatar catches up within one cycle instead of never.
+
+    Bug history: a channel connected before `logo_source` existed as a field
+    has logo_path set but logo_source entirely absent (neither "manual" nor
+    "youtube_auto") — `!= "youtube_auto"` treated that missing value exactly
+    like an explicit "manual" and refused to ever touch it again, so a
+    creator who disconnected the wrong YouTube channel and reconnected the
+    right one kept the WRONG channel's avatar forever, with no way back
+    short of deleting branding.logo_path by hand. Only an explicit "manual"
+    now blocks the sync; unset is legacy auto-sync, not a protected upload.
     Mutates channel.branding in place; caller is responsible for the
     db.commit()."""
     if not thumbnail_url:
         return
     branding = dict(channel.branding or {})
     if branding.get("logo_path"):
-        if branding.get("logo_source") != "youtube_auto":
+        if branding.get("logo_source") == "manual":
             return  # a manually-uploaded logo is never touched
         if branding.get("youtube_avatar_synced_url") == thumbnail_url:
             return  # already synced to this exact avatar, nothing changed
