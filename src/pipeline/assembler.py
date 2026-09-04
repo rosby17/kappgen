@@ -269,7 +269,13 @@ def assemble_final_video(
 
     effect_settings = effects.get("effect_settings") or {}
     def effect_intensity(effect_id: str, legacy_value: Any) -> float:
-        return _bounded_number((effect_settings.get(effect_id) or {}).get("intensity", legacy_value), 50, 0, 100) / 100
+        settings = effect_settings.get(effect_id) or {}
+        intensity = _bounded_number(settings.get("intensity", legacy_value), 50, 0, 100) / 100
+        # Opacity is deliberately separate from intensity in the editor: a
+        # creator can keep a dense, fast particle field but make it barely
+        # visible. For native FFmpeg filters it attenuates the filter strength.
+        opacity = _bounded_number(settings.get("opacity", 100), 100, 0, 100) / 100
+        return intensity * opacity
 
     grain_frac = effect_intensity("grain", effects.get("grain_intensity", 50))
     vignette_frac = effect_intensity("vignette", effects.get("vignette_intensity", 50))
@@ -525,7 +531,10 @@ def assemble_final_video(
             idx = particles_base_index + i
             scaled_label = f"part{i}"
             particle_settings = effect_settings.get(layer["id"]) or {}
-            layer_intensity = _bounded_number(particle_settings.get("intensity", effects.get("particle_intensity", 50)), 50, 0, 100) / 100
+            layer_intensity = (
+                _bounded_number(particle_settings.get("intensity", effects.get("particle_intensity", 50)), 50, 0, 100)
+                * _bounded_number(particle_settings.get("opacity", 100), 100, 0, 100)
+            ) / 10_000
             particle_size = _bounded_number(particle_settings.get("size", effects.get("particle_size", 50)), 50, 0, 100)
             particle_speed = _bounded_number(particle_settings.get("speed", effects.get("particle_speed", 50)), 50, 0, 100)
             particle_dispersion = _bounded_number(particle_settings.get("dispersion", effects.get("particle_dispersion", 50)), 50, 0, 100)
