@@ -169,11 +169,6 @@ async def submit_video_subject(
                 status_code=403,
                 detail="La transcription automatique (IA) n'est pas incluse dans ton abonnement actuel. Désactive-la pour utiliser le titre du fichier comme sous-titre, ou passe à un palier supérieur.",
             )
-    if input_type == "audio" and not audio_rights_confirmed:
-        raise HTTPException(
-            status_code=400,
-            detail="Confirmez que vous possédez les droits nécessaires sur l’audio et la voix avant de continuer.",
-        )
     allowed_audio_sources = {"personal", "licensed", "cloned", "third_party", "music"}
     if input_type == "audio" and audio_source_type not in allowed_audio_sources:
         raise HTTPException(status_code=400, detail="Indiquez la provenance de l’audio importé.")
