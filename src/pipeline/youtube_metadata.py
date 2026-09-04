@@ -530,11 +530,20 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # above) — a text description alone routinely drifts from the reference's
     # actual look (character, palette, composition), which is what creators
     # were complaining about ("aucune ressemblance").
+    configured_reference_paths = [
+        path for path in (thumbnail_style.get("reference_image_paths") or [])
+        if isinstance(path, str) and path.strip()
+    ]
+    if not configured_reference_paths and thumbnail_style.get("reference_image_path"):
+        configured_reference_paths = [thumbnail_style["reference_image_path"]]
     reference_paths = [
         STORAGE_PATH / rel_path
-        for rel_path in (thumbnail_style.get("reference_image_paths") or [])
+        for rel_path in configured_reference_paths
     ]
-    reference_paths = [p for p in reference_paths if p.exists()] or None
+    reference_paths = [p for p in reference_paths if p.exists()]
+    if configured_reference_paths and not reference_paths:
+        raise RuntimeError("Les images de référence de miniature configurées pour cette chaîne sont introuvables sur le serveur.")
+    reference_paths = reference_paths or None
 
     # Admin-controlled provider priority (src/utils/app_settings.py) — an
     # order containing only "huggingface" keeps thumbnails free (no credit

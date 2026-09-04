@@ -1087,6 +1087,22 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     channel = video.channel
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    thumbnail_style = channel.thumbnail_style or {}
+    configured_references = thumbnail_style.get("reference_image_paths") or ([] if not thumbnail_style.get("reference_image_path") else [thumbnail_style["reference_image_path"]])
+    if not configured_references:
+        raise HTTPException(
+            status_code=409,
+            detail="Aucune référence de style de miniature n'est configurée pour cette chaîne. Réimporte les références avant de régénérer.",
+        )
+    missing_references = [
+        path for path in configured_references
+        if not isinstance(path, str) or not (STORAGE_PATH / path).is_file()
+    ]
+    if missing_references:
+        raise HTTPException(
+            status_code=409,
+            detail="Les fichiers de référence de miniature sont introuvables sur le serveur. Réimporte-les avant de régénérer.",
+        )
     output_ref = str(video.output_path or "")
     is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
     video_path = STORAGE_PATH / output_ref if output_ref and not is_remote else None
