@@ -136,6 +136,12 @@ def build_video_clip(
     output_clip_path: Path,
     duration: float,
     fps: int = 30,
+    start_offset: float = 0.0,
+    zoom_min_pct: float = 1.0,
+    zoom_max_pct: float = 1.12,
+    energy: float = 0.5,
+    scene_index: int = 0,
+    editing_profile: Optional[Dict[str, Any]] = None,
     **_unused_image_only_kwargs,
 ) -> Path:
     """Prepare a creator-provided B-roll or fetched stock clip for one
@@ -143,27 +149,77 @@ def build_video_clip(
 
     The source is looped when shorter than the scene and center-cropped to the
     same 1920x1080 canvas as image scenes. Audio from the B-roll is discarded;
-    the narration/mix remains the single authoritative audio track.
+    the narration/mix remains the single authoritative audio track. A subtle
+    Ken Burns zoom (same zoom_min_pct/zoom_max_pct/energy-driven intensity as
+    build_image_clip, just with zoompan's d=1 so it animates across the
+    video's own real motion instead of holding a single frame) is layered on
+    top — visually distinguishes a scene built from reused source footage
+    from a straight, uncut clip of it.
 
-    `**_unused_image_only_kwargs` absorbs the Ken-Burns-only parameters
-    (zoom_min_pct, zoom_max_pct, energy, scene_index, editing_profile) that
+    start_offset (seconds) lets a single long "pillar" clip — e.g. a talking-
+    head avatar recording used as the channel's only visual source — play
+    through continuously across every scene it's assigned to, instead of every
+    scene independently restarting the clip from 0:00 (which read as the
+    avatar visibly snapping back to the start at each cut). orchestrator.py
+    tracks a running cursor per source clip and passes each scene's own
+    starting point here (or a random offset instead, for image_style's
+    broll_shuffle mode — re-cutting a creator's own already-published
+    footage into a differently-paced sequence) — -stream_loop keeps that
+    offset valid (wraps back to the beginning) even once it runs past the
+    clip's own actual length.
+
+    `**_unused_image_only_kwargs` absorbs any remaining image-only parameter
     orchestrator.py's clip-building loop passes to whichever of this function
-    or build_image_clip a scene needs — every "video" scene (creator B-roll,
-    and since the Pexels stock-footage source, fetched clips too) was
-    crashing with a TypeError here otherwise, well before any output was
-    written, which orchestrator.py's f.result() then re-raised and failed
-    the whole render on."""
+    or build_image_clip a scene needs, so an unrecognized one never crashes
+    the whole render the way it used to before zoom support existed here."""
+    total_frames = max(1, int(duration * fps))
+    energy = max(0.0, min(1.0, energy))
+    profile = editing_profile or {}
+    motion_types = profile.get("motions") or ["zoom_in", "zoom_out", "pan_right", "pan_left"]
+    motion = motion_types[scene_index % len(motion_types)]
+    configured_delta = max(0.0, zoom_max_pct - zoom_min_pct)
+    motion_scale = max(0.25, min(1.0, float(profile.get("motion_scale", 1.0))))
+    zoom_delta = configured_delta * motion_scale * (0.35 + 0.65 * energy)
+    dynamic_zoom_max = zoom_min_pct + zoom_delta
+
+    zoom_in_expr = f"min(pzoom+{zoom_delta/total_frames:.6f},{dynamic_zoom_max})"
+    zoom_out_expr = f"max({dynamic_zoom_max}-(on/{total_frames})*{zoom_delta:.6f},{zoom_min_pct})"
+    pan_right_expr = "(on/{0})*(iw-iw/zoom)".format(total_frames)
+    pan_left_expr = "(1-(on/{0}))*(iw-iw/zoom)".format(total_frames)
+    center_x, center_y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    if motion == "zoom_out":
+        zoom_expr, x_expr, y_expr = zoom_out_expr, center_x, center_y
+    elif motion == "pan_right":
+        zoom_expr, x_expr, y_expr = f"{dynamic_zoom_max}", pan_right_expr, center_y
+    elif motion == "pan_left":
+        zoom_expr, x_expr, y_expr = f"{dynamic_zoom_max}", pan_left_expr, center_y
+    else:  # zoom_in
+        zoom_expr, x_expr, y_expr = zoom_in_expr, center_x, center_y
+
     # `format` is its own filter, not an option of `fps` — chaining it with ":"
     # made ffmpeg reject the whole graph ("Option not found"), which failed
     # every single video scene (creator B-roll included) before any output
-    # was written.
-    filter_graph = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps={},format=yuv420p".format(fps)
-    cmd = [
-        "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(video_path),
+    # was written. zoompan's d=1 (not build_image_clip's d=total_frames) is
+    # what keeps this a real moving video instead of freezing on one frame —
+    # zoom/x/y still animate across `on` (the output frame counter) same as
+    # the image path, just one real input frame advances per output frame.
+    filter_graph = (
+        f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,"
+        f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d=1:s=1920x1080:fps={fps},"
+        f"format=yuv420p"
+    )
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(video_path)]
+    if start_offset > 0:
+        # Output-position seek (placed after -i, not before) — with
+        # -stream_loop the source is effectively an infinite stream, so this
+        # correctly wraps to the beginning again once start_offset exceeds
+        # the clip's own real duration, instead of erroring or freezing.
+        cmd.extend(["-ss", f"{start_offset:.3f}"])
+    cmd.extend([
         "-t", f"{duration:.3f}", "-vf", filter_graph,
         "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
         str(output_clip_path),
-    ]
+    ])
     output_clip_path.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(cmd)
     return output_clip_path

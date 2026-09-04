@@ -26,6 +26,32 @@ SCENE_DIRECTOR_MODEL = "claude-sonnet-5"
 # instead of nulling out the whole result.
 _DIRECTOR_BATCH_SIZE = 40
 
+_STOCK_QUERY_STOPWORDS = {
+    "avec", "dans", "pour", "plus", "cette", "tous", "tout", "sont", "être",
+    "nous", "vous", "leur", "comme", "mais", "donc", "alors", "sans", "vers",
+    "une", "des", "les", "aux", "sur", "par", "qui", "que", "est", "son", "ses",
+    "the", "and", "for", "this", "that", "with", "from", "into", "about", "are",
+}
+
+
+def _local_stock_query(text: str, niche: str = "") -> str:
+    """Build a usable Pexels query without an AI call.
+
+    Stock search must not disappear when Gemini/Claude is unavailable: this
+    cheap fallback keeps the visual pipeline alive and is deliberately limited
+    to concrete words rather than trying to summarize the narration.
+    """
+    words = re.findall(r"[A-Za-zÀ-ÿ]{4,}", f"{text or ''} {niche or ''}")
+    selected: List[str] = []
+    for word in words:
+        normalized = word.casefold()
+        if normalized in _STOCK_QUERY_STOPWORDS or normalized in {w.casefold() for w in selected}:
+            continue
+        selected.append(word)
+        if len(selected) == 3:
+            break
+    return " ".join(selected) or "cinematic nature landscape"
+
 
 def _extract_json(text: str) -> dict:
     text = text.strip()
@@ -153,17 +179,29 @@ Respond with ONLY this JSON object, no other text:
 {{"queries": ["query for scene {start + 1}", "..."]}}
 The queries array MUST have exactly {len(batch)} entries, in order."""
 
-            raw_text = generate_text(instruction, max_tokens=1500, model=SCENE_DIRECTOR_MODEL, operation='stock_query_direction')
+            # Stock keywords are a lightweight classification task. Prefer
+            # Gemini (free tier when configured) and fall back automatically
+            # through the admin provider chain if it is unavailable.
+            raw_text = generate_text(
+                instruction,
+                max_tokens=1500,
+                model=SCENE_DIRECTOR_MODEL,
+                operation='stock_query_direction',
+                preferred_provider='gemini',
+            )
             data = _extract_json(raw_text)
             batch_queries = data.get("queries")
             if not isinstance(batch_queries, list) or len(batch_queries) != len(batch):
-                logger.warning(f"Stock-query director returned {len(batch_queries) if isinstance(batch_queries, list) else 'no'} queries for scenes {start + 1}-{start + len(batch)}; those scenes get no stock footage.")
-                continue
+                logger.warning(f"Stock-query director returned {len(batch_queries) if isinstance(batch_queries, list) else 'no'} queries for scenes {start + 1}-{start + len(batch)}; using local keyword fallback.")
+                batch_queries = [_local_stock_query(text, niche) for text in batch]
             for i, q in enumerate(batch_queries):
                 queries[start + i] = str(q).strip()
             any_success = True
         except Exception as e:
-            logger.warning(f"Stock-query director failed for scenes {start + 1}-{start + len(batch)}, no stock footage for them: {e}")
-            continue
+            logger.warning(f"Stock-query director failed for scenes {start + 1}-{start + len(batch)}, using local keyword fallback: {e}")
+            batch_queries = [_local_stock_query(text, niche) for text in batch]
+            for i, q in enumerate(batch_queries):
+                queries[start + i] = q
+            any_success = True
 
     return queries if any_success else None

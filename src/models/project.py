@@ -62,7 +62,7 @@ class OverlayItem(BaseModel):
     corner: str = "top-right"   # legacy 4-preset fallback, only used when x_percent/y_percent are absent (old saved channels)
     x_percent: Optional[float] = None  # 0-100, free placement — where the image's own top-left sits inside the inset frame; None = derive from `corner`
     y_percent: Optional[float] = None  # same, vertical axis
-    size_percent: float = 12    # width as % of the 1920px-wide render frame
+    size_percent: float = 10    # width as % of the 1920px-wide render frame
     opacity: float = 1.0        # 0-1
     shape: str = "rectangle"    # "rectangle" | "rounded" | "circle" — actually masked at render time, see assembler.py:apply_overlay_shape_mask
 
@@ -84,7 +84,7 @@ class MusicPreference(BaseModel):
     tracks: List[str] = Field(default_factory=list)  # storage-relative paths to uploaded tracks; one is picked at random per render
     ai_prompt: Optional[str] = None     # optional override prompt for AI generation; defaults to the channel niche
     volume: float = 0.10                # Background volume level (0.0 - 1.0)
-    auto_ducking: bool = True
+    auto_ducking: bool = False
     ducking_amount: float = 0.70
     fade_in_seconds: float = 2.0
     fade_out_seconds: float = 3.0
@@ -92,7 +92,7 @@ class MusicPreference(BaseModel):
     soundgoodizer_amount: float = 0.35
     reverb_enabled: bool = False
     reverb_amount: float = 0.15
-    maximus_enabled: bool = True
+    maximus_enabled: bool = False
     maximus_amount: float = 0.40
 
 class ImageStyle(BaseModel):
@@ -113,6 +113,13 @@ class ImageStyle(BaseModel):
     # How the creator wants the montage to consume their uploaded media.
     # Kept separate from `sources`, which controls AI/community image pools.
     media_mode: str = "images"  # images | videos | mixed
+    # When True, each B-roll scene grabs a random slice of its source clip
+    # instead of playing it continuously start-to-finish (orchestrator.py) —
+    # for re-cutting footage that's already been published elsewhere, where
+    # a straight replay would read as a rehash. False (default) keeps the
+    # continuous "pillar clip" behavior (e.g. a single talking-head avatar
+    # recording meant to play through naturally).
+    broll_shuffle: bool = False
     # Opt-in only, set at upload time — this channel's own library becomes
     # eligible for admin curation into its niche's shared community library
     # (see CommunityLibraryFolder). Never shared without this being true.
@@ -132,6 +139,14 @@ class EffectsConfig(BaseModel):
     grain_intensity: int = 50           # 0-100, scales the noise/grain amount
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
     particle_intensity: int = 50        # 0-100, shared strength for atmospheric/particle effects
+    # Fine controls for the animated particle overlays. These live in the
+    # channel JSON config, so old channels keep their established result.
+    particle_density: int = 50          # 0-100, adds subtle foreground/depth layers
+    particle_size: int = 50             # 0-100, small/far to large/near particles
+    particle_speed: int = 50            # 0-100, calm drift to faster movement
+    particle_dispersion: int = 50       # 0-100, compact to wide distribution
+    particle_direction: str = "auto"    # auto | up | down | left | right
+    effect_settings: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
     watermark_enabled: bool = True       # large centered official logo at low opacity — free-tier default

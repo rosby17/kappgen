@@ -77,5 +77,7 @@ def test_one_failed_batch_does_not_discard_other_long_video_scenes(monkeypatch):
     assert prompts[80:120] == scenes[80:120]
     assert prompts[120] == "image prompt 121"
     assert queries[79] == "stock query 80"
-    assert queries[80:120] == [None] * 40
+    # A provider failure must still leave Pexels with a concrete local query;
+    # only the failed batch falls back, without discarding other scenes.
+    assert all(query for query in queries[80:120])
     assert queries[120] == "stock query 121"

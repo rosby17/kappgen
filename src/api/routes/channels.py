@@ -18,11 +18,11 @@ import uuid
 import httpx
 from urllib.parse import quote, urlparse
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice, ChannelPipelineShare
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.pipeline import youtube_publisher
 from src.pipeline.niche_detector import suggest_niche
 from src.pipeline.script_structure_analyzer import analyze_script_structure_text
@@ -37,7 +37,16 @@ ALLOWED_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 ALLOWED_LIBRARY_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
 ALLOWED_BROLL_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
 MAX_IMAGE_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
-MAX_BROLL_UPLOAD_BYTES = 250 * 1024 * 1024  # 250 MB per creator clip
+# api.kappgen.com is proxied through Cloudflare, whose own request-body cap
+# sits around 100MB regardless of what this backend allows — a clip this
+# server would happily accept still silently fails at the Cloudflare edge
+# before ever reaching here. Capped here to match that real ceiling (with a
+# small margin) so the error message a creator sees is actually true, and so
+# a too-large file gets rejected quickly by this check rather than being
+# accepted request-body-wise but still failing to actually arrive in
+# practice. The frontend enforces the same 95MB limit client-side, before
+# even attempting the upload (see CLOUDFLARE_UPLOAD_LIMIT_BYTES in App.jsx).
+MAX_BROLL_UPLOAD_BYTES = 95 * 1024 * 1024  # 95 MB per creator clip
 
 
 class VoiceSettingsPreviewRequest(BaseModel):
@@ -292,7 +301,7 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), gender: st
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     contents = await audio.read()
     if not contents:
@@ -642,10 +651,16 @@ def _installed_font_families() -> tuple[str, ...]:
     The picker is deliberately backed by fontconfig rather than a large
     hard-coded list: every displayed family can therefore be resolved by the
     same renderer that burns the subtitles into the finished video.
+
+    Filtered to families that cover French (``:lang=fr``) — the render
+    container also ships full script coverage (Tamil, Thai, CJK, etc.) for
+    non-Latin niches, which otherwise buries the picker under dozens of
+    "Noto Sans <Script> UI <Weight>" variants nobody writing French
+    subtitles would ever pick.
     """
     try:
         result = subprocess.run(
-            ["fc-list", "--format=%{family}\n"],
+            ["fc-list", ":lang=fr", "--format=%{family}\n"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -660,7 +675,7 @@ def _installed_font_families() -> tuple[str, ...]:
         # fontconfig may return several aliases for one face, comma-separated.
         for raw_name in line.split(","):
             name = re.sub(r"\s+", " ", raw_name).strip()
-            if name and not name.startswith("."):
+            if name and not name.startswith(".") and "noto" not in name.casefold():
                 families.setdefault(name.casefold(), name)
     return tuple(sorted(families.values(), key=str.casefold))
 
@@ -823,7 +838,10 @@ def get_channel(channel_id: str, current_user: User = Depends(get_current_user),
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    # Admin channel management (the admin dashboard's "Gérer le pipeline"
+    # action, reached from a video's owner) intentionally spans every
+    # creator's channel; regular users remain restricted to their own.
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     data = channel.to_dict()
     data["queued_count"] = db.query(Video).filter(Video.channel_id == channel.id, Video.status == VideoStatus.QUEUED.value).count()
@@ -836,6 +854,111 @@ def get_channel(channel_id: str, current_user: User = Depends(get_current_user),
     data["unpublished_count"] = data["done_count"] - data["published_count"]
     data["total_count"] = db.query(Video).filter(Video.channel_id == channel.id).count()
     return data
+
+
+# Same field set the in-account "Réutiliser le pipeline" duplicate copies in
+# the frontend (openDuplicateWizard) — kept in sync deliberately: whatever's
+# safe to hand a brand new channel of your own is exactly what's safe to
+# hand a completely different account. Explicitly excludes: identity (name,
+# description), the source's own YouTube connection, its cloned voice id,
+# its logo file, and its analyzed thumbnail style — none of those can be
+# shared as-is with someone else's channel.
+def build_pipeline_share_template(channel: Channel) -> Dict[str, Any]:
+    branding = dict(channel.branding or {})
+    branding.pop("logo_path", None)
+    return {
+        "content_type": channel.content_type or "narration",
+        "niche": channel.niche,
+        "subtitle_style": channel.subtitle_style or {},
+        "branding": branding,
+        "music_preference": channel.music_preference or {},
+        "image_style": channel.image_style or {},
+        "effects_config": channel.effects_config or {},
+        "automation_mode": channel.automation_mode or "manual",
+        "automation_style_prompt": channel.automation_style_prompt,
+        "topic_examples": channel.topic_examples,
+        "use_web_trends": bool(channel.use_web_trends),
+        "youtube_topic_sources": channel.youtube_topic_sources,
+        "videos_per_day": channel.videos_per_day or 1,
+        "automation_window_start_hour": channel.automation_window_start_hour if channel.automation_window_start_hour is not None else 7,
+        "automation_window_end_hour": channel.automation_window_end_hour if channel.automation_window_end_hour is not None else 11,
+        "active_days": channel.active_days,
+        "script_generation_hour": channel.script_generation_hour,
+        "script_generation_minute": channel.script_generation_minute or 0,
+        "script_generation_second": channel.script_generation_second or 0,
+        "script_generation_days": channel.script_generation_days,
+        "timezone": channel.timezone or "Africa/Douala",
+        "publish_mode": channel.publish_mode or "manual",
+        "youtube_made_for_kids": bool(channel.youtube_made_for_kids),
+        "youtube_default_description": channel.youtube_default_description,
+        "youtube_default_tags": channel.youtube_default_tags or [],
+        "youtube_category_id": channel.youtube_category_id or "22",
+        "youtube_privacy_status": channel.youtube_privacy_status or "public",
+        "youtube_contains_synthetic_media": channel.youtube_contains_synthetic_media is not False,
+        "youtube_license": channel.youtube_license or "youtube",
+        "youtube_notify_subscribers": channel.youtube_notify_subscribers is not False,
+        "youtube_embeddable": channel.youtube_embeddable is not False,
+        "youtube_public_stats_viewable": channel.youtube_public_stats_viewable is not False,
+        "publish_time_mode": channel.publish_time_mode or "range",
+        "publish_schedule_hour": channel.publish_schedule_hour if channel.publish_schedule_hour is not None else 8,
+        "publish_schedule_day_offset": channel.publish_schedule_day_offset if channel.publish_schedule_day_offset is not None else 1,
+        "script_structure": channel.script_structure,
+        "voice_settings": channel.voice_settings,
+    }
+
+
+_PIPELINE_SHARE_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L — read aloud/typed by hand
+_PIPELINE_SHARE_TTL_DAYS = 30
+
+
+@router.post("/{channel_id}/pipeline-share")
+def create_pipeline_share(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Generates a short redeemable code handing this channel's template
+    settings to a DIFFERENT account (another director on the platform) —
+    the cross-account counterpart to "Réutiliser le pipeline". The snapshot
+    is frozen now, at share time: editing or deleting this channel later
+    never changes what the code redeems, and redeeming it only pre-fills
+    the recipient's own create-channel wizard once — the two channels are
+    fully independent from that point on, by design (see the "Copie unique"
+    choice made for this feature over a live-synced alternative)."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+    code = "".join(random.choices(_PIPELINE_SHARE_CODE_ALPHABET, k=8))
+    share = ChannelPipelineShare(
+        code=code,
+        channel_id=channel.id,
+        owner_user_id=current_user.id,
+        source_channel_name=channel.name,
+        template=build_pipeline_share_template(channel),
+        expires_at=datetime.utcnow() + timedelta(days=_PIPELINE_SHARE_TTL_DAYS),
+    )
+    db.add(share)
+    db.commit()
+    return {"code": code, "expires_at": share.expires_at.isoformat()}
+
+
+@router.get("/pipeline-share/{code}")
+def redeem_pipeline_share(code: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Any authenticated user can redeem a code — that's the whole point,
+    it's meant to cross accounts. The code itself (8 chars from a
+    36-character alphabet, shared out of band by the owner) is the only
+    gate; not tied to who redeems it, and reusable until it expires."""
+    share = db.query(ChannelPipelineShare).filter(ChannelPipelineShare.code == code.strip().upper()).first()
+    if not share or share.revoked:
+        raise HTTPException(status_code=404, detail="Code de partage introuvable ou révoqué.")
+    if share.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=410, detail="Ce code de partage a expiré.")
+    share.redeemed_count = (share.redeemed_count or 0) + 1
+    db.commit()
+    return {
+        "source_channel_name": share.source_channel_name,
+        "template": share.template,
+    }
+
 
 @router.get("/{channel_id}/library-preview")
 def get_channel_library_preview(channel_id: str, db: Session = Depends(get_db)):
@@ -1221,7 +1344,12 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    # Admin channel management (the admin dashboard's "Gérer le pipeline"
+    # action) intentionally spans every creator's channel — lets an admin
+    # pause/reconfigure a channel that's burning credits on unwanted auto
+    # generations without needing the owner's permission or involvement.
+    is_admin_edit = channel.user_id != current_user.id and current_user.is_admin
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     # Watermark removal is a lifetime unlock tied to having received real
@@ -1231,9 +1359,12 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     # the render pipeline re-enforces this anyway (_channel_config_for_render
     # in queue_runner.py), so failing the entire channel save over one field
     # a client could have simply omitted would only be worse UX for no real
-    # security benefit.
+    # security benefit. Checked against the channel's real owner, not
+    # whoever's actually making the request — an admin editing someone
+    # else's channel has their own credit history, irrelevant here.
     if payload.effects_config is not None and not payload.effects_config.watermark_enabled:
-        if not user_has_purchased_credits(db, current_user):
+        owner_for_credit_check = channel.user if is_admin_edit else current_user
+        if not user_has_purchased_credits(db, owner_for_credit_check):
             payload.effects_config.watermark_enabled = True
 
     if payload.name is not None:
@@ -1380,7 +1511,7 @@ def generate_now(channel_id: str, current_user: User = Depends(get_current_user)
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if not channel.is_active:
         raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
@@ -1435,7 +1566,7 @@ async def upload_channel_logo(channel_id: str, file: UploadFile = File(...), cur
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     ext = Path(file.filename or "").suffix.lower()
@@ -1483,7 +1614,7 @@ async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), 
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     ext = Path(file.filename or "").suffix.lower()
@@ -1509,7 +1640,7 @@ async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), 
         "image_path": f"channels/{channel.id}/overlays/{overlay_id}{ext}",
         "enabled": True,
         "corner": "top-right",
-        "size_percent": 12,
+        "size_percent": 10,
         "opacity": 1.0,
     })
     branding["overlays"] = overlays
@@ -1524,7 +1655,7 @@ def delete_channel_overlay(channel_id: str, overlay_id: str, current_user: User 
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     branding = dict(channel.branding or {})
@@ -1553,7 +1684,7 @@ async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), c
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     ext = Path(file.filename or "").suffix.lower()
@@ -1579,6 +1710,29 @@ async def upload_channel_avatar(channel_id: str, file: UploadFile = File(...), c
     db.refresh(channel)
     return channel.to_dict()
 
+# In-memory job store for AI music previews — Izivoice's /music call is a
+# genuinely async task on their side (create + poll until "done") that
+# commonly takes well past Cloudflare's fixed ~100s proxy timeout, which
+# silently killed this request client-side with no error: the button stayed
+# on "Génération…" forever, the creator had no idea whether it had worked,
+# and — since the preview only flips music_preference.enabled to true on a
+# *successful* response — the channel then saved with music silently
+# disabled, so the rendered videos had no music at all despite the creator
+# having "used" the AI generator. Same fix as voice cloning (see
+# _clone_jobs above): return a job_id immediately, generate in the
+# background, let the frontend poll.
+_music_preview_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def _run_music_preview_job(job_id: str, prompt: str, duration: float, tmp_path: Path):
+    from src.pipeline.music import generate_music_izivoice
+    try:
+        generate_music_izivoice(prompt, duration, tmp_path)
+        _music_preview_jobs[job_id] = {"status": "done", "path": str(tmp_path)}
+    except Exception as e:
+        _music_preview_jobs[job_id] = {"status": "error", "detail": f"Génération musicale impossible : {e}"}
+
+
 @router.post("/preview-ai-music")
 async def preview_ai_music(
     niche: str = Form(""),
@@ -1587,9 +1741,10 @@ async def preview_ai_music(
     duration: float = Form(20.0),
     current_user: User = Depends(get_current_user),
 ):
-    """Generates a short AI music preview on the spot, so the client can listen
-    to it in the wizard before saving the channel — same prompt path used at
-    render time (Claude-written prompt, or the client's own override)."""
+    """Generates a short AI music preview so the client can listen to it in
+    the wizard before saving the channel — same prompt path used at render
+    time (Claude-written prompt, or the client's own override). Returns a
+    job_id immediately; see /preview-ai-music/status/{job_id} for the result."""
     if not IZIVOICE_API_KEY:
         raise HTTPException(status_code=503, detail="La génération musicale IA n'est pas configurée sur le serveur.")
 
@@ -1605,16 +1760,34 @@ async def preview_ai_music(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Génération du prompt impossible : {e}")
 
-    from src.pipeline.music import generate_music_izivoice
     tmp_dir = STORAGE_PATH / "tmp" / "music-previews"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = tmp_dir / f"{uuid.uuid4()}.mp3"
-    try:
-        generate_music_izivoice(prompt, max(5.0, min(duration, 30.0)), tmp_path)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Génération musicale impossible : {e}")
+    job_id = uuid.uuid4().hex
+    tmp_path = tmp_dir / f"{job_id}.mp3"
+    _music_preview_jobs[job_id] = {"status": "pending"}
+    import threading
+    threading.Thread(
+        target=_run_music_preview_job,
+        args=(job_id, prompt, max(5.0, min(duration, 30.0)), tmp_path),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id, "status": "pending"}
 
-    return FileResponse(tmp_path, media_type="audio/mpeg", filename="preview.mp3")
+
+@router.get("/preview-ai-music/status/{job_id}")
+def preview_ai_music_status(job_id: str, current_user: User = Depends(get_current_user)):
+    job = _music_preview_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Tâche de génération introuvable ou expirée.")
+    return {"status": job["status"], "detail": job.get("detail")}
+
+
+@router.get("/preview-ai-music/file/{job_id}")
+def preview_ai_music_file(job_id: str, current_user: User = Depends(get_current_user)):
+    job = _music_preview_jobs.get(job_id)
+    if not job or job.get("status") != "done":
+        raise HTTPException(status_code=404, detail="Aperçu musical introuvable ou pas encore prêt.")
+    return FileResponse(job["path"], media_type="audio/mpeg", filename="preview.mp3")
 
 
 @router.post("/music-video/preview")
@@ -1637,16 +1810,20 @@ async def preview_music_video_track(
     if not prompt:
         raise HTTPException(status_code=400, detail="Décris le style musical voulu.")
 
-    from src.pipeline.music import generate_music_izivoice
+    # Same async-job pattern as /preview-ai-music above — this call also
+    # commonly runs past Cloudflare's ~100s proxy timeout if held open.
     tmp_dir = STORAGE_PATH / "tmp" / "music-previews"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = tmp_dir / f"{uuid.uuid4()}.mp3"
-    try:
-        generate_music_izivoice(prompt, 20.0, tmp_path)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Génération musicale impossible : {e}")
-
-    return FileResponse(tmp_path, media_type="audio/mpeg", filename="preview.mp3")
+    job_id = uuid.uuid4().hex
+    tmp_path = tmp_dir / f"{job_id}.mp3"
+    _music_preview_jobs[job_id] = {"status": "pending"}
+    import threading
+    threading.Thread(
+        target=_run_music_preview_job,
+        args=(job_id, prompt, 20.0, tmp_path),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id, "status": "pending"}
 
 
 MUSIC_STYLE_SUGGEST_INSTRUCTION = """You are a music supervisor helping someone with no music background set up a YouTube background-music channel. They need a "musical style" prompt that will drive an AI music generator for every future track on this channel.
@@ -1783,7 +1960,7 @@ async def upload_channel_music(channel_id: str, files: List[UploadFile] = File(.
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     music_dir = STORAGE_PATH / "channels" / channel.id / "music"
@@ -1821,7 +1998,7 @@ def delete_channel_music_track(channel_id: str, track_path: str, current_user: U
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     music_pref = dict(channel.music_preference or {})
@@ -1945,7 +2122,7 @@ async def upload_channel_thumbnail_style(channel_id: str, files: List[UploadFile
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if (channel.thumbnail_style or {}).get("analyzing"):
         raise HTTPException(status_code=409, detail="Une analyse est déjà en cours pour cette chaîne.")
@@ -1984,7 +2161,7 @@ def get_thumbnail_style_status(channel_id: str, current_user: User = Depends(get
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     style = channel.thumbnail_style or {}
     return {
@@ -2007,7 +2184,7 @@ def propose_channel_thumbnail_concept(channel_id: str, payload: dict = None, cur
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     from src.utils.billing import user_ai_images_enabled, get_credit_balance
@@ -2087,7 +2264,7 @@ def approve_channel_thumbnail_concept(channel_id: str, payload: dict, current_us
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     style_prompt = (payload or {}).get("style_prompt")
@@ -2117,7 +2294,7 @@ def delete_channel_thumbnail_style(channel_id: str, image_path: Optional[str] = 
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     channel_dir = STORAGE_PATH / "channels" / channel.id
@@ -2225,7 +2402,7 @@ def attach_staged_channel_library(
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     try:
         safe_token = str(uuid.UUID(staging_token))
@@ -2271,7 +2448,7 @@ async def upload_channel_library_images(
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
     library_dir = STORAGE_PATH / "channels" / channel.id / "library"
@@ -2337,7 +2514,7 @@ def list_my_channel_library_images(
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     library_dir = STORAGE_PATH / "channels" / channel_id / "library"
     if not library_dir.is_dir():
@@ -2363,7 +2540,7 @@ def get_my_channel_library_image(channel_id: str, filename: str, current_user: U
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
     candidate = (library_dir / filename).resolve()
@@ -2392,11 +2569,98 @@ async def upload_channel_broll(channel_id: str, files: List[UploadFile] = File(.
         (broll_dir / f"{uuid.uuid4().hex[:8]}_{stem}{ext}").write_bytes(contents)
         saved += 1
     if not saved:
-        raise HTTPException(status_code=400, detail="Aucun clip vidéo valide (MP4, MOV, WebM ou M4V, 250 Mo max).")
+        raise HTTPException(status_code=400, detail="Aucun clip vidéo valide (MP4, MOV, WebM ou M4V, 95 Mo max).")
     style = dict(channel.image_style or {})
     style["broll_path"] = f"channels/{channel.id}/broll"
     style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])
     style["broll_rejected_count"] = rejected
+    channel.image_style = style
+    db.commit()
+    db.refresh(channel)
+    return channel.to_dict()
+
+
+MAX_BROLL_DIRECT_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 Go — the R2 direct-PUT path, for clips too big for the Cloudflare-proxied endpoint above.
+
+
+class BrollDirectUploadStart(BaseModel):
+    filename: str
+    content_type: Optional[str] = "video/mp4"
+
+
+@router.post("/{channel_id}/broll/direct-upload/start")
+def start_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUploadStart, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """For B-roll clips too large for our own API's Cloudflare-proxied request
+    body cap (~100 Mo) — the browser PUTs the file straight to R2 using the
+    URL returned here, never touching api.kappgen.com for the file bytes.
+    Once uploaded, call /direct-upload/confirm to pull it onto local disk so
+    the rest of the pipeline (which only knows local B-roll paths) needs no
+    changes at all."""
+    from src.utils import b2_storage
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    ext = Path(payload.filename or "").suffix.lower()
+    if ext not in ALLOWED_BROLL_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format non supporté (MP4, MOV, WebM ou M4V).")
+    if not b2_storage.is_b2_configured():
+        raise HTTPException(status_code=503, detail="L'envoi direct de gros fichiers n'est pas disponible pour le moment.")
+    object_key = f"staging/broll/{channel.id}/{uuid.uuid4().hex}{ext}"
+    upload_url = b2_storage.presigned_put_url(object_key, content_type=payload.content_type or "video/mp4")
+    if not upload_url:
+        raise HTTPException(status_code=502, detail="Impossible de préparer l'envoi direct. Réessaie.")
+    return {"upload_url": upload_url, "object_key": object_key}
+
+
+class BrollDirectUploadConfirm(BaseModel):
+    object_key: str
+    filename: Optional[str] = None
+
+
+@router.post("/{channel_id}/broll/direct-upload/confirm")
+def confirm_channel_broll_direct_upload(channel_id: str, payload: BrollDirectUploadConfirm, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Called once the browser's direct PUT to R2 has finished. Downloads the
+    object from R2 into the channel's normal local B-roll folder (a
+    server-to-R2 transfer, not routed through Cloudflare's inbound proxy, so
+    the size cap doesn't apply here either) then deletes the R2 staging copy
+    — after this the clip is a completely ordinary local B-roll file, so
+    nothing downstream (orchestrator, list/delete endpoints) needs to know
+    it ever went through R2."""
+    from src.utils import b2_storage
+    from src.config import B2_PUBLIC_URL_BASE
+    channel = db.query(Channel).filter(Channel.id == channel_id, Channel.user_id == current_user.id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    object_key = (payload.object_key or "").strip()
+    if not object_key.startswith(f"staging/broll/{channel.id}/"):
+        raise HTTPException(status_code=400, detail="Référence d'envoi invalide.")
+    ext = Path(object_key).suffix.lower()
+    if ext not in ALLOWED_BROLL_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Format non supporté.")
+    broll_dir = STORAGE_PATH / "channels" / channel.id / "broll"
+    broll_dir.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(payload.filename or "broll").stem)[:60] or "broll"
+    dest = broll_dir / f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
+    public_url = f"{B2_PUBLIC_URL_BASE}/{object_key}"
+    total = 0
+    try:
+        with httpx.stream("GET", public_url, timeout=300.0) as resp:
+            resp.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_bytes(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_BROLL_DIRECT_UPLOAD_BYTES:
+                        raise ValueError("too_large")
+                    f.write(chunk)
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        b2_storage.delete_video(object_key)
+        detail = "Fichier trop volumineux (2 Go max)." if str(exc) == "too_large" else "Échec de la récupération du fichier envoyé. Réessaie."
+        raise HTTPException(status_code=400 if str(exc) == "too_large" else 502, detail=detail)
+    b2_storage.delete_video(object_key)
+    style = dict(channel.image_style or {})
+    style["broll_path"] = f"channels/{channel.id}/broll"
+    style["broll_count"] = len([f for f in broll_dir.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_BROLL_EXTENSIONS])
     channel.image_style = style
     db.commit()
     db.refresh(channel)
@@ -2448,7 +2712,7 @@ def delete_my_channel_library_image(channel_id: str, filename: str, current_user
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     library_dir = (STORAGE_PATH / "channels" / channel_id / "library").resolve()
     candidate = (library_dir / filename).resolve()
@@ -2478,7 +2742,7 @@ def delete_all_my_channel_library_images(channel_id: str, current_user: User = D
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     library_dir = STORAGE_PATH / "channels" / channel_id / "library"
     deleted = 0
@@ -2503,7 +2767,7 @@ def get_youtube_auth_url(channel_id: str, current_user: User = Depends(get_curre
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if not youtube_publisher.is_configured():
         raise HTTPException(status_code=503, detail="La connexion YouTube n'est pas configurée sur le serveur.")
@@ -2583,7 +2847,7 @@ def refresh_youtube_identity(channel_id: str, current_user: User = Depends(get_c
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if not channel.youtube_refresh_token:
         raise HTTPException(status_code=409, detail="Cette chaîne n'est pas connectée à YouTube.")
@@ -2614,7 +2878,7 @@ def disconnect_youtube(channel_id: str, current_user: User = Depends(get_current
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     channel.youtube_access_token = None
     channel.youtube_refresh_token = None
@@ -2634,7 +2898,7 @@ def delete_channel(channel_id: str, current_user: User = Depends(get_current_use
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.user_id != current_user.id:
+    if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     # Video cascades via the ORM relationship (Channel.videos,
     # cascade="all, delete-orphan"), but these three tables have a

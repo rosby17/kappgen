@@ -22,6 +22,16 @@ def unresolved_visual_indices(visual_paths) -> list:
     return [index for index, path in enumerate(visual_paths) if not path]
 
 
+def unresolved_video_slot_indices(video_slot_indices, visual_paths) -> list:
+    """Return only planned video slots that still need stock footage.
+
+    Image slots must never be sent to Pexels: in image-only mode the creator
+    explicitly asked for stills, and in mixed mode those slots have already
+    been assigned to the selected image sources.
+    """
+    return [index for index in sorted(video_slot_indices) if not visual_paths[index]]
+
+
 def plan_visual_slots(scene_count: int, media_mode: str) -> tuple:
     """Decides, per scene, whether it wants an image or a video clip —
     before anything is downloaded/generated. Returns (video_slot_indices,
@@ -247,25 +257,58 @@ def run_video_pipeline(
         storage_root = STORAGE_PATH.resolve()
         if storage_root in candidate_dir.parents and candidate_dir.is_dir():
             broll_paths = sorted([p for p in candidate_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}])
+    # Per-scene starting offset (seconds) into whichever B-roll clip that scene
+    # ends up using — plays a single long "pillar" clip (e.g. a talking-head
+    # avatar recording) through continuously across every scene it's assigned
+    # to instead of restarting from 0:00 at each scene cut, which read as the
+    # avatar visibly snapping back to the start every few seconds. Looped
+    # (via build_video_clip's -stream_loop) once a clip's own runtime is
+    # exhausted, so a short clip still just keeps playing rather than freezing
+    # on its last frame.
+    # broll_shuffle (image_style.broll_shuffle) is the opposite editing intent
+    # from the continuous cursor above: for a creator re-cutting footage
+    # that's already been published elsewhere (their own back-catalog, not a
+    # single continuous "pillar" recording), playing it start-to-finish is
+    # exactly what makes it read as a rehash. Each scene instead grabs a
+    # random slice of the source clip — different order, different in-points
+    # than the original — so the same raw footage produces a differently
+    # paced sequence every render. Needs the clip's real duration (not just
+    # "assume it's long enough") to pick a valid random start.
+    broll_shuffle = bool(image_style_cfg.get("broll_shuffle"))
+    visual_video_start_offsets = [0.0] * len(segments)
     if broll_paths:
-        for i in sorted(video_slot_indices):
-            visual_paths[i] = broll_paths[(i // 3) % len(broll_paths)]
-            visual_types[i] = "video"
-        logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
+        if broll_shuffle:
+            import random
+            broll_durations = {p: max(0.1, get_audio_duration(p)) for p in broll_paths}
+            for i in sorted(video_slot_indices):
+                clip_path = broll_paths[(i // 3) % len(broll_paths)]
+                visual_paths[i] = clip_path
+                visual_types[i] = "video"
+                usable_span = max(0.0, broll_durations[clip_path] - segments[i]["duration"])
+                visual_video_start_offsets[i] = random.uniform(0, usable_span) if usable_span > 0 else 0.0
+            logger.info(f"B-roll shuffle enabled: {sum(t == 'video' for t in visual_types)} scene(s) re-cut from random points in {len(broll_paths)} source clip(s).")
+        else:
+            broll_cursor = {p: 0.0 for p in broll_paths}
+            for i in sorted(video_slot_indices):
+                clip_path = broll_paths[(i // 3) % len(broll_paths)]
+                visual_paths[i] = clip_path
+                visual_types[i] = "video"
+                visual_video_start_offsets[i] = broll_cursor[clip_path]
+                broll_cursor[clip_path] += segments[i]["duration"]
+            logger.info(f"B-roll enabled: using {sum(t == 'video' for t in visual_types)} creator clip scene(s) from {len(broll_paths)} clip(s).")
 
     # Stock footage (Pexels) fills the scenes the creator's own clips don't
     # cover — real motion instead of a Ken Burns pan over a still, which is
     # the clearest visual difference between an automated montage and a
-    # hand-cut one. Rides along with the "community" source rather than
-    # being its own toggle: both are the same promise to the creator ("I
-    # don't have to provide these visuals myself"), and stock keeps that
-    # promise even for a niche whose shared pool is still empty. Pexels
+    # hand-cut one. It is driven by the montage mode, not by the community
+    # image-library checkbox: mixed/video mode is an explicit request for
+    # motion, even when the creator does not use shared still images. Pexels
     # itself is free to KappGen, but per product decision no asset renders
     # invisibly/for free to the creator — a token STOCK_MEDIA_CREDITS charge
     # applies per clip/photo actually used (debited only once it's confirmed
     # usable, so a failed download or an unaffordable balance never bills
     # anything and simply leaves that scene on its fallback image).
-    if "community" in enabled_sources:
+    if video_slot_indices:
         from src.config import PEXELS_API_KEY
         if not PEXELS_API_KEY:
             logger.info("Stock footage enabled for this channel but PEXELS_API_KEY is unset; scenes stay on images.")
@@ -288,7 +331,7 @@ def run_video_pipeline(
             # The path is the source of truth. A type label alone must never
             # make an empty scene look resolved (especially in video-only
             # mode, where every scene starts out wanting a video).
-            open_indices = unresolved_visual_indices(visual_paths)
+            open_indices = unresolved_video_slot_indices(video_slot_indices, visual_paths)
             if open_indices:
                 queries = build_stock_search_queries(
                     segment_texts=[prompts[i] if i < len(prompts) else "" for i in open_indices],
@@ -331,13 +374,48 @@ def run_video_pipeline(
                         if credits:
                             (source_dir / "stock_credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # Editorial continuity fallback: when a later video slot has no matching
+    # Pexels result at all, carry the last real video forward for a short span
+    # (maximum four video scenes). This is preferable to an abrupt generic
+    # frame and naturally stops as soon as a new clip is found.
+    last_video = None
+    held_scenes = 0
+    for scene_index in sorted(video_slot_indices):
+        if visual_paths[scene_index] and visual_types[scene_index] == "video":
+            last_video = visual_paths[scene_index]
+            held_scenes = 0
+        elif not visual_paths[scene_index] and last_video is not None and held_scenes < 4:
+            visual_paths[scene_index] = last_video
+            visual_types[scene_index] = "video"
+            held_scenes += 1
+
     # A stock query can legitimately return no video/photo, the API can be
     # unavailable, or a channel can use only its own B-roll. Never pass an
     # empty path to FFmpeg: fill only the unresolved slots with the normal
     # image pipeline (which itself ends in safe synthetic fallback artwork).
     unresolved_indices = unresolved_visual_indices(visual_paths)
     if unresolved_indices:
+        # In mixed mode, video slots can remain empty when Pexels has no
+        # matching clip. Reuse a real image already resolved for another
+        # scene before asking the image pipeline for a possible synthetic
+        # fallback; a repeated real visual is preferable to a generic blank
+        # background and keeps the finished montage visually complete.
+        reusable_images = list(dict.fromkeys(path for path in visual_paths if path and Path(path).suffix.lower() not in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}))
+        if reusable_images:
+            import random
+            pool = list(reusable_images)
+            previous = None
+            for position, scene_index in enumerate(unresolved_indices):
+                if position % len(pool) == 0:
+                    random.shuffle(pool)
+                    if previous is not None and len(pool) > 1 and pool[0] == previous:
+                        pool[0], pool[1] = pool[1], pool[0]
+                visual_paths[scene_index] = pool[position % len(pool)]
+                visual_types[scene_index] = "image"
+                previous = visual_paths[scene_index]
+            unresolved_indices = unresolved_visual_indices(visual_paths)
         logger.warning(f"{len(unresolved_indices)} scene(s) still have no video; using image fallback assets.")
+    if unresolved_indices:
         fallback_images = fetch_or_generate_images(
             [prompts[i] if i < len(prompts) else (script_text or "")[:200] for i in unresolved_indices],
             images_dir,
@@ -351,6 +429,20 @@ def run_video_pipeline(
             if position < len(fallback_images):
                 visual_paths[scene_index] = fallback_images[position]
                 visual_types[scene_index] = "image"
+    # Absolute last resort for a video slot: if no matching video, Pexels
+    # photo, local/community image, or free AI image was available, reuse a
+    # previously cached real Pexels clip so the sequence remains dynamic.
+    unresolved_video_indices = [i for i in video_slot_indices if not visual_paths[i]]
+    if unresolved_video_indices:
+        from src.pipeline.stock_video import CACHE_DIR
+        cached_clips = [p for p in CACHE_DIR.glob("*.mp4") if p.is_file()]
+        for position, scene_index in enumerate(sorted(unresolved_video_indices)):
+            if not cached_clips:
+                break
+            clip_path = cached_clips[position % len(cached_clips)]
+            if _bill_stock_asset():
+                visual_paths[scene_index] = clip_path
+                visual_types[scene_index] = "video"
     if any(not path for path in visual_paths):
         raise RuntimeError("Impossible de trouver ou de créer un visuel pour toutes les scènes.")
 
@@ -415,7 +507,7 @@ def run_video_pipeline(
         futures = [
             pool.submit(
                 build_video_clip if visual_types[i] == "video" else build_image_clip,
-                **({"video_path": visual_paths[i]} if visual_types[i] == "video" else {"image_path": visual_paths[i]}),
+                **({"video_path": visual_paths[i], "start_offset": visual_video_start_offsets[i]} if visual_types[i] == "video" else {"image_path": visual_paths[i]}),
                 output_clip_path=clip_paths[i],
                 duration=seg["duration"],
                 zoom_min_pct=zoom_min,

@@ -9,20 +9,11 @@ from typing import List, Optional
 from src.db.session import SessionLocal
 from src.db.models import AppSetting
 
-# Admin-defined priority order for thumbnail image providers — "huggingface"
-# (free), "fal" (paid, best fidelity to reference images), "izivoice" (paid).
-# A provider left out of the order is simply never tried — unlike the AI-text
-# chain, there's no "everything still reachable" fallback here, because
-# including fal/izivoice at all is itself the admin's explicit opt-in to
-# spend money; leaving them out keeps the old "free_only" guarantee (no paid
-# provider ever touched, same as the per-scene body images). Default is
-# Hugging Face alone, preserving that free-only guarantee until an admin
-# explicitly adds a paid provider to the order from the "Ressources" tab.
+# Thumbnails intentionally use one renderer: IziVoice's GPT Image 2. Scene
+# images keep their own independent source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
-THUMBNAIL_PROVIDERS_ALL = ["huggingface", "fal", "izivoice"]
-# Izivoice's direct GPT Image 2 endpoint is the default thumbnail renderer.
-# fal.ai remains available as an explicit admin-selected fallback.
-THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice", "fal"]
+THUMBNAIL_PROVIDERS_ALL = ["izivoice"]
+THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 
 def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:

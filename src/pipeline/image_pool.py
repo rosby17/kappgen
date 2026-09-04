@@ -175,17 +175,18 @@ def get_image_pool(
         lib_images = _filter_landscape([f for f in library_dir.iterdir() if f.suffix.lower() in image_extensions])
         existing_images.extend(lib_images)
 
-    # Generate default fallback images if empty
+    # Never silently manufacture the generic KappGen artwork for a production
+    # montage. Prefer a previously downloaded real Pexels photo before
+    # failing clearly; the caller can then use another real video fallback.
     if not existing_images:
-        logger.info(f"No existing images found in {image_dir}, generating {max(5, required_count)} artistic fallback assets.")
-        fallback_dir = ASSETS_PATH / "images" / "fallbacks"
-        fallback_dir.mkdir(parents=True, exist_ok=True)
-        gen_count = max(5, required_count)
-        for i in range(gen_count):
-            img_path = fallback_dir / f"artwork_{i+1:02d}.png"
-            if not img_path.exists():
-                generate_fallback_image(img_path, i)
-            existing_images.append(img_path)
+        cached_photo_dir = ASSETS_PATH / "stock_photo_cache"
+        if cached_photo_dir.is_dir():
+            existing_images.extend(_filter_landscape(list(cached_photo_dir.glob("*.jpg"))))
+        if not existing_images:
+            raise ValueError(
+                "Aucun visuel réel disponible : ajoutez des images, activez une source IA gratuite "
+                "ou vérifiez l'accès Pexels avant de lancer le rendu."
+            )
             
     # Pool & cycle images to fulfill required count. Each cycle is freshly
     # shuffled (never a fixed seed), so the sequence — and therefore the whole

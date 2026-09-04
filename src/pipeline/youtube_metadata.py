@@ -116,7 +116,7 @@ Règles impératives :
 Exemple : pour une vidéo sur une feuille d'aluminium dans le congélateur qui évite la buée, préfère « FINI LA BUÉE » à « UNE BANDE DE PAPIER ALUMINIUM ».
 Réponds uniquement par l'accroche, sans guillemets ni explication."""
     try:
-        candidate = generate_text(prompt, max_tokens=60, operation="thumbnail_headline").strip()
+        candidate = generate_text(prompt, max_tokens=60, operation="thumbnail_headline", preferred_provider="gemini").strip()
         candidate = re.sub(r"^['\"“”«»]+|['\"“”«»]+$", "", candidate).strip()
         candidate = re.sub(r"\s+", " ", candidate)
         if _headline_fits_image(candidate):
@@ -196,8 +196,15 @@ def _rich_fallback_description(video, channel, title: str) -> str:
     return "\n\n".join(sections)[:5000]
 
 
-def generate_metadata(video, channel) -> dict:
+def generate_metadata(video, channel, reuse_existing: bool = False) -> dict:
     fallback = _fallback_metadata(video, channel)
+    if reuse_existing and all((getattr(video, field, None) or "").strip() for field in ("title", "youtube_description", "thumbnail_text")):
+        return {
+            "title": video.title.strip()[:100],
+            "description": video.youtube_description.strip()[:5000],
+            "tags": [],
+            "thumbnail_text": video.thumbnail_text.strip()[:255],
+        }
     if not any_text_provider_configured():
         return fallback
     # A blank/near-empty script_text (e.g. a manual "text" submission with
@@ -234,7 +241,9 @@ Utilise des paragraphes aérés. Évite le remplissage, les promesses vagues et 
 
 Réponds uniquement en JSON valide avec: title (max 100 caractères), description (entre 700 et 3500 caractères, SANS hashtags à la fin — ils sont ajoutés automatiquement à partir du champ tags, ne les duplique pas dans le texte),
 tags (liste de 5 à 12 expressions pertinentes), thumbnail_text (2 à 5 mots, 38 caractères maximum, phrase complète et naturelle, fidèle au sujet). Le texte est imprimé tel quel dans une image : ne le coupe jamais, ne le termine jamais par "...", et ne renvoie ni le titre complet ni un sous-titre."""
-        text = generate_text(prompt, max_tokens=1800, operation='youtube_metadata')
+        # Metadata is editorially useful but does not need Sonnet. Prefer
+        # Gemini's free tier and retain the normal provider fallback chain.
+        text = generate_text(prompt, max_tokens=1800, operation='youtube_metadata', preferred_provider='gemini')
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         data = json.loads(text)
         title = str(data.get("title") or fallback["title"]).strip()[:100]
@@ -521,11 +530,20 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # above) — a text description alone routinely drifts from the reference's
     # actual look (character, palette, composition), which is what creators
     # were complaining about ("aucune ressemblance").
+    configured_reference_paths = [
+        path for path in (thumbnail_style.get("reference_image_paths") or [])
+        if isinstance(path, str) and path.strip()
+    ]
+    if not configured_reference_paths and thumbnail_style.get("reference_image_path"):
+        configured_reference_paths = [thumbnail_style["reference_image_path"]]
     reference_paths = [
         STORAGE_PATH / rel_path
-        for rel_path in (thumbnail_style.get("reference_image_paths") or [])
+        for rel_path in configured_reference_paths
     ]
-    reference_paths = [p for p in reference_paths if p.exists()] or None
+    reference_paths = [p for p in reference_paths if p.exists()]
+    if configured_reference_paths and not reference_paths:
+        raise RuntimeError("Les images de référence de miniature configurées pour cette chaîne sont introuvables sur le serveur.")
+    reference_paths = reference_paths or None
 
     # Admin-controlled provider priority (src/utils/app_settings.py) — an
     # order containing only "huggingface" keeps thumbnails free (no credit

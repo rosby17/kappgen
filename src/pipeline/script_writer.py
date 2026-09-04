@@ -181,7 +181,11 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
         # web-search ones, is still a negligible cost for a one-line title.
         raw_text = generate_text(
             instruction, max_tokens=1000, model=SCRIPT_WRITER_MODEL,
-            operation='script_topic', cost_sink=cost_sink, enable_web_search=bool(use_web_trends or youtube_sources_block),
+            operation='script_topic', cost_sink=cost_sink,
+            enable_web_search=bool(use_web_trends or youtube_sources_block),
+            # Topic selection is a short auxiliary task; keep Sonnet for the
+            # long-form narration itself and use Gemini's free tier first.
+            preferred_provider='gemini',
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
@@ -241,7 +245,18 @@ Originality guardrail: older videos from this channel commonly used the followin
 
     max_tokens = min(8000, int(word_count * 1.8) + 300)
     try:
-        text = generate_text(instruction, max_tokens=max_tokens, model=SCRIPT_WRITER_MODEL, operation='script', cost_sink=cost_sink).strip()
+        # Short utility sections (hook/conclusion) do not need Sonnet-level
+        # reasoning. Gemini's free tier is preferred for those; long sections
+        # remain on Claude for quality and continuity, with normal fallback.
+        preferred_provider = "gemini" if word_count <= 400 else None
+        text = generate_text(
+            instruction,
+            max_tokens=max_tokens,
+            model=SCRIPT_WRITER_MODEL,
+            operation='script',
+            cost_sink=cost_sink,
+            preferred_provider=preferred_provider,
+        ).strip()
         return text or None
     except Exception as e:
         logger.error(f"Daily script part generation failed for part '{part.get('name')}': {e}")
@@ -261,6 +276,7 @@ def generate_daily_script(
     recent_scripts: Optional[List[str]] = None,
     on_title: Optional[callable] = None,
     on_partial_script: Optional[callable] = None,
+    preset_title: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -297,7 +313,10 @@ def generate_daily_script(
         for text in recent_scripts[:5]
     )
     try:
-        title = _pick_topic(
+        # A failed render/script retry may already have selected and persisted
+        # a title. Reuse it instead of paying Claude to select the same topic
+        # again; a missing/placeholder title still follows the normal picker.
+        title = (preset_title or "").strip() or _pick_topic(
             niche, recent_titles, style_prompt, language, cost_sink=cost_sink,
             topic_examples=topic_examples, use_web_trends=use_web_trends, youtube_topic_sources=youtube_topic_sources,
         )

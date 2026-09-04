@@ -28,23 +28,23 @@ from src.config import STORAGE_PATH, AUTOMATION_LAUNCH_SPACING_SECONDS
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 
-# Tightened to 48h after the VPS disk filled up (200GB, rendered videos alone
-# were 84GB) and started failing deploys mid-build — every video, regardless
-# of plan, gets purged this fast by default now. The escape hatch is
-# Video.extended_retention (an explicit per-video opt-in, meant to become a
-# paid feature later — see videos.py's PATCH endpoint): those videos are
-# excluded from this purge entirely and get uploaded to R2 instead of local
-# disk (see _finalize_output_storage below), so "keep it longer" doesn't
-# just mean "sit on the same small VPS disk longer."
+# RETIRED Sept 2026: the old policy (every video purged from local disk
+# after 48h, unless Video.extended_retention was set) existed because the
+# VPS disk kept filling up. That's no longer the fix — every finished
+# render now moves to Backblaze B2 automatically regardless of
+# extended_retention (see _finalize_output_storage), which is what actually
+# keeps the VPS disk light, so there's no more reason to delete a creator's
+# video on a clock. purge_old_videos_and_uploads() no longer uses these;
+# kept only so any lingering reference/migration doesn't explode.
 VIDEO_RETENTION_HOURS = 48
-# How long before the 48h purge a creator gets emailed a heads-up — enough
-# time to notice and download, not so early the warning arrives while the
-# video is barely finished rendering.
 VIDEO_EXPIRY_WARNING_HOURS_BEFORE = 6
 # Editable scene assets (images/clips kept for the post-render editor) get
 # their own, separate purge — either at this deadline, or immediately if the
-# user explicitly closes the editor.
-EDIT_ASSETS_RETENTION_DAYS = 7
+# user explicitly closes the editor. Tightened from 7 to 3 days (Sept 2026):
+# now that purge_edit_assets archives to B2 before deleting (never a real
+# loss), there's no reason to let 3 extra days of editable-window footprint
+# pile up on local disk.
+EDIT_ASSETS_RETENTION_DAYS = 3
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
 
@@ -506,7 +506,7 @@ def process_single_queued_video() -> bool:
         # the full `title` there instead produced garbled, overlong thumbnail
         # text (a whole opening sentence crammed onto the image).
         try:
-            meta = youtube_metadata.generate_metadata(video, channel)
+            meta = youtube_metadata.generate_metadata(video, channel, reuse_existing=True)
             if not video.title:
                 video.title = meta["title"]
             if not video.youtube_description:
@@ -518,7 +518,10 @@ def process_single_queued_video() -> bool:
             logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
         _, thumbnail_ai_used = await_parallel_thumbnail()
-        if not thumbnail_ai_used and thumbnail_enabled:
+        # Every finished video must have a visible card thumbnail. Channels
+        # without a reference style skip the parallel AI job, but still get a
+        # representative frame from the finished MP4 here.
+        if not thumbnail_ai_used:
             # The parallel attempt above started before the video existed and
             # failed its AI call — strict=True means it raised rather than
             # writing a generic, unstyled placeholder (see
@@ -532,7 +535,7 @@ def process_single_queued_video() -> bool:
                 youtube_metadata.generate_thumbnail(
                     output_mp4, thumbnail_destination,
                     video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-                    channel, video.id, strict=True,
+                    channel if thumbnail_enabled else None, video.id, strict=False,
                 )
                 video.thumbnail_error = None
                 logger.info(f"Post-render thumbnail retry for video {video.id} succeeded.")
@@ -808,7 +811,7 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     # Reuse the title/description already proposed (and possibly edited by
     # the creator) right after the render finished, instead of silently
     # regenerating and overwriting them at the last second.
-    meta = youtube_metadata.generate_metadata(video, channel)
+    meta = youtube_metadata.generate_metadata(video, channel, reuse_existing=True)
     if video.title:
         meta["title"] = video.title
     if video.youtube_description:
@@ -828,7 +831,17 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     # Usually already sitting on disk — generated right after the render
     # finished, alongside the title/description. Only regenerate here if
     # that earlier pass failed for some reason.
-    existing_thumbnail = output_mp4.with_name("thumbnail.jpg")
+    #
+    # Deliberately NOT output_mp4.with_name("thumbnail.jpg"): for a video
+    # whose render was moved to B2, output_mp4 here is a throwaway temp
+    # download (see _publish_video_background) materialized just for this
+    # upload — a sibling "thumbnail.jpg" in that temp dir never exists, which
+    # silently fell through to generating a brand-new AI thumbnail on every
+    # publish, ignoring whatever the creator actually saw (and possibly
+    # regenerated) on the video card. thumbnail.jpg always lives locally next
+    # to the video's real storage folder regardless of where output.mp4 itself
+    # ended up — same convention _ensure_local_thumbnail uses.
+    existing_thumbnail = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
     thumbnail_path = existing_thumbnail if existing_thumbnail.exists() else None
     if not thumbnail_path:
         try:
@@ -999,28 +1012,32 @@ def requeue_orphaned_voice_clone_jobs():
 
 def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     """Sets video.output_path (+ storage_backend/output_size_bytes) for a
-    just-finished render. Only videos with extended_retention set even
-    attempt R2 — everything else gets auto-purged from local disk within
-    VIDEO_RETENTION_HOURS anyway, so there's no point spending R2's free-tier
-    quota on something that won't outlive it. Uploads when there's tracked
-    room under the free-tier cap (see r2_storage.should_upload_to_r2);
-    otherwise — R2 not configured, over the cap, or the upload itself
-    failed — falls back to the local STORAGE_PATH-relative path exactly like
-    before R2 existed. Local file is only deleted after a confirmed-successful
-    R2 upload."""
-    from src.utils import r2_storage
+    just-finished render. Since the Sept 2026 move to Backblaze B2 (~1/5 the
+    cost of R2, no meaningful free-tier cap to ration), EVERY finished render
+    uploads to B2 by default — not just extended_retention ones — freeing the
+    VPS's own small shared disk immediately instead of only after a 48h purge
+    window (that destructive auto-delete policy is gone; see
+    purge_old_videos_and_uploads). Falls back to the local
+    STORAGE_PATH-relative path only when B2 isn't configured or the upload
+    itself failed — never lose a render because B2 had a bad moment. Local
+    file is only deleted after a confirmed-successful B2 upload."""
+    from src.utils import b2_storage
 
     try:
         size_bytes = output_mp4.stat().st_size
     except OSError:
         size_bytes = None
 
-    if video.extended_retention and size_bytes and r2_storage.should_upload_to_r2(db, size_bytes):
-        object_key = f"channels/{video.channel_id}/videos/{video.id}/output.mp4"
-        url = r2_storage.upload_video(output_mp4, object_key)
+    if size_bytes and b2_storage.should_upload_to_b2(db, size_bytes):
+        channel_name = video.channel.name if video.channel else None
+        channel_slug = b2_storage.slugify(channel_name)
+        channel_short = b2_storage.short_id(video.channel_id)
+        video_short = b2_storage.short_id(video.id)
+        object_key = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/output.mp4"
+        url = b2_storage.upload_video(output_mp4, object_key)
         if url:
             video.output_path = url
-            video.storage_backend = "r2"
+            video.storage_backend = "b2"
             video.output_size_bytes = size_bytes
             try:
                 output_mp4.unlink()
@@ -1042,11 +1059,19 @@ def purge_old_render_output(video: Video) -> None:
     history/stats stay intact. The local video directory is moved wholesale
     into storage/trash/{channel_id}/{video_id}/ — recoverable server-side,
     not destroyed — one shared trash folder for every user by default, no
-    opt-in needed. Only the R2-hosted output.mp4 (when storage_backend is
-    "r2") is still actually deleted from R2 itself, since that's a paid
-    object store with its own separate lifecycle, not local disk this trash
-    folder is meant to declutter."""
-    if video.storage_backend == "r2" and video.output_path:
+    opt-in needed. Only the remote-hosted output.mp4 (storage_backend "b2",
+    or legacy "r2" for videos uploaded before the Sept 2026 migration) is
+    still actually deleted from the object store itself, since that's a paid
+    resource with its own separate lifecycle, not local disk this trash
+    folder is meant to declutter. Not on the automatic clock any more (the
+    old 48h auto-purge is gone — see purge_old_videos_and_uploads) — this
+    now only runs for an explicit user-triggered deletion."""
+    if video.storage_backend == "b2" and video.output_path:
+        from src.utils import b2_storage
+        object_key = b2_storage.object_key_from_url(video.output_path)
+        if object_key:
+            b2_storage.delete_video(object_key)
+    elif video.storage_backend == "r2" and video.output_path:
         from src.utils import r2_storage
         object_key = r2_storage.object_key_from_url(video.output_path)
         if object_key:
@@ -1063,37 +1088,107 @@ def purge_old_render_output(video: Video) -> None:
         shutil.move(str(video_dir), str(destination))
 
 
+def _edit_assets_b2_prefix(video: Video) -> str:
+    from src.utils import b2_storage
+    channel_name = video.channel.name if video.channel else None
+    channel_slug = b2_storage.slugify(channel_name)
+    channel_short = b2_storage.short_id(video.channel_id)
+    video_short = b2_storage.short_id(video.id)
+    return f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/edit_assets"
+
+
 def purge_edit_assets(video: Video) -> None:
-    """Deletes the heavy scene images/clips kept for the post-render editor,
-    without touching output.mp4 or the small source files (voiceover, transcript,
-    subtitles) — the video stays downloadable/watchable, just no longer editable."""
+    """Archives then deletes the heavy scene images/clips kept for the
+    post-render editor, without touching output.mp4 or the small source
+    files (voiceover, transcript, subtitles) — the video stays
+    downloadable/watchable, just no longer editable in-place until
+    restore_edit_assets brings it back (see below). Archived to B2 first
+    (never straight-deleted): scenes.json is archived alongside the
+    image/clip/audio directories (not just deleted) specifically so a
+    restore has the manifest to go with the assets it references, not just
+    orphaned files with nothing tying them back into scenes."""
+    from src.utils import b2_storage
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    prefix = _edit_assets_b2_prefix(video)
     for sub in ("source/images", "source/clips", "source/audio_segments"):
         p = video_dir / sub
-        if p.exists():
+        if not p.exists():
+            continue
+        archived = b2_storage.archive_directory(p, f"{prefix}/{sub.split('/')[-1]}")
+        if archived or not b2_storage.is_b2_configured():
+            # Delete locally once safely archived — or, if B2 isn't even
+            # configured, fall back to the old behavior (straight delete)
+            # rather than accumulating disk forever with archival unavailable.
             shutil.rmtree(p, ignore_errors=True)
+        else:
+            logger.warning(f"Skipped local delete of {p} for video {video.id} — B2 archive failed, keeping local copy.")
     scenes_manifest = video_dir / "source" / "scenes.json"
-    scenes_manifest.unlink(missing_ok=True)
+    if scenes_manifest.exists():
+        manifest_archived = b2_storage.upload_file(scenes_manifest, f"{prefix}/scenes.json")
+        if manifest_archived or not b2_storage.is_b2_configured():
+            scenes_manifest.unlink(missing_ok=True)
+        else:
+            logger.warning(f"Skipped deleting scenes.json for video {video.id} — B2 archive failed, keeping local copy.")
+
+
+def restore_edit_assets(video: Video) -> bool:
+    """Counterpart to purge_edit_assets: brings the archived scene
+    images/clips/audio segments and scenes.json manifest back to local disk
+    so a creator can reopen the editor on a video whose assets were already
+    purged. Returns False if nothing was archived for this video (B2 wasn't
+    configured at purge time, or the video predates edit-asset archiving
+    entirely) — that case is genuinely unrecoverable, not a bug to retry."""
+    from src.utils import b2_storage
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    prefix = _edit_assets_b2_prefix(video)
+    source_dir = video_dir / "source"
+    manifest_ok = b2_storage.download_file(f"{prefix}/scenes.json", source_dir / "scenes.json")
+    if not manifest_ok:
+        return False
+    any_assets = False
+    for sub in ("images", "clips", "audio_segments"):
+        if b2_storage.restore_directory(f"{prefix}/{sub}", source_dir / sub):
+            any_assets = True
+    return any_assets
+
+
+EDIT_ASSETS_RESTORE_GRACE_DAYS = 3
 
 
 def purge_stale_edit_assets():
     """Background sweep for the EDIT_ASSETS_RETENTION_DAYS window — most users
-    trigger this earlier via the explicit 'close editor' action instead."""
+    trigger this earlier via the explicit 'close editor' action instead. Also
+    catches videos whose assets were brought back via restore_edit_assets but
+    then left untouched again for EDIT_ASSETS_RESTORE_GRACE_DAYS — restoring
+    on demand must not turn into permanent local storage, or we're back to
+    the unbounded-disk-growth problem this whole purge system exists to
+    avoid."""
     db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RETENTION_DAYS)
-        stale = (
+        purge_cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RETENTION_DAYS)
+        restore_cutoff = datetime.utcnow() - timedelta(days=EDIT_ASSETS_RESTORE_GRACE_DAYS)
+        never_purged = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(Video.edit_assets_purged_at.is_(None))
+            .filter(Video.edit_assets_restored_at.is_(None))
             .filter(Video.finished_at.isnot(None))
-            .filter(Video.finished_at < cutoff)
+            .filter(Video.finished_at < purge_cutoff)
             .all()
         )
+        restored_and_stale = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.edit_assets_restored_at.isnot(None))
+            .filter(Video.edit_assets_restored_at < restore_cutoff)
+            .all()
+        )
+        stale = never_purged + restored_and_stale
         for video in stale:
             try:
                 purge_edit_assets(video)
                 video.edit_assets_purged_at = datetime.utcnow()
+                video.edit_assets_restored_at = None
                 logger.info(f"Purged edit assets (images/clips) for video {video.id}, finished {video.finished_at}.")
             except Exception as purge_err:
                 logger.warning(f"Failed to purge edit assets for video {video.id}: {purge_err}")
@@ -1210,52 +1305,21 @@ def warn_expiring_videos():
 
 def purge_old_videos_and_uploads():
     """
-    Frees disk space on the shared VPS:
-    - Deletes rendered video files (output.mp4 + source assets) for videos
-      finished more than VIDEO_RETENTION_HOURS ago — unless the video has
-      extended_retention set, in which case it's skipped entirely (those
-      live on R2, not this disk, and aren't meant to be auto-deleted).
-      Also skipped if the creator hasn't downloaded it or published it to
-      YouTube yet — a video can sit "done" for a couple of days while the
-      creator is still deciding whether to publish it, and auto-deleting
-      their only copy out from under them just because the clock ran out
-      is exactly the kind of surprise this retention job shouldn't cause.
-      Once either downloaded_at or youtube_published_at is set, the file
-      has a copy living elsewhere and is safe to purge on the usual schedule.
-      The DB record is kept (purged_at is set, output_path cleared) so
-      history/counters remain.
+    Frees disk space on the shared VPS WITHOUT touching a creator's finished
+    videos any more. Since Sept 2026 (the move to Backblaze B2, cheap enough
+    to be the default store rather than a rationed opt-in — see
+    _finalize_output_storage) every finished render already leaves local
+    disk right away; the old policy of destructively deleting a video's
+    output.mp4 after VIDEO_RETENTION_HOURS was dropped, so creators keep
+    their videos indefinitely with no clock running on them any more.
+    What's left here:
     - Deletes uploaded source audio files older than UPLOAD_RETENTION_HOURS —
       they're only needed once, at render time, and are never reused after.
+      This is temp working storage, not a user's finished output — the one
+      category of thing that can still legitimately saturate the VPS disk
+      and is safe to clear automatically.
     """
-    db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(hours=VIDEO_RETENTION_HOURS)
-        stale_videos = (
-            db.query(Video)
-            .filter(Video.status == VideoStatus.DONE.value)
-            .filter(Video.purged_at.is_(None))
-            .filter(or_(Video.extended_retention.is_(False), Video.retention_until <= datetime.utcnow()))
-            .filter(Video.finished_at.isnot(None))
-            .filter(Video.finished_at < cutoff)
-            .filter(or_(Video.downloaded_at.isnot(None), Video.youtube_published_at.isnot(None)))
-            .all()
-        )
-        for video in stale_videos:
-            try:
-                purge_old_render_output(video)
-                video.output_path = None
-                video.source_assets_path = None
-                video.purged_at = datetime.utcnow()
-                logger.info(f"Purged rendered files for video {video.id} (finished {video.finished_at}, older than {VIDEO_RETENTION_HOURS}h).")
-            except Exception as purge_err:
-                logger.warning(f"Failed to purge video {video.id}: {purge_err}")
-        if stale_videos:
-            db.commit()
-
-        # Uploaded source audio is only needed once, at render time (it gets
-        # copied into the video's own source/ dir when picked up by the
-        # worker); anything older than the retention window is safe to drop
-        # even if a video record still points at it.
         uploads_dir = STORAGE_PATH / "uploads"
         if uploads_dir.exists():
             upload_cutoff = time.time() - (UPLOAD_RETENTION_HOURS * 3600)
@@ -1264,8 +1328,6 @@ def purge_old_videos_and_uploads():
                     f.unlink(missing_ok=True)
     except Exception as e:
         logger.warning(f"Storage purge pass failed: {e}")
-    finally:
-        db.close()
 
 
 AUTOMATION_CHECK_INTERVAL_SECONDS = 600  # every 10 min is plenty for a once-daily trigger
@@ -1694,6 +1756,7 @@ def retry_auto_video_script_background(video_id: str):
             recent_scripts=recent_scripts,
             on_title=_on_title_picked,
             on_partial_script=_on_partial_script,
+            preset_title=(video.title or "").strip() if not (video.title or "").endswith(" — nouvelle vidéo") else None,
         )
         if not result:
             video.status = VideoStatus.FAILED.value
@@ -2130,7 +2193,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     while not _shutdown_requested:
         now = time.time()
         if now - last_purge > PURGE_INTERVAL_SECONDS:
-            warn_expiring_videos()
+            # warn_expiring_videos() dropped along with the 48h auto-delete
+            # policy it existed to warn about — videos aren't purged on a
+            # clock any more (see purge_old_videos_and_uploads).
             purge_old_videos_and_uploads()
             purge_stale_edit_assets()
             last_purge = now

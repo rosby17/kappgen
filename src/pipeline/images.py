@@ -279,19 +279,11 @@ def _submit_izivoice_image_task(prompt: str, client: httpx.Client, reference_ima
 def generate_ai_image(prompt: str, output_path: Path, client: httpx.Client, poll_timeout_seconds: float = TASK_POLL_TIMEOUT_SECONDS, reference_image_paths: Optional[List[Path]] = None, api_key: Optional[str] = None) -> Path:
     """Generates a single 16:9 image via Izivoice's private image API (task-based) and saves it to output_path.
 
-    When reference_image_paths is given, attempts style/character-conditioned
-    generation first (see _submit_izivoice_image_task); if Izivoice rejects
-    that request shape (4xx), retries once as a plain text-only prompt rather
-    than failing the whole image — the caller's own broader failure fallback
-    (e.g. a video frame grab for thumbnails) is reserved for when both fail."""
-    try:
-        data = _submit_izivoice_image_task(prompt, client, reference_image_paths, api_key=api_key)
-    except httpx.HTTPStatusError as exc:
-        if reference_image_paths and exc.response is not None and exc.response.status_code < 500:
-            logger.warning(f"Izivoice rejected reference-image-conditioned request ({exc.response.status_code}), retrying with text-only prompt: {exc}")
-            data = _submit_izivoice_image_task(prompt, client, reference_image_paths=None, api_key=api_key)
-        else:
-            raise
+    Reference images are mandatory when supplied. Do not silently retry a
+    rejected reference request as text-only: that produces a generic image
+    while falsely presenting it as the channel's established thumbnail style.
+    """
+    data = _submit_izivoice_image_task(prompt, client, reference_image_paths, api_key=api_key)
     if not data.get("success") or not data.get("task_id"):
         raise ValueError(f"Unexpected Izivoice generate-image response: {data}")
 
@@ -504,21 +496,12 @@ def generate_thumbnail_image(
     reference_image_paths: Optional[List[Path]] = None,
     provider_order: Optional[List[str]] = None,
 ) -> Path:
-    """Thumbnail-specific image generation, trying providers in
-    `provider_order` (admin-controlled — see src/utils/app_settings.py's
-    thumbnail_provider_order, set from the "Ressources" tab) and falling
-    through on any error — a missing/invalid key, an exhausted free quota, a
-    402/429, or anything else. Defaults to Hugging Face alone (free, no
-    provider left out generates any cost) if no order is given.
+    """Generate a thumbnail with IziVoice GPT Image 2 only.
 
-    Hugging Face's FLUX.1-schnell endpoint is text-to-image only, so it's
-    skipped whenever reference images are given to condition on — those
-    need fal.ai's gpt-image-2 (best fidelity to a reference) or Izivoice.
-    If every provider in the order is skipped or fails, raises — the caller
-    (youtube_metadata.py) then falls through to its own video-frame-grab
-    fallback, same as the per-scene body images already do, so a thumbnail
-    never silently costs money beyond what the admin explicitly opted into."""
-    order = [p for p in (provider_order or ["huggingface"]) if not (p == "huggingface" and reference_image_paths)]
+    The optional order remains for call-site compatibility, but it is
+    deliberately ignored: a thumbnail must never select another provider.
+    """
+    order = ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),

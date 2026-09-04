@@ -3,11 +3,13 @@ import re
 import json
 import shutil
 import threading
+import httpx
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from src.db.session import get_db
@@ -22,13 +24,41 @@ from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluat
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail, generate_contextual_thumbnail_headline
 from src.utils.logger import logger
 from src.utils.auth import get_current_user
-from src.utils.billing import user_can_render, estimate_video_cost_credits
+from src.utils.billing import user_can_render, estimate_video_cost_credits, FOUR_K_EXPORT_CREDITS, debit_izivoice_usage_by_user_id
 from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 _limit_submit = rate_limit("video_submit", max_attempts=30, window_seconds=3600)
 
 LIBRARY_IMAGE_EXTENSIONS = IMAGE_UPLOAD_EXTENSIONS
+
+def _video_is_remote(video: Video) -> bool:
+    ref = str(video.output_path or "")
+    return video.storage_backend in ("b2", "r2") or ref.startswith(("http://", "https://"))
+
+
+def _ensure_local_thumbnail(video: Video) -> Path:
+    """Ensure a thumbnail exists locally, rebuilding it from B2/R2 when the
+    render itself has already been moved off the worker disk."""
+    target = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+    if not _video_is_remote(video):
+        target = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
+    if target.exists():
+        return target
+    if not _video_is_remote(video) or not video.output_path:
+        raise FileNotFoundError("Thumbnail not found")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="kappgen-thumbnail-source-") as tmp:
+        source = Path(tmp) / "output.mp4"
+        with httpx.stream("GET", str(video.output_path), timeout=600.0, follow_redirects=True) as response:
+            response.raise_for_status()
+            with source.open("wb") as handle:
+                for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                    handle.write(chunk)
+        generate_thumbnail(source, target, video.thumbnail_text or video.title or "Nouvelle vidéo", channel=video.channel)
+    if not target.exists():
+        raise FileNotFoundError("Thumbnail not found")
+    return target
 
 # At the capped ~4.2Mbps render bitrate a 60min video lands around ~2GB —
 # generous for long-form content while stopping runaway renders (and the
@@ -54,6 +84,16 @@ def validate_channel_visual_source(channel: Channel, db: Session) -> None:
     image_style = channel.image_style or {}
     media_mode = image_style.get("media_mode", "images")
     enabled = resolve_enabled_image_sources(image_style)
+
+    # Mixed/video montage can source its motion footage from Pexels even when
+    # the creator has not uploaded B-roll or explicitly enabled the public
+    # image library. The montage mode itself is the creator's request for
+    # stock video; do not reject a valid configuration before the worker can
+    # perform that search.
+    if media_mode in ("mixed", "videos"):
+        from src.config import PEXELS_API_KEY
+        if PEXELS_API_KEY:
+            return
 
     if "ai_generated" in enabled and media_mode != "videos":
         # Scene images (unlike thumbnails, which can use a paid
@@ -400,13 +440,18 @@ def _video_cost_transactions(db: Session, video: Video, user_id: str):
 # Izivoice at x1.0, just what it paid for; matched by prefix and swapped for
 # a plain label here, admin's own view (which reuses the same
 # _video_cost_transactions helper) is untouched.
+# A creator was able to regenerate the same video's AI thumbnail unlimited
+# times (one account ran up 7 regenerations, 14 000 cr., on a single video)
+# before this cap existed — see regenerate_video_thumbnail below.
+MAX_THUMBNAIL_REGENERATIONS = 5
+
 _CLIENT_COST_LABELS = [
     (re.compile(r"^ai_thumbnail_generation\b"), "Miniature générée par IA"),
     (re.compile(r"^voiceover_tts\b"), "Voix off (synthèse vocale)"),
     (re.compile(r"^transcription_stt\b"), "Transcription (sous-titres)"),
     (re.compile(r"^ai_music_generation\b"), "Musique générée par IA"),
     (re.compile(r"^music_video_generation\b"), "Génération de la vidéo musicale"),
-    (re.compile(r"^stock_media\b"), "Séquence / photo de stock (Pexels)"),
+    (re.compile(r"^stock_media\b"), "Image & vidéos d'illustration"),
     (re.compile(r"^Génération auto de script\b"), "Script généré automatiquement"),
     (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de rendu"),
     (re.compile(r"^Conservation vidéo\b"), "Conservation prolongée"),
@@ -465,7 +510,51 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    source_path = STORAGE_PATH / video.output_path
+    if quality not in {"hd", "sd", "4k"}:
+        raise HTTPException(status_code=400, detail="Qualité invalide. Choisis HD, SD ou 4K.")
+
+    # B2/R2 outputs are intentionally public and no longer exist on the
+    # worker's local disk after finalization. Redirect instead of prefixing
+    # STORAGE_PATH to an HTTPS URL (which caused "file not found on disk").
+    is_remote = video.storage_backend in ("b2", "r2") or str(video.output_path).startswith(("http://", "https://"))
+    if is_remote and quality != "4k":
+        if not video.downloaded_at:
+            video.downloaded_at = datetime.utcnow()
+            db.commit()
+        filename = _download_filename(video, quality)
+        def remote_stream():
+            with httpx.stream("GET", video.output_path, timeout=300.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                yield from response.iter_bytes()
+        return StreamingResponse(
+            remote_stream(),
+            media_type="video/mp4",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    source_path = STORAGE_PATH / video.output_path if not is_remote else None
+    if quality == "4k":
+        if not video.channel or not video.channel.user_id:
+            raise HTTPException(status_code=409, detail="Impossible de facturer cet export 4K.")
+        if not debit_izivoice_usage_by_user_id(video.channel.user_id, FOUR_K_EXPORT_CREDITS, "video_4k_export", video_id=video.id):
+            raise HTTPException(status_code=402, detail=f"Crédits insuffisants pour l’export 4K ({FOUR_K_EXPORT_CREDITS:,} crédits).")
+        target = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output-4k.mp4"
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="kappgen-4k-") as tmp:
+                if is_remote:
+                    source_path = Path(tmp) / "source.mp4"
+                    with httpx.stream("GET", video.output_path, timeout=300.0, follow_redirects=True) as response:
+                        response.raise_for_status()
+                        with source_path.open("wb") as handle:
+                            for chunk in response.iter_bytes():
+                                handle.write(chunk)
+                if not source_path or not source_path.exists():
+                    raise HTTPException(status_code=404, detail="Vidéo source introuvable pour l’export 4K.")
+                run_ffmpeg(["ffmpeg", "-y", "-i", str(source_path), "-vf", "scale=3840:2160:flags=lanczos", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", "-movflags", "+faststart", str(target)])
+        return FileResponse(target, media_type="video/mp4", filename=_download_filename(video, "4k"))
+
+    source_path = source_path
     if not source_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found on disk")
 
@@ -496,18 +585,33 @@ def download_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # output_path is a full R2 URL for videos stored there, not a local
-    # STORAGE_PATH-relative path — thumbnail.jpg always stays local
-    # regardless (see _finalize_output_storage), sitting next to wherever
-    # this video's other local render artifacts live.
-    if video.storage_backend == "r2":
-        thumbnail_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
-    else:
-        thumbnail_path = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
-    if not thumbnail_path.exists():
+    # output_path is a full B2 (or legacy R2) URL for videos stored there,
+    # not a local STORAGE_PATH-relative path — thumbnail.jpg always stays
+    # local regardless (see _finalize_output_storage), sitting next to
+    # wherever this video's other local render artifacts live.
+    try:
+        thumbnail_path = _ensure_local_thumbnail(video)
+    except Exception as exc:
+        logger.warning("Could not recover thumbnail for video %s: %s", video_id, exc)
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
     return FileResponse(thumbnail_path, media_type="image/jpeg", filename=_download_filename(video, "thumbnail").replace(".mp4", ".jpg"))
+
+
+@router.get("/{video_id}/thumbnail")
+def serve_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
+    """Serve an inline card thumbnail, repairing legacy renders that never
+    produced one by extracting a representative frame from their MP4."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or not video.output_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+    video_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output.mp4"
+    try:
+        thumbnail_path = _ensure_local_thumbnail(video)
+    except Exception as exc:
+        logger.warning("Could not recover thumbnail for video %s: %s", video_id, exc)
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(thumbnail_path, media_type="image/jpeg")
 
 
 @router.get("/{video_id}/audio")
@@ -519,12 +623,29 @@ def download_video_audio(video_id: str, db: Session = Depends(get_db)):
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    source_path = STORAGE_PATH / video.output_path
-    if not source_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found on disk")
+    output_ref = str(video.output_path)
+    if not _video_is_remote(video):
+        source_path = STORAGE_PATH / output_ref
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail="Video file not found on disk")
+        audio_path = ensure_extracted_audio(source_path)
+        return FileResponse(audio_path, media_type="audio/mp4", filename=f"kappgen-{video_id}-audio.m4a")
 
-    audio_path = ensure_extracted_audio(source_path)
-    return FileResponse(audio_path, media_type="audio/mp4", filename=f"kappgen-{video_id}-audio.m4a")
+    # The render lives in B2/R2; download and extract only while the response
+    # is being streamed, keeping storage details invisible to the client.
+    def remote_audio_stream():
+        with tempfile.TemporaryDirectory(prefix="kappgen-audio-source-") as tmp:
+            source_path = Path(tmp) / "output.mp4"
+            with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                with source_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+            audio_path = ensure_extracted_audio(source_path)
+            with audio_path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    yield chunk
+    return StreamingResponse(remote_audio_stream(), media_type="audio/mp4", headers={"Content-Disposition": f'attachment; filename="kappgen-{video_id}-audio.m4a"'})
 
 
 def _publish_video_background(video_id: str) -> None:
@@ -537,12 +658,29 @@ def _publish_video_background(video_id: str) -> None:
     from src.worker.queue_runner import try_publish_to_youtube
 
     db = SessionLocal()
+    temp_dir = None
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
             return
         channel = video.channel
-        video_path = STORAGE_PATH / video.output_path
+        output_ref = str(video.output_path or "")
+        is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+        if is_remote:
+            # Finished renders are normally moved to B2/R2 to free the worker
+            # disk. YouTube still needs a local seekable file, so materialize
+            # the object only for the duration of this background upload.
+            temp_dir = tempfile.TemporaryDirectory(prefix="kappgen-youtube-")
+            video_path = Path(temp_dir.name) / "output.mp4"
+            with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                with video_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+        else:
+            video_path = STORAGE_PATH / output_ref
+            if not video_path.exists():
+                raise FileNotFoundError("Le fichier vidéo n'existe plus sur le serveur.")
         try_publish_to_youtube(db, channel, video, video_path)
     except Exception as exc:
         video = db.query(Video).filter(Video.id == video_id).first()
@@ -550,6 +688,8 @@ def _publish_video_background(video_id: str) -> None:
             video.youtube_publish_error = str(exc)[:500]
             db.commit()
     finally:
+        if temp_dir:
+            temp_dir.cleanup()
         db.close()
 
 
@@ -618,6 +758,22 @@ def get_youtube_compliance(video_id: str, current_user: User = Depends(get_curre
     return _refresh_compliance_report(db, video)
 
 
+@router.get("/{video_id}/youtube/status")
+def get_youtube_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Cheap, read-only check the video card uses before deciding whether
+    "Voir sur YouTube" should just open the link or route through the
+    publish-review modal to offer a republish (see POST .../youtube/publish,
+    which does the authoritative check + republish itself — this endpoint
+    only decides which UI to show, never mutates anything)."""
+    video = _get_owned_video(db, video_id, current_user)
+    if not video.youtube_video_id:
+        return {"published": False, "exists": False}
+    channel = video.channel
+    access_token = channel and youtube_publisher.get_valid_access_token(channel)
+    exists = youtube_publisher.video_exists(access_token, video.youtube_video_id) if access_token else True
+    return {"published": True, "exists": exists, "youtube_video_id": video.youtube_video_id}
+
+
 @router.get("/{video_id}/youtube/compliance/dossier")
 def get_youtube_compliance_dossier(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
@@ -629,6 +785,7 @@ def get_youtube_compliance_dossier(video_id: str, current_user: User = Depends(g
 class CompliancePublishRequest(BaseModel):
     confirm_human_review: bool = False
     force_publish: bool = False
+    republish: bool = False
 
 
 class ComplianceOverrideRequest(BaseModel):
@@ -667,15 +824,34 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
     video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value or not video.output_path:
         raise HTTPException(status_code=409, detail="La vidéo doit être prête avant sa publication.")
-    if video.youtube_video_id:
-        return {
-            "status": "already_published",
-            "youtube_video_id": video.youtube_video_id,
-            "youtube_url": f"https://youtu.be/{video.youtube_video_id}",
-            "video": video.to_dict(),
-        }
 
     channel = video.channel
+    if video.youtube_video_id and not (payload and payload.republish):
+        # Before refusing as "already published", confirm it's actually still
+        # live — a creator who deleted the video on YouTube (or had it taken
+        # down) has no other way to get it back online otherwise. Reuses the
+        # exact same publish flow below with the video's existing title/
+        # description/thumbnail, since try_publish_to_youtube already prefers
+        # those over regenerating when they're already set.
+        access_token = channel and youtube_publisher.get_valid_access_token(channel)
+        still_live = youtube_publisher.video_exists(access_token, video.youtube_video_id) if access_token else True
+        if still_live:
+            return {
+                "status": "already_published",
+                "youtube_video_id": video.youtube_video_id,
+                "youtube_url": f"https://youtu.be/{video.youtube_video_id}",
+                "video": video.to_dict(),
+            }
+        _append_compliance_event(video, "youtube_video_missing_republishing", {"previous_youtube_video_id": video.youtube_video_id})
+        video.youtube_video_id = None
+        video.youtube_published_at = None
+        db.commit()
+    elif video.youtube_video_id and payload and payload.republish:
+        _append_compliance_event(video, "youtube_republish_requested", {"previous_youtube_video_id": video.youtube_video_id})
+        video.youtube_video_id = None
+        video.youtube_published_at = None
+        db.commit()
+
     if not channel or not channel.youtube_refresh_token:
         auth_url = None
         if channel and youtube_publisher.is_configured():
@@ -689,8 +865,10 @@ def publish_video_to_youtube(video_id: str, payload: Optional[CompliancePublishR
             },
         )
 
-    video_path = STORAGE_PATH / video.output_path
-    if not video_path.exists():
+    output_ref = str(video.output_path or "")
+    is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+    video_path = STORAGE_PATH / output_ref if not is_remote else None
+    if video_path is not None and not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
 
     report = _refresh_compliance_report(db, video)
@@ -783,10 +961,6 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     channel = video.channel
     if not channel or not channel.youtube_refresh_token:
         raise HTTPException(status_code=409, detail="Chaîne non connectée à YouTube.")
-    video_path = STORAGE_PATH / video.output_path if video.output_path else None
-    if not video_path or not video_path.exists():
-        raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
-
     access_token = youtube_publisher.get_valid_access_token(channel)
     if not access_token:
         raise HTTPException(status_code=502, detail="Jeton YouTube expiré ou révoqué — reconnecte la chaîne.")
@@ -796,9 +970,10 @@ def resync_youtube_thumbnail(video_id: str, current_user: User = Depends(get_cur
     # regenerated) instead of generating yet another new one, which used to
     # silently diverge from what was actually visible in the app. Only
     # generate one from scratch for a legacy video that never got one.
-    thumbnail_path = video_path.with_name("thumbnail.jpg")
-    if not thumbnail_path.exists():
-        thumbnail_path, _ = generate_thumbnail(video_path, thumbnail_path, video.thumbnail_text or video.title or channel.name, channel=channel)
+    try:
+        thumbnail_path = _ensure_local_thumbnail(video)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Impossible de récupérer la vidéo depuis le stockage : {str(exc)[:200]}")
     try:
         youtube_publisher.set_video_thumbnail(access_token, video.youtube_video_id, thumbnail_path)
     except Exception as exc:
@@ -811,17 +986,36 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
     from src.db.session import SessionLocal
     db = SessionLocal()
     succeeded = False
+    temp_dir = None
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
             return
         channel = video.channel
-        video_path = STORAGE_PATH / video.output_path if video.output_path else None
+        output_ref = str(video.output_path or "")
+        is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+        if is_remote:
+            temp_dir = tempfile.TemporaryDirectory(prefix="kappgen-thumbnail-")
+            video_path = Path(temp_dir.name) / "output.mp4"
+            with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
+                response.raise_for_status()
+                with video_path.open("wb") as handle:
+                    for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+            # Thumbnails and their history remain local even when the MP4 is
+            # stored remotely, so the app can serve them without downloading
+            # the full video on every card refresh.
+            current = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+            current.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            video_path = STORAGE_PATH / output_ref if output_ref else None
+            if not channel or not video_path or not video_path.exists():
+                return
+            current = video_path.with_name("thumbnail.jpg")
         if not channel or not video_path or not video_path.exists():
             return
-        current = video_path.with_name("thumbnail.jpg")
         if current.exists():
-            history_dir = video_path.parent / "thumbnail_history"
+            history_dir = current.parent / "thumbnail_history"
             history_dir.mkdir(parents=True, exist_ok=True)
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
             shutil.copy2(current, archive)
@@ -864,6 +1058,8 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         except Exception:
             pass
         db.close()
+        if temp_dir:
+            temp_dir.cleanup()
 
 
 @router.post("/{video_id}/thumbnail/regenerate")
@@ -886,9 +1082,49 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     channel = video.channel
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    video_path = STORAGE_PATH / video.output_path if video.output_path else None
-    if not video_path or not video_path.exists():
+    thumbnail_style = channel.thumbnail_style or {}
+    configured_references = thumbnail_style.get("reference_image_paths") or ([] if not thumbnail_style.get("reference_image_path") else [thumbnail_style["reference_image_path"]])
+    if not configured_references:
+        raise HTTPException(
+            status_code=409,
+            detail="Aucune référence de style de miniature n'est configurée pour cette chaîne. Réimporte les références avant de régénérer.",
+        )
+    missing_references = [
+        path for path in configured_references
+        if not isinstance(path, str) or not (STORAGE_PATH / path).is_file()
+    ]
+    if missing_references:
+        raise HTTPException(
+            status_code=409,
+            detail="Les fichiers de référence de miniature sont introuvables sur le serveur. Réimporte-les avant de régénérer.",
+        )
+    output_ref = str(video.output_path or "")
+    is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+    video_path = STORAGE_PATH / output_ref if output_ref and not is_remote else None
+    if video_path is not None and not video_path.exists():
         raise HTTPException(status_code=404, detail="Le fichier vidéo n'existe plus sur le serveur.")
+    # Each regeneration archives the thumbnail it's about to replace into
+    # thumbnail_history/ (see _regenerate_thumbnail_background below) BEFORE
+    # generating the new one — so the archive count IS the number of past
+    # regenerations, independent of whether a given attempt was free (Hugging
+    # Face) or paid (2000 cr., see THUMBNAIL_CREDITS below): a creator was
+    # able to regenerate the same video's thumbnail 7 times (14 000 cr.)
+    # before this cap existed.
+    # Remote videos have no local output.mp4 path. Their thumbnails are kept
+    # in the channel's local storage directory, just like the background
+    # regeneration task below, so do not dereference video_path here.
+    thumbnail_dir = (
+        STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+        if is_remote
+        else video_path.parent
+    )
+    history_dir = thumbnail_dir / "thumbnail_history"
+    past_regenerations = len(list(history_dir.glob("*.jpg"))) if history_dir.exists() else 0
+    if past_regenerations >= MAX_THUMBNAIL_REGENERATIONS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Limite de {MAX_THUMBNAIL_REGENERATIONS} régénérations de miniature atteinte pour cette vidéo.",
+        )
     # A stuck flag from a server restart mid-regeneration (the background
     # thread is a daemon with no persistence of its own) must never block
     # every future attempt forever — past a generous timeout, treat it as
@@ -916,8 +1152,10 @@ def get_thumbnail_regenerate_status(video_id: str, current_user: User = Depends(
 @router.get("/{video_id}/thumbnail/history")
 def list_video_thumbnail_history(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    video_path = STORAGE_PATH / video.output_path if video.output_path else None
-    history_dir = video_path.parent / "thumbnail_history" if video_path else None
+    output_ref = str(video.output_path or "")
+    is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
+    video_path = STORAGE_PATH / output_ref if output_ref and not is_remote else STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output.mp4"
+    history_dir = video_path.parent / "thumbnail_history"
     items = []
     if history_dir and history_dir.is_dir():
         items = [{"filename": p.name, "url": f"/api/videos/{video.id}/thumbnail/history/{p.name}"} for p in sorted(history_dir.glob('*.jpg'), reverse=True)]
@@ -927,7 +1165,7 @@ def list_video_thumbnail_history(video_id: str, current_user: User = Depends(get
 @router.get("/{video_id}/thumbnail/history/{filename}")
 def get_video_thumbnail_history(video_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    base = (STORAGE_PATH / video.output_path).parent / "thumbnail_history"
+    base = (STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail_history") if _video_is_remote(video) else (STORAGE_PATH / video.output_path).parent / "thumbnail_history"
     path = base / filename
     if not path.exists() or not path.is_relative_to(base):
         raise HTTPException(status_code=404, detail="Version introuvable")
@@ -936,7 +1174,7 @@ def get_video_thumbnail_history(video_id: str, filename: str, current_user: User
 @router.post("/{video_id}/thumbnail/history/{filename}/restore")
 def restore_video_thumbnail_history(video_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    current = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
+    current = (STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg") if _video_is_remote(video) else (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
     base = current.parent / "thumbnail_history"
     source = base / filename
     if not source.exists() or not source.is_relative_to(base):
@@ -1163,14 +1401,70 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
     db.refresh(video)
     return video.to_dict()
 
-def _load_scenes_manifest(video: Video) -> List[Dict[str, Any]]:
+def _extract_video_frame(video_source: Path, thumb_path: Path) -> Path:
+    """Grabs (and caches) a single frame out of a video file as a jpg —
+    shared by every place that needs a still to show for something that's
+    actually a video clip (a video-slot scene, or an in-progress Ken Burns
+    clip — see both call sites below)."""
+    if not video_source.exists():
+        raise HTTPException(status_code=404, detail="Le fichier source est introuvable.")
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    if not thumb_path.exists() or thumb_path.stat().st_mtime < video_source.stat().st_mtime:
+        try:
+            run_ffmpeg([
+                "ffmpeg", "-y", "-ss", "0.3", "-i", str(video_source),
+                "-frames:v", "1", "-q:v", "3", str(thumb_path),
+            ])
+        except Exception as e:
+            logger.warning(f"Frame extraction failed for {video_source}: {e}")
+            raise HTTPException(status_code=404, detail="Aperçu indisponible.")
+    return thumb_path
+
+
+def _resolve_scene_thumbnail(video: Video, scene: Dict[str, Any]) -> Path:
+    """A real image file to show for this scene's thumbnail.
+
+    Scenes built from an AI-generated or uploaded image have `image_path`
+    pointing straight at that file. But a video-slot scene (B-roll/user clip
+    — see orchestrator.py's scenes_manifest) has `image_path` set to None by
+    design; both the live "Suivi" panel and the post-render Studio editor
+    were still trying to load a still image for those scenes and silently
+    showing a broken <img> for every one of them on any channel using video
+    or mixed visuals. Grab a single frame out of the scene's own video
+    source instead, cached on disk so repeated polls don't re-run ffmpeg.
+    """
+    image_path = scene.get("image_path")
+    if image_path and Path(image_path).exists():
+        return Path(image_path)
+
+    visual_path = scene.get("visual_path")
+    if not visual_path:
+        raise HTTPException(status_code=404, detail="Aucune image pour cette scène.")
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    thumbs_dir = video_dir / "source" / "thumbnails"
+    thumb_path = thumbs_dir / f"scene_{scene.get('index', 0)}.jpg"
+    return _extract_video_frame(Path(visual_path), thumb_path)
+
+
+def _load_scenes_manifest(video: Video, db: Optional[Session] = None) -> List[Dict[str, Any]]:
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     scenes_path = video_dir / "source" / "scenes.json"
     if not scenes_path.exists():
-        raise HTTPException(
-            status_code=409,
-            detail="Cette vidéo n’est plus éditable (fichiers sources supprimés ou vidéo antérieure à cette fonctionnalité).",
-        )
+        # Fichiers d'édition purgés localement (voir EDIT_ASSETS_RETENTION_DAYS) —
+        # mais archivés sur B2 avant suppression, donc récupérables à la demande
+        # plutôt qu'une fin de partie pour l'édition.
+        from src.worker.queue_runner import restore_edit_assets
+        restored = restore_edit_assets(video)
+        if restored and scenes_path.exists():
+            if db is not None:
+                video.edit_assets_purged_at = None
+                video.edit_assets_restored_at = datetime.utcnow()
+                db.commit()
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Cette vidéo n'est plus éditable (fichiers sources introuvables, y compris dans l'archive, ou vidéo antérieure à cette fonctionnalité).",
+            )
     import json
     return json.loads(scenes_path.read_text(encoding="utf-8"))
 
@@ -1205,13 +1499,44 @@ def get_video_production_progress(video_id: str, current_user: User = Depends(ge
                 "duration": item.get("duration"),
                 "text": item.get("text") or "",
                 "visual_type": item.get("visual_type") or "image",
-                "image_url": f"/videos/{video.id}/production-assets/{Path(item.get('image_path') or item.get('visual_path') or '').name}",
+                # Routed through the same thumbnail endpoint as the
+                # post-render editor (not production-assets/{filename}
+                # directly) — a video-slot scene (B-roll/user clip) has no
+                # still image file to serve as-is, and that endpoint only
+                # ever grabs one frame out of the video source on demand.
+                "image_url": f"/videos/{video.id}/scenes/{item.get('index', index)}/image",
             } for index, item in enumerate(manifest)]
         except Exception:
             scenes = []
 
-    # scenes.json is written after clips are built. During visual generation,
-    # show the image files that already exist so the gallery grows live.
+    # scenes.json is written only after every clip is built (Step 6/7) — but
+    # clips themselves are written one by one, in parallel, during Step 5/7
+    # ("Animation des scènes"). Without this, a video-B-roll/mixed channel
+    # (whose scenes never touch images_dir at all — see the fallback below)
+    # showed a completely empty gallery through that whole stage, worse than
+    # the placeholder text ("la galerie se remplira au fur et à mesure")
+    # actually promised. Each clip already IS the real per-scene visual
+    # (Ken Burns pan/zoom applied), so a frame grabbed from it previews
+    # accurately for image-slot and video-slot scenes alike.
+    if not scenes:
+        clips_dir = source_dir / "clips"
+        if clips_dir.exists():
+            clip_files = sorted(
+                (p for p in clips_dir.iterdir() if p.is_file() and re.match(r"^clip_(\d+)\.mp4$", p.name)),
+                key=lambda p: int(re.match(r"^clip_(\d+)\.mp4$", p.name).group(1)),
+            )
+            for clip_path in clip_files:
+                clip_number = int(re.match(r"^clip_(\d+)\.mp4$", clip_path.name).group(1))
+                scenes.append({
+                    "index": clip_number - 1,
+                    "text": "",
+                    "visual_type": "video",
+                    "image_url": f"/videos/{video.id}/production-clip-thumbnail/{clip_number - 1}",
+                })
+
+    # Before clip-building even starts, show the raw fetched image files as
+    # they land (image-slot channels only — a video-slot scene has nothing
+    # here until its clip exists, covered above instead).
     if not scenes:
         images_dir = source_dir / "images"
         if images_dir.exists():
@@ -1246,6 +1571,24 @@ def get_video_production_progress(video_id: str, current_user: User = Depends(ge
         "final_ready": output_path.exists() or bool(video.output_path),
         "updated_at": datetime.utcnow().isoformat(),
     }
+
+
+@router.get("/{video_id}/production-clip-thumbnail/{index}")
+def get_video_production_clip_thumbnail(video_id: str, index: int, db: Session = Depends(get_db)):
+    """A still frame from a Ken Burns clip already built for this scene,
+    while the video is still mid-render (Step 5/7, before scenes.json even
+    exists) — used by the live "Suivi" panel so the gallery actually fills
+    in during clip-building, not just once the whole video is nearly done.
+    Intentionally unauthenticated, same reasoning as get_scene_image."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    clip_path = video_dir / "source" / "clips" / f"clip_{index + 1:03d}.mp4"
+    if not clip_path.exists():
+        raise HTTPException(status_code=404, detail="Ce plan n'est pas encore prêt.")
+    thumb_path = video_dir / "source" / "thumbnails" / f"clip_{index}.jpg"
+    return FileResponse(_extract_video_frame(clip_path, thumb_path))
 
 
 @router.get("/{video_id}/production-audio")
@@ -1290,7 +1633,7 @@ def list_video_scenes(video_id: str, current_user: User = Depends(get_current_us
     video = _get_owned_video(db, video_id, current_user)
     if video.status != VideoStatus.DONE.value:
         raise HTTPException(status_code=409, detail="La vidéo n’est pas encore prête.")
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     return [
         {
             "index": s["index"],
@@ -1317,14 +1660,11 @@ def get_scene_image(video_id: str, scene_index: int, db: Session = Depends(get_d
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
-    image_path = Path(scene["image_path"])
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Scene image file not found on disk")
-    return FileResponse(image_path)
+    return FileResponse(_resolve_scene_thumbnail(video, scene))
 
 
 @router.post("/{video_id}/scenes/{scene_index}/image")
@@ -1348,7 +1688,7 @@ async def replace_scene_image(
     import json
     video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
     scenes_path = video_dir / "source" / "scenes.json"
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1417,7 +1757,7 @@ def edit_scene_subtitle(video_id: str, scene_index: int, payload: SceneSubtitleU
     if not text:
         raise HTTPException(status_code=400, detail="Le texte ne peut pas être vide.")
 
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1458,7 +1798,7 @@ def regenerate_scene_audio_endpoint(video_id: str, scene_index: int, payload: Sc
     if not can_render:
         raise HTTPException(status_code=402, detail=reason)
 
-    scenes = _load_scenes_manifest(video)
+    scenes = _load_scenes_manifest(video, db)
     scene = next((s for s in scenes if s["index"] == scene_index), None)
     if not scene:
         raise HTTPException(status_code=404, detail="Scene not found")
@@ -1555,7 +1895,7 @@ def undo_last_edit(video_id: str, current_user: User = Depends(get_current_user)
 
         video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
         scenes_path = video_dir / "source" / "scenes.json"
-        scenes = _load_scenes_manifest(video)
+        scenes = _load_scenes_manifest(video, db)
         scene = next((s for s in scenes if s["index"] == scene_index), None)
         if not scene:
             raise HTTPException(status_code=404, detail="Scene not found")

@@ -53,13 +53,13 @@ def _save_and_encode(frames_dir: Path, name: str):
 def gen_stars(frames_dir: Path):
     rng = random.Random(1)
     stars = []
-    for _ in range(140):
+    for _ in range(240):
         x = rng.uniform(0, WIDTH)
         y = rng.uniform(0, HEIGHT)
-        r = rng.uniform(0.6, 1.8)
+        r = rng.uniform(0.35, 1.25)
         cycles = rng.choice([1, 2, 3])
         phase = rng.uniform(0, math.tau)
-        base = rng.uniform(0.35, 0.7)
+        base = rng.uniform(0.22, 0.75)
         tint = rng.choice([(255, 255, 255), (223, 246, 255), (255, 246, 204)])
         stars.append((x, y, r, cycles, phase, base, tint))
     for f in range(TOTAL_FRAMES):
@@ -76,24 +76,23 @@ def gen_stars(frames_dir: Path):
 def gen_dust(frames_dir: Path):
     rng = random.Random(2)
     motes = []
-    for _ in range(70):
+    for _ in range(120):
         x = rng.uniform(0, WIDTH)
         y = rng.uniform(0, HEIGHT)
         r = rng.uniform(1.2, 3.2)
-        cycles = rng.choice([1, 2])
-        angle = rng.uniform(0, math.tau)
-        drift = rng.uniform(30, 90)
-        brightness = rng.uniform(0.35, 0.85)
-        motes.append((x, y, r, cycles, angle, drift, brightness))
+        cycles = rng.choice([1, 2, 3])
+        drift = rng.uniform(35, 115)
+        brightness = rng.uniform(0.28, 0.82)
+        motes.append((x, y, r, cycles, drift, brightness))
     for f in range(TOTAL_FRAMES):
         img = _canvas()
         draw = ImageDraw.Draw(img)
         t = f / TOTAL_FRAMES
-        for x, y, r, cycles, angle, drift, brightness in motes:
-            dx = math.cos(angle) * drift * math.sin(t * cycles * math.tau)
-            dy = math.sin(angle) * drift * math.sin(t * cycles * math.tau) - drift * 0.15
-            px = (x + dx) % WIDTH
-            py = (y + dy) % HEIGHT
+        for x, y, r, cycles, drift, brightness in motes:
+            # Warm airborne dust travels across frame left-to-right, with a
+            # gentle turbulent lift rather than orbiting in a neat pattern.
+            px = (x + t * cycles * WIDTH * 0.42) % WIDTH
+            py = (y + math.sin(t * cycles * math.tau + x) * drift * 0.22) % HEIGHT
             level = round(255 * brightness)
             draw.ellipse([px - r, py - r, px + r, py + r], fill=(level, round(level * 0.9), round(level * 0.7)))
         img = img.filter(ImageFilter.GaussianBlur(0.8))
@@ -103,12 +102,12 @@ def gen_dust(frames_dir: Path):
 def gen_snow(frames_dir: Path):
     rng = random.Random(3)
     flakes = []
-    for _ in range(180):
+    for _ in range(320):
         x = rng.uniform(0, WIDTH)
         y0 = rng.uniform(0, HEIGHT)
-        r = rng.uniform(1.0, 2.8)
-        cycles = rng.choice([2, 3, 4])
-        sway_amp = rng.uniform(8, 28)
+        r = rng.uniform(0.55, 3.4)
+        cycles = rng.choice([1, 2, 3, 4])
+        sway_amp = rng.uniform(5, 34)
         sway_phase = rng.uniform(0, math.tau)
         brightness = rng.uniform(0.6, 1.0)
         flakes.append((x, y0, r, cycles, sway_amp, sway_phase, brightness))

@@ -46,6 +46,8 @@ THUMBNAIL_CREDITS = 2000
 # keeps that promise intact without meaningfully affecting the creator's
 # render economics. See orchestrator.py's stock-footage/photo fallback.
 STOCK_MEDIA_CREDITS = 100
+# On-demand 4K upscale/export from the finished 1080p master.
+FOUR_K_EXPORT_CREDITS = 5000
 
 
 def random_image_credit_cost() -> int:

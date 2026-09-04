@@ -90,3 +90,26 @@ def object_key_from_url(url: str) -> Optional[str]:
     if not url or not url.startswith(R2_PUBLIC_URL_BASE):
         return None
     return url[len(R2_PUBLIC_URL_BASE):].lstrip("/")
+
+
+def presigned_put_url(object_key: str, content_type: str = "video/mp4", expires_in: int = 1800) -> Optional[str]:
+    """A short-lived URL the BROWSER uploads straight to, bypassing our own
+    API entirely for the actual file bytes — used for B-roll clips too large
+    for api.kappgen.com's own Cloudflare-proxied request-body cap (~100MB).
+    R2 itself accepts a single PUT well past that (multi-GB), so this is the
+    one way to accept a large clip without the creator having to compress it
+    first. Public read on the bucket (R2_PUBLIC_URL_BASE) already makes the
+    result playable/servable immediately once the PUT completes — no
+    separate "make public" step needed."""
+    if not is_r2_configured():
+        return None
+    try:
+        client = _get_client()
+        return client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": R2_BUCKET_NAME, "Key": object_key, "ContentType": content_type},
+            ExpiresIn=expires_in,
+        )
+    except Exception as exc:
+        logger.warning(f"R2 presigned URL generation failed for {object_key}: {exc}")
+        return None
