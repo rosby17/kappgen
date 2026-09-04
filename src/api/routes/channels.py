@@ -18,7 +18,7 @@ import uuid
 import httpx
 from urllib.parse import quote, urlparse
 from src.db.session import get_db
-from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice, ChannelPipelineShare
+from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice, ChannelPipelineShare, ChannelSoundEffect
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
 from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
@@ -836,6 +836,7 @@ def create_channel(payload: ChannelCreate, current_user: User = Depends(get_curr
         timezone=payload.timezone or "Africa/Douala",
         transcribe_audio_default=payload.transcribe_audio_default if payload.transcribe_audio_default is not None else True,
         thumbnail_style=payload.thumbnail_style,
+        sfx_enabled=payload.sfx_enabled if payload.sfx_enabled is not None else True,
     )
     db.add(channel)
     db.commit()
@@ -1491,6 +1492,8 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         channel.transcribe_audio_default = payload.transcribe_audio_default
     if payload.is_active is not None:
         channel.is_active = payload.is_active
+    if payload.sfx_enabled is not None:
+        channel.sfx_enabled = payload.sfx_enabled
     if payload.thumbnail_style is not None:
         # Merge rather than replace: this path is how a creator hand-types
         # their own style_prompt (no reference images involved), so it must
@@ -2025,6 +2028,94 @@ def delete_channel_music_track(channel_id: str, track_path: str, current_user: U
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
+
+@router.get("/{channel_id}/sfx")
+def list_channel_sound_effects(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    effects = (
+        db.query(ChannelSoundEffect)
+        .filter(ChannelSoundEffect.channel_id == channel_id)
+        .order_by(ChannelSoundEffect.created_at.desc())
+        .all()
+    )
+    return [e.to_dict() for e in effects]
+
+
+@router.post("/{channel_id}/sfx")
+async def upload_channel_sound_effects(
+    channel_id: str,
+    files: List[UploadFile] = File(...),
+    labels: List[str] = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Uploads one or more short SFX clips with a creator-given label each
+    (e.g. "whoosh transition", "notification ding") — the matching pass
+    (src/pipeline/sound_effects.py) has no way to hear the clip, so this
+    label is the only signal it has to decide when a given effect fits a
+    moment in the transcript. `labels` must be the same length as `files`,
+    in the same order — the frontend pairs each dropped file with its own
+    label input before submitting."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    if len(labels) != len(files):
+        raise HTTPException(status_code=400, detail="Chaque fichier doit avoir une description.")
+
+    sfx_dir = STORAGE_PATH / "channels" / channel.id / "sfx"
+    sfx_dir.mkdir(parents=True, exist_ok=True)
+
+    from src.utils.ffmpeg_runner import get_audio_duration
+
+    saved = []
+    for file, label in zip(files, labels):
+        ext = Path(file.filename or "").suffix.lower()
+        if ext not in ALLOWED_MUSIC_EXTENSIONS:
+            continue
+        label = label.strip()[:200]
+        if not label:
+            continue
+        stem = re.sub(r'[^A-Za-z0-9._-]+', '-', Path(file.filename or "sfx").stem)[:60] or "sfx"
+        dest_name = f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
+        dest_path = sfx_dir / dest_name
+        dest_path.write_bytes(await file.read())
+        try:
+            duration = get_audio_duration(dest_path)
+        except Exception:
+            duration = None
+        effect = ChannelSoundEffect(channel_id=channel.id, filename=dest_name, label=label, duration_seconds=duration)
+        db.add(effect)
+        saved.append(effect)
+
+    if not saved:
+        raise HTTPException(status_code=400, detail="Aucun fichier audio valide avec une description (mp3, wav, m4a, ogg).")
+
+    db.commit()
+    return [e.to_dict() for e in saved]
+
+
+@router.delete("/{channel_id}/sfx/{sfx_id}")
+def delete_channel_sound_effect(channel_id: str, sfx_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    effect = db.query(ChannelSoundEffect).filter(ChannelSoundEffect.id == sfx_id, ChannelSoundEffect.channel_id == channel_id).first()
+    if not effect:
+        raise HTTPException(status_code=404, detail="Effet sonore introuvable.")
+    file_path = STORAGE_PATH / "channels" / channel.id / "sfx" / effect.filename
+    file_path.unlink(missing_ok=True)
+    db.delete(effect)
+    db.commit()
+    return {"status": "ok"}
+
 
 ALLOWED_STYLE_REFERENCE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 

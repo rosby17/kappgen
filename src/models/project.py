@@ -196,6 +196,7 @@ class ChannelCreate(BaseModel):
     timezone: str = "Africa/Douala"  # IANA name, auto-detected client-side
     transcribe_audio_default: bool = True  # auto-mode videos only; manual submissions choose per-video
     thumbnail_style: Optional[dict] = None  # {"style_prompt": str, "reference_image_paths": [str]}
+    sfx_enabled: bool = True  # whether the sound-effect matching pass runs at all for this channel's renders
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
@@ -243,6 +244,7 @@ class ChannelUpdate(BaseModel):
     transcribe_audio_default: Optional[bool] = None
     is_active: Optional[bool] = None
     thumbnail_style: Optional[dict] = None  # {"style_prompt": str, "reference_image_paths": [str]}
+    sfx_enabled: Optional[bool] = None
 
 class VideoCreate(BaseModel):
     channel_id: str

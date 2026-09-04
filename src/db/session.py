@@ -34,7 +34,7 @@ def get_db():
         db.close()
 
 def init_db():
-    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog, CreditPot, CreditTransaction, ApiCreditPot, ApiCreditTransaction, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount, AppSetting  # ensure models are imported
+    from src.db.models import User, Channel, Video, Folder, ApiKey, PasswordReset, Plan, Subscription, Order, ApiUsageLog, CreditPot, CreditTransaction, ApiCreditPot, ApiCreditTransaction, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount, AppSetting, ChannelSoundEffect  # ensure models are imported
     Base.metadata.create_all(bind=engine)
 
     # Lightweight migration: create_all only adds missing tables, not missing
@@ -63,6 +63,7 @@ def init_db():
             "extended_retention": "ALTER TABLE videos ADD COLUMN extended_retention BOOLEAN DEFAULT FALSE NOT NULL",
             "retention_until": "ALTER TABLE videos ADD COLUMN retention_until TIMESTAMP",
             "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
+            "raw_asset_path": "ALTER TABLE videos ADD COLUMN raw_asset_path VARCHAR(512)",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
             "edit_history": "ALTER TABLE videos ADD COLUMN edit_history JSON",
             "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",
@@ -131,6 +132,7 @@ def init_db():
         existing_channel_columns = {col["name"] for col in inspector.get_columns("channels")}
         channel_migrations = {
             "is_active": "ALTER TABLE channels ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL",
+            "sfx_enabled": "ALTER TABLE channels ADD COLUMN sfx_enabled BOOLEAN DEFAULT TRUE NOT NULL",
             "automation_mode": "ALTER TABLE channels ADD COLUMN automation_mode VARCHAR(20) DEFAULT 'manual' NOT NULL",
             "automation_style_prompt": "ALTER TABLE channels ADD COLUMN automation_style_prompt TEXT",
             "last_auto_run_date": "ALTER TABLE channels ADD COLUMN last_auto_run_date VARCHAR(10)",

@@ -71,6 +71,43 @@ def _media_checkpoint_is_valid(path: Path, expected_duration: float, tolerance: 
     actual_duration = get_audio_duration(path)
     return actual_duration > 0 and abs(actual_duration - expected_duration) <= tolerance
 
+
+def _resolve_sound_effect_clips(channel_id: Optional[str], words: list) -> list:
+    """Looks up this channel's uploaded SFX (if any), asks
+    sound_effects.pick_sound_effect_cues where they fit in the transcript,
+    and resolves each pick to a real file path for mix_audio_tracks. Returns
+    [] (never raises) whenever there's nothing to do — no channel_id, no
+    words yet, no SFX uploaded, or the matching pass itself failing —
+    sound effects are a nice-to-have layered on top of the mix, never a
+    reason a render should fail or even slow down noticeably."""
+    if not channel_id or not words:
+        return []
+    try:
+        from src.config import STORAGE_PATH
+        from src.db.session import SessionLocal
+        from src.db.models import ChannelSoundEffect
+        from src.pipeline.sound_effects import pick_sound_effect_cues
+
+        db = SessionLocal()
+        try:
+            effects = db.query(ChannelSoundEffect).filter(ChannelSoundEffect.channel_id == channel_id).all()
+            if not effects:
+                return []
+            available = [{"id": e.id, "label": e.label, "filename": e.filename, "duration_seconds": e.duration_seconds} for e in effects]
+        finally:
+            db.close()
+
+        cues = pick_sound_effect_cues(words, available)
+        sfx_dir = STORAGE_PATH / "channels" / channel_id / "sfx"
+        clips = [{"path": sfx_dir / cue["filename"], "start": cue["start"]} for cue in cues]
+        if clips:
+            logger.info(f"Sound effects: {len(clips)} cue(s) matched for channel {channel_id}.")
+        return clips
+    except Exception as e:
+        logger.warning(f"Sound effect matching skipped due to an error: {e}")
+        return []
+
+
 def run_video_pipeline(
     channel_config: Dict[str, Any],
     script_text: str,
@@ -577,12 +614,17 @@ def run_video_pipeline(
     ]
     (source_dir / "scenes.json").write_text(json.dumps(scenes_manifest, indent=2), encoding="utf-8")
         
-    # 7. Mix Voiceover and Background Music
+    # 7. Mix Voiceover, Background Music, and Sound Effects
     logger.info("Step 6/7: Mixing audio tracks...")
     progress("Mixage de la voix et de la musique", 82)
     music_pref = channel_config.get("music_preference", {})
     mixed_audio_path = source_dir / "mixed_audio.mp3"
-    
+
+    sfx_clips = (
+        _resolve_sound_effect_clips(channel_config.get("id"), transcript_info.get("words") or [])
+        if channel_config.get("sfx_enabled", True) else []
+    )
+
     if _media_checkpoint_is_valid(mixed_audio_path, total_duration, tolerance=2.0):
         logger.info("Resume checkpoint: reusing completed mixed audio track.")
     elif music_pref.get("enabled", True):
@@ -601,6 +643,14 @@ def run_video_pipeline(
             output_audio_path=mixed_audio_path,
             music_volume=music_pref.get("volume", 0.15),
             processing=music_pref,
+            sfx_clips=sfx_clips,
+        )
+    elif sfx_clips:
+        mix_audio_tracks(
+            voiceover_path=raw_vo_path,
+            music_path=None,
+            output_audio_path=mixed_audio_path,
+            sfx_clips=sfx_clips,
         )
     else:
         mixed_audio_path = raw_vo_path

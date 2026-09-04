@@ -146,6 +146,11 @@ class Channel(Base):
     # thumbnail look (e.g. a specific character/composition) distinct from the
     # video's own body-image style. {"reference_image_path": str, "style_prompt": str}
     thumbnail_style = Column(JSON, nullable=True)
+    # Independent of whether any ChannelSoundEffect rows exist for this
+    # channel — a creator who doesn't like sound effects in their videos can
+    # turn this off without having to first delete every clip they uploaded
+    # (they might want to re-enable it later without re-uploading anything).
+    sfx_enabled = Column(Boolean, nullable=False, default=True)
 
     # Full-auto daily pipeline: "manual" (default, user submits each video)
     # or "auto" (Claude picks a fresh topic + writes the script itself once a
@@ -309,6 +314,7 @@ class Channel(Base):
             "music_preference": self.music_preference,
             "image_style": self.image_style,
             "thumbnail_style": self.thumbnail_style,
+            "sfx_enabled": self.sfx_enabled if self.sfx_enabled is not None else True,
             "effects_config": self.effects_config,
             "completion_percent": completion_percent,
             "is_render_ready": visuals_ready,
@@ -481,6 +487,12 @@ class Video(Base):
     audio_rights_confirmed = Column(Boolean, nullable=False, default=False)
     audio_source_type = Column(String(32), nullable=True)
     voice_id = Column(String(255), nullable=True)
+    # Only meaningful for input_type="facecam": path (under STORAGE_PATH) to
+    # the raw talking-head recording the creator uploaded, before any cut.
+    # The facecam pipeline (facecam_editor.py) reads from this file and never
+    # mutates it — every render re-derives from this same source to avoid
+    # generational quality loss across re-edits.
+    raw_asset_path = Column(String(512), nullable=True)
     # Set alongside is_reassembly=True + status=QUEUED by the Studio editor's
     # scene endpoints; tells the worker which lightweight edit function to run
     # instead of the full pipeline. JSON: {"type": "image"|"subtitle_text"|"audio",
@@ -992,6 +1004,38 @@ class CommunityLibraryImageTag(Base):
     filename = Column(String(512), nullable=False)
     tags_json = Column(Text, nullable=False)  # JSON list of lowercase English keywords
     analyzed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ChannelSoundEffect(Base):
+    """One creator-uploaded SFX clip (whoosh, ding, pop, etc.) available to
+    the sound-effect matching pass (see src/pipeline/sound_effects.py) for
+    this channel's videos. One row per file — not folded into a JSON blob
+    like Channel.music_preference's track list — so the matching prompt can
+    query effects (and their creator-given label, used for LLM matching)
+    independently of the rest of the channel's settings, the same way
+    CommunityLibraryImageTag keeps per-image data out of the folder row."""
+    __tablename__ = "channel_sound_effects"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel_id = Column(String(36), ForeignKey("channels.id"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)  # on disk under channels/{id}/sfx/
+    # Short creator-given description ("whoosh transition", "notification ding")
+    # — the only signal the LLM matching pass has to pick the right effect for
+    # a moment in the transcript, since there's no audio-content analysis here.
+    label = Column(String(200), nullable=False)
+    duration_seconds = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "channel_id": self.channel_id,
+            "filename": self.filename,
+            "label": self.label,
+            "duration_seconds": self.duration_seconds,
+            "url": f"channels/{self.channel_id}/sfx/{self.filename}",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 class CreditPot(Base):
