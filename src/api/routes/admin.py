@@ -1376,21 +1376,16 @@ def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin),
 
 
 # --- Global image-generation provider switches ------------------------------
-# Admin-controlled, no redeploy needed — lets the operator pick which
-# thumbnail image providers are used and in what priority order: Hugging
-# Face (free), fal.ai (paid, best fidelity to a reference image), Izivoice
-# (paid). A provider left out of the order is never called — including only
-# "huggingface" keeps thumbnails 100% free; adding fal/izivoice is an
-# explicit opt-in to spend money on them, in whichever order is chosen.
-
-THUMBNAIL_IMAGE_PROVIDERS = ["huggingface", "fal", "izivoice"]
+# Thumbnails use IziVoice GPT Image 2 exclusively; this remains separate
+# from provider choices for scene images and AI text.
+THUMBNAIL_IMAGE_PROVIDERS = ["izivoice"]
 
 
 @router.get("/settings/thumbnail-provider-mode")
 def get_thumbnail_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import thumbnail_provider_order
-    from src.config import FAL_API_KEY, IZIVOICE_API_KEY
-    configured = {"huggingface": True, "fal": bool(FAL_API_KEY), "izivoice": bool(IZIVOICE_API_KEY)}
+    from src.config import IZIVOICE_API_KEY
+    configured = {"izivoice": bool(IZIVOICE_API_KEY)}
     order = thumbnail_provider_order()
     return {"order": order, "available": THUMBNAIL_IMAGE_PROVIDERS, "configured": configured}
 

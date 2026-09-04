@@ -504,21 +504,12 @@ def generate_thumbnail_image(
     reference_image_paths: Optional[List[Path]] = None,
     provider_order: Optional[List[str]] = None,
 ) -> Path:
-    """Thumbnail-specific image generation, trying providers in
-    `provider_order` (admin-controlled — see src/utils/app_settings.py's
-    thumbnail_provider_order, set from the "Ressources" tab) and falling
-    through on any error — a missing/invalid key, an exhausted free quota, a
-    402/429, or anything else. Defaults to Hugging Face alone (free, no
-    provider left out generates any cost) if no order is given.
+    """Generate a thumbnail with IziVoice GPT Image 2 only.
 
-    Hugging Face's FLUX.1-schnell endpoint is text-to-image only, so it's
-    skipped whenever reference images are given to condition on — those
-    need fal.ai's gpt-image-2 (best fidelity to a reference) or Izivoice.
-    If every provider in the order is skipped or fails, raises — the caller
-    (youtube_metadata.py) then falls through to its own video-frame-grab
-    fallback, same as the per-scene body images already do, so a thumbnail
-    never silently costs money beyond what the admin explicitly opted into."""
-    order = [p for p in (provider_order or ["huggingface"]) if not (p == "huggingface" and reference_image_paths)]
+    The optional order remains for call-site compatibility, but it is
+    deliberately ignored: a thumbnail must never select another provider.
+    """
+    order = ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),
