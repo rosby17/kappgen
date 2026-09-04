@@ -82,7 +82,38 @@ def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
         db.close()
 
 
-IMAGE_SOURCE_PRIORITY = ["ai_generated", "library", "community"]
+IMAGE_SOURCE_PRIORITY = ["ai_generated", "library", "community", "google_search"]
+
+# Google's free Custom Search tier is a shared 100 queries/day across the
+# whole app, not per-channel or per-video — a single long video randomly
+# assigned "google_search" for dozens of scenes could burn most of that
+# quota by itself. Capped the same way AI generation already is (a bounded
+# original pool, cycled via expand_randomly for the rest of the video)
+# rather than one fresh query per scene.
+MAX_GOOGLE_IMAGES_PER_VIDEO = 8
+
+
+def fetch_google_images(queries: List[str]) -> List[Optional[Path]]:
+    """Real photos (brand logos, named tools, actual people/places) for
+    scenes that need something an AI generator is deliberately barred from
+    attempting (see TEXT_FREE_IMAGE_RULE) and that generic stock libraries
+    don't index. Reuses facecam_broll's Google Custom Search fetch (same
+    on-disk cache keyed by query, so an identical query across renders costs
+    nothing extra) rather than duplicating the API call here. Runs in
+    parallel like AI generation, for the same reason: each is an independent
+    network round-trip, and a video can need several."""
+    from src.pipeline.facecam_broll import fetch_google_image
+
+    results: List[Optional[Path]] = [None] * len(queries)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        future_to_index = {pool.submit(fetch_google_image, q): i for i, q in enumerate(queries)}
+        for future in future_to_index:
+            i = future_to_index[future]
+            try:
+                results[i] = future.result()
+            except Exception as e:
+                logger.warning(f"Google image search failed for scene {i}: {e}")
+    return results
 
 
 def resolve_enabled_image_sources(image_style: Optional[dict]) -> List[str]:
@@ -666,7 +697,17 @@ def fetch_or_generate_images(
                     if pos < len(ai_sequence):
                         results[i] = ai_sequence[pos]
 
-        # Everything not filled by AI (library/community-assigned scenes,
+        if "google_search" in enabled:
+            google_indices = [i for i, s in enumerate(assignment) if s == "google_search"]
+            if google_indices:
+                generation_count = min(len(google_indices), MAX_GOOGLE_IMAGES_PER_VIDEO, unique_generation_count or MAX_GOOGLE_IMAGES_PER_VIDEO)
+                google_originals = [p for p in fetch_google_images([prompts[i] for i in google_indices[:generation_count]]) if p]
+                google_sequence = expand_randomly(google_originals, len(google_indices))
+                for pos, i in enumerate(google_indices):
+                    if pos < len(google_sequence):
+                        results[i] = google_sequence[pos]
+
+        # Everything not filled by AI/Google (library/community-assigned scenes,
         # plus any scene where AI generation itself failed) is drawn from
         # one combined pool of whichever of library/community are enabled —
         # get_image_pool already merges and shuffles both together, with
@@ -705,6 +746,20 @@ def fetch_or_generate_images(
             f"AI visual budget: generated {len(originals)} original image(s), "
             f"reused them across {reused} later scene(s)."
         )
+        return sequence
+
+    if "google_search" in enabled:
+        # Same bounded-pool-then-cycle approach as the AI-only branch above,
+        # capped harder (see MAX_GOOGLE_IMAGES_PER_VIDEO) to protect the
+        # shared daily Custom Search quota. Any scene Google turns up nothing
+        # for falls back to synthetic placeholder art via get_image_pool,
+        # same as every other source's last resort.
+        generation_count = min(len(prompts), MAX_GOOGLE_IMAGES_PER_VIDEO, unique_generation_count or MAX_GOOGLE_IMAGES_PER_VIDEO)
+        originals = [p for p in fetch_google_images(prompts[:generation_count]) if p]
+        if not originals:
+            return get_image_pool(output_dir, len(prompts))
+        sequence = expand_randomly(originals, len(prompts))
+        logger.info(f"Google Image Search: found {len(originals)} real image(s), reused across {len(prompts)} scene(s).")
         return sequence
 
     # No AI: pull straight from whichever of library/community are enabled,
