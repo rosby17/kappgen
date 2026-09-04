@@ -49,14 +49,14 @@ Pourquoi pas une bascule complète (déjà débattu, tranché) :
 - Ajoute un second runtime de production (Node.js + npm + Chromium) à côté du Python existant, avec son propre cycle de dépendances et de bugs de compatibilité.
 - Miser tout le rendu vidéo sur un projet externe (roadmap HeyGen hors de notre contrôle) crée un point de défaillance unique, plutôt que d'en réduire un.
 
-Plan d'adoption incrémentale :
-- Utiliser HyperFrames **isolé**, uniquement pour produire des clips d'animation/titres courts (petits MP4/WebM transparents — kinetic type, titres qui apparaissent, lower-thirds), généré séparément puis superposé (overlay) sur la sortie du pipeline ffmpeg actuel via `image_overlays`/`overlay=` (mécanisme déjà existant dans `assembler.py`).
-- Skills HyperFrames pertinentes à exploiter plus tard : `/motion-graphics` (kinetic type courts), `/hyperframes-animation` + `/hyperframes-keyframes` (animations GSAP/CSS/WAAPI), `/media-use` (recoupe avec le chantier SFX/illustrations ci-dessus, à évaluer comme alternative à la solution maison une fois le premier jet en place).
-- Pas de migration des sous-titres/karaoké/mixage/stockage B2/miniatures — ça reste sur le pipeline actuel.
-- Si après quelques semaines l'usage isolé tient la route, migration progressive **chaîne par chaîne** envisageable, jamais d'un coup sur toute la production.
+Plan d'adoption incrémentale — fait, en réutilisant le pipeline facecam :
+- `facecam_cards.py` (détection de "beats" — statistique, transition de section — + rendu HyperFrames en `.mov` transparent) est réutilisé **tel quel**, aucune logique dupliquée. Rendu isolé, jamais une dépendance du rendu de base.
+- `assembler.py` : nouveau paramètre `motion_cards` (liste `{path, start, duration}`) — chaque carte devient sa propre entrée ffmpeg, incrustée sur la fenêtre `[start, start+duration)` via `overlay=enable='between(t,...)'`, intégrée dans le système `layer_order`/`STEP_FNS` existant juste au-dessus des sous-titres. Une chaîne sans carte (le cas par défaut) ne change rien au graphe de filtres.
+- `orchestrator.py` : `_resolve_motion_cards()` — **opt-in explicite** via `effects_config.motion_cards_enabled` (case à cocher "Titres animés — bêta" dans l'étape Effets), car ça ajoute un vrai coût de rendu (~15-25s par carte, Node/Chrome headless) que ce pipeline n'avait jamais eu. Ne lève jamais d'exception : HyperFrames indisponible = pas de cartes, jamais un rendu cassé.
+- Pas de migration des sous-titres/karaoké/mixage/stockage B2/miniatures — ça reste sur le pipeline ffmpeg actuel, exactement comme prévu.
 
 ### Statut
-SFX et illustrations réelles (Google Images) livrés et déployés. Motion design (HyperFrames en overlay isolé) pour ce pipeline sans visage : pas encore fait ici — mais déjà implémenté et fonctionnel dans le pipeline facecam ci-dessous (`facecam_cards.py`), qui sert maintenant de référence directe pour le porter ici.
+Les trois chantiers (SFX, illustrations réelles, motion design) sont livrés et déployés sur le pipeline principal (sans visage).
 
 ## Pipeline montage facecam (rushes humains) — construit, v1
 
