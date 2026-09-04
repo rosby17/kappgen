@@ -1099,7 +1099,15 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     # Face) or paid (2000 cr., see THUMBNAIL_CREDITS below): a creator was
     # able to regenerate the same video's thumbnail 7 times (14 000 cr.)
     # before this cap existed.
-    history_dir = video_path.parent / "thumbnail_history"
+    # Remote videos have no local output.mp4 path. Their thumbnails are kept
+    # in the channel's local storage directory, just like the background
+    # regeneration task below, so do not dereference video_path here.
+    thumbnail_dir = (
+        STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+        if is_remote
+        else video_path.parent
+    )
+    history_dir = thumbnail_dir / "thumbnail_history"
     past_regenerations = len(list(history_dir.glob("*.jpg"))) if history_dir.exists() else 0
     if past_regenerations >= MAX_THUMBNAIL_REGENERATIONS:
         raise HTTPException(
