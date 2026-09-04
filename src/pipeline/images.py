@@ -102,7 +102,11 @@ def fetch_google_images(queries: List[str]) -> List[Optional[Path]]:
     nothing extra) rather than duplicating the API call here. Runs in
     parallel like AI generation, for the same reason: each is an independent
     network round-trip, and a video can need several."""
-    from src.pipeline.facecam_broll import fetch_google_image
+    try:
+        from src.pipeline.facecam_broll import fetch_google_image
+    except ImportError:
+        logger.warning("Google image search unavailable (facecam_broll not deployed yet); scenes fall back to their other enabled sources.")
+        return [None] * len(queries)
 
     results: List[Optional[Path]] = [None] * len(queries)
     with ThreadPoolExecutor(max_workers=4) as pool:
