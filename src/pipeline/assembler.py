@@ -202,6 +202,7 @@ def assemble_final_video(
     scene_energy: Optional[List[float]] = None,
     editing_profile: Optional[Dict[str, Any]] = None,
     subtitles_preburned: bool = False,
+    motion_cards: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """
     Joins motion clips (crossfading between them when durations are known so
@@ -511,14 +512,27 @@ def assemble_final_video(
     if has_watermark:
         cmd.extend(["-i", str(WATERMARK_PATH.resolve())])
 
+    # Short transparent motion-graphic clips (title cards, stat callouts —
+    # see facecam_cards.py, the HyperFrames-rendered source of these), each
+    # shown only for its own [start, start+duration) window via ffmpeg's
+    # `enable='between(t,...)'` rather than for the whole video, unlike
+    # every other overlay input above.
+    motion_cards = motion_cards or []
+    for card in motion_cards:
+        cmd.extend(["-i", str(Path(card["path"]).resolve())])
+
     cmd.extend(["-i", str(audio_path.resolve())])
-    audio_input_index = (len(clip_paths) if use_xfade else 1) + len(image_overlays) + len(particle_layers) + (1 if has_watermark else 0)
+    audio_input_index = (
+        (len(clip_paths) if use_xfade else 1)
+        + len(image_overlays) + len(particle_layers) + (1 if has_watermark else 0) + len(motion_cards)
+    )
 
     filter_parts = [video_chain] if use_xfade else []
     base_label = "v_joined" if use_xfade else "0:v"
     overlay_base_index = len(clip_paths) if use_xfade else 1
     particles_base_index = overlay_base_index + len(image_overlays)
     watermark_index = particles_base_index + len(particle_layers)
+    motion_cards_base_index = watermark_index + (1 if has_watermark else 0)
 
     def _apply_effects_step():
         nonlocal base_label
@@ -608,18 +622,38 @@ def assemble_final_video(
             filter_parts.append(f"[{base_label}][wm]overlay=(W-w)/2:(H-h)/2[v_wm]")
             base_label = "v_wm"
 
+    def _apply_motion_cards_step():
+        nonlocal base_label
+        for i, card in enumerate(motion_cards):
+            idx = motion_cards_base_index + i
+            start = float(card["start"])
+            end = start + float(card["duration"])
+            card_label = f"card{i}"
+            out_label = f"v_card{i}"
+            # PTS-STARTPTS resets the card clip's own internal clock to 0,
+            # then the +start/TB offset shifts it to land at the right point
+            # on the MAIN timeline — without this every card would play
+            # starting from t=0 instead of at its cued moment.
+            filter_parts.append(f"[{idx}:v]setpts=PTS-STARTPTS+{start:.3f}/TB[{card_label}]")
+            filter_parts.append(f"[{base_label}][{card_label}]overlay=enable='between(t,{start:.3f},{end:.3f})'[{out_label}]")
+            base_label = out_label
+
     # Compositing order: creators can drag-reorder "Calques" (effets, sous-titres,
     # logo/incrustations, filigrane) in the pipeline wizard's preview — that
     # choice is persisted as effects_config.layer_order (the full 7-id wizard
     # list; only these 4 actually paint anything here, so it's filtered down to
     # them, keeping whatever relative order the creator chose). The default
-    # (['effects', 'subtitles', 'logo', 'watermark']) matches this function's
-    # original hardcoded order exactly, so a channel that never touched
-    # reordering renders pixel-identical to before this feature existed.
-    DEFAULT_LAYER_ORDER = ["effects", "subtitles", "logo", "watermark"]
+    # (['effects', 'subtitles', 'motion_cards', 'logo', 'watermark']) matches
+    # this function's original hardcoded order exactly for the first 4 (a
+    # channel that never touched reordering renders pixel-identical to before
+    # motion_cards existed, since that step is a no-op with nothing to draw),
+    # with the new step slotted in right above subtitles and below the
+    # always-on-top branding layers.
+    DEFAULT_LAYER_ORDER = ["effects", "subtitles", "motion_cards", "logo", "watermark"]
     STEP_FNS = {
         "effects": _apply_effects_step,
         "subtitles": _apply_subtitles_step,
+        "motion_cards": _apply_motion_cards_step,
         "logo": _apply_logo_step,
         "watermark": _apply_watermark_step,
     }

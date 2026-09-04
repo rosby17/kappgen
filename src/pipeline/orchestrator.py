@@ -108,6 +108,48 @@ def _resolve_sound_effect_clips(channel_id: Optional[str], words: list) -> list:
         return []
 
 
+def _resolve_motion_cards(channel_config: dict, words: list, output_dir: Path) -> list:
+    """Renders short animated title-card overlays (HyperFrames, see
+    facecam_cards.py — this reuses that module's beat detection and card
+    rendering verbatim, no facecam-specific logic in either) at moments the
+    transcript flags as a stat callout or a section transition.
+
+    Opt-in only (effects_config.motion_cards_enabled, default off): unlike
+    every other step in this pipeline, this one needs Node.js + headless
+    Chrome at render time and takes ~15-25s per card — a real cost this
+    pipeline never had before, so a channel must explicitly ask for it
+    rather than it silently making every render slower. Returns [] (never
+    raises) on any failure, same resilience contract as SFX/Google image
+    matching — a missing/broken HyperFrames install must never fail an
+    otherwise-fine render, just skip the decoration."""
+    effects_config = channel_config.get("effects_config") or {}
+    if not effects_config.get("motion_cards_enabled") or not words:
+        return []
+    try:
+        from src.pipeline import facecam_cards
+
+        beats = facecam_cards.detect_beats(words)
+        if not beats:
+            return []
+        templates = facecam_cards.select_card_templates(seed=str(channel_config.get("id") or ""), count=len(beats))
+        cards_dir = output_dir / "motion_cards"
+        cards_dir.mkdir(parents=True, exist_ok=True)
+        cards = []
+        for i, (beat, template) in enumerate(zip(beats, templates)):
+            card_path = cards_dir / f"card_{i}.mov"
+            try:
+                facecam_cards.render_card_clip(template, beat["text"], (1920, 1080), card_path)
+                cards.append({"path": card_path, "start": beat["time"], "duration": facecam_cards.CARD_DURATION_SECONDS})
+            except Exception as e:
+                logger.warning(f"Motion card render failed for beat at {beat['time']:.1f}s, skipping that one card: {e}")
+        if cards:
+            logger.info(f"Motion design: {len(cards)} title card(s) rendered via HyperFrames.")
+        return cards
+    except Exception as e:
+        logger.warning(f"Motion cards skipped due to an error (HyperFrames/Node likely unavailable): {e}")
+        return []
+
+
 def run_video_pipeline(
     channel_config: Dict[str, Any],
     script_text: str,
@@ -659,6 +701,7 @@ def run_video_pipeline(
     logger.info("Step 7/7: Assembling final 1080p MP4...")
     progress("Montage final", 90)
     final_output_path = output_dir / "output.mp4"
+    motion_cards = _resolve_motion_cards(channel_config, transcript_info.get("words") or [], source_dir)
     assemble_final_video(
         clip_paths=clip_paths,
         audio_path=mixed_audio_path,
@@ -671,6 +714,7 @@ def run_video_pipeline(
         scene_energy=scene_energy,
         editing_profile=editing_profile,
         subtitles_preburned=subtitles_enabled and not has_libass,
+        motion_cards=motion_cards,
     )
     
     logger.info(f"Pipeline successfully rendered video to {final_output_path}")
