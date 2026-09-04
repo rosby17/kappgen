@@ -831,7 +831,17 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
     # Usually already sitting on disk — generated right after the render
     # finished, alongside the title/description. Only regenerate here if
     # that earlier pass failed for some reason.
-    existing_thumbnail = output_mp4.with_name("thumbnail.jpg")
+    #
+    # Deliberately NOT output_mp4.with_name("thumbnail.jpg"): for a video
+    # whose render was moved to B2, output_mp4 here is a throwaway temp
+    # download (see _publish_video_background) materialized just for this
+    # upload — a sibling "thumbnail.jpg" in that temp dir never exists, which
+    # silently fell through to generating a brand-new AI thumbnail on every
+    # publish, ignoring whatever the creator actually saw (and possibly
+    # regenerated) on the video card. thumbnail.jpg always lives locally next
+    # to the video's real storage folder regardless of where output.mp4 itself
+    # ended up — same convention _ensure_local_thumbnail uses.
+    existing_thumbnail = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
     thumbnail_path = existing_thumbnail if existing_thumbnail.exists() else None
     if not thumbnail_path:
         try:
