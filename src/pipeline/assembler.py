@@ -376,9 +376,11 @@ def assemble_final_video(
     # Cap it to short/medium videos; long ones fall back to a plain hard-cut
     # concat, which streams clips sequentially instead of holding them all
     # open in memory at once.
-    # Keep smooth crossfades for normal long-form videos too; the old limit of
-    # 15 made anything beyond a few minutes fall back to abrupt concat cuts.
-    MAX_CLIPS_FOR_XFADE = 60
+    # 58 simultaneous 1080p inputs were enough to kill FFmpeg under the
+    # worker's 4 GiB container limit before it could emit an actual filter
+    # error. Keep dissolves for short videos, but protect long renders by
+    # streaming their clips through the concat demuxer instead.
+    MAX_CLIPS_FOR_XFADE = 20
     use_xfade = (
         clip_durations is not None
         and len(clip_durations) == len(clip_paths)
@@ -524,6 +526,10 @@ def assemble_final_video(
 
     cmd.extend([
         "-c:v", "libx264",
+        # xfade can negotiate yuv444p internally; force the widely supported
+        # 4:2:0 delivery format at the encoder boundary instead of producing
+        # a much heavier High 4:4:4 output.
+        "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
         # Capped average bitrate instead of plain CRF: CRF's output size is
         # content-dependent and unpredictable — the grain/noise overlay filter
