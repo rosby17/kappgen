@@ -85,15 +85,18 @@ def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
 IMAGE_SOURCE_PRIORITY = ["ai_generated", "library", "community", "google_search"]
 
 # Google's free Custom Search tier is a shared 100 queries/day across the
-# whole app, not per-channel or per-video — a single long video randomly
-# assigned "google_search" for dozens of scenes could burn most of that
-# quota by itself. Capped the same way AI generation already is (a bounded
-# original pool, cycled via expand_randomly for the rest of the video)
-# rather than one fresh query per scene.
-MAX_GOOGLE_IMAGES_PER_VIDEO = 8
-
-
-def fetch_google_images(queries: List[str]) -> List[Optional[Path]]:
+# whole app, not per-channel or per-video — but per product decision this
+# is never rationed by us with an arbitrary cap: a creator who wants Google
+# Image Search for every scene of a long video gets exactly that, same as
+# every other visual source (bounded only by the "Nombre de visuels"
+# image_style.max_unique_images setting, if they've set one — the same
+# source-agnostic control AI generation already uses). What's NOT free is
+# billed instead: each image actually used costs STOCK_MEDIA_CREDITS, same
+# as a Pexels stock photo/clip (see orchestrator.py's _bill_stock_asset) —
+# if Google's own daily quota is genuinely exhausted, fetch_google_image
+# already returns None on a 429 and that scene falls through to whatever
+# else is enabled, exactly like any other source running dry.
+def fetch_google_images(queries: List[str], user_id: Optional[str] = None) -> List[Optional[Path]]:
     """Real photos (brand logos, named tools, actual people/places) for
     scenes that need something an AI generator is deliberately barred from
     attempting (see TEXT_FREE_IMAGE_RULE) and that generic stock libraries
@@ -101,22 +104,40 @@ def fetch_google_images(queries: List[str]) -> List[Optional[Path]]:
     on-disk cache keyed by query, so an identical query across renders costs
     nothing extra) rather than duplicating the API call here. Runs in
     parallel like AI generation, for the same reason: each is an independent
-    network round-trip, and a video can need several."""
+    network round-trip, and a video can need several.
+
+    Bills STOCK_MEDIA_CREDITS per image actually fetched — a result dropped
+    for insufficient credit comes back as None here, same as a genuine fetch
+    failure, so the caller's normal fallback-to-next-source path handles it
+    without a separate branch."""
     try:
         from src.pipeline.facecam_broll import fetch_google_image
     except ImportError:
         logger.warning("Google image search unavailable (facecam_broll not deployed yet); scenes fall back to their other enabled sources.")
         return [None] * len(queries)
+    from src.utils.billing import debit_izivoice_usage_by_user_id, STOCK_MEDIA_CREDITS
+
+    def _bill() -> bool:
+        # Fails open (no user to bill is an edge case elsewhere in the
+        # pipeline too, not something this specific step should newly break on).
+        return debit_izivoice_usage_by_user_id(user_id, STOCK_MEDIA_CREDITS, "stock_media") if user_id else True
 
     results: List[Optional[Path]] = [None] * len(queries)
+    billed = 0
     with ThreadPoolExecutor(max_workers=4) as pool:
         future_to_index = {pool.submit(fetch_google_image, q): i for i, q in enumerate(queries)}
         for future in future_to_index:
             i = future_to_index[future]
             try:
-                results[i] = future.result()
+                image_path = future.result()
             except Exception as e:
                 logger.warning(f"Google image search failed for scene {i}: {e}")
+                continue
+            if image_path and _bill():
+                results[i] = image_path
+                billed += 1
+    if billed:
+        logger.info(f"Google Image Search: {billed} real image(s) used ({billed * STOCK_MEDIA_CREDITS} credits billed).")
     return results
 
 
@@ -704,8 +725,8 @@ def fetch_or_generate_images(
         if "google_search" in enabled:
             google_indices = [i for i, s in enumerate(assignment) if s == "google_search"]
             if google_indices:
-                generation_count = min(len(google_indices), MAX_GOOGLE_IMAGES_PER_VIDEO, unique_generation_count or MAX_GOOGLE_IMAGES_PER_VIDEO)
-                google_originals = [p for p in fetch_google_images([prompts[i] for i in google_indices[:generation_count]]) if p]
+                generation_count = min(len(google_indices), unique_generation_count or len(google_indices))
+                google_originals = [p for p in fetch_google_images([prompts[i] for i in google_indices[:generation_count]], user_id=user_id) if p]
                 google_sequence = expand_randomly(google_originals, len(google_indices))
                 for pos, i in enumerate(google_indices):
                     if pos < len(google_sequence):
@@ -753,13 +774,15 @@ def fetch_or_generate_images(
         return sequence
 
     if "google_search" in enabled:
-        # Same bounded-pool-then-cycle approach as the AI-only branch above,
-        # capped harder (see MAX_GOOGLE_IMAGES_PER_VIDEO) to protect the
-        # shared daily Custom Search quota. Any scene Google turns up nothing
-        # for falls back to synthetic placeholder art via get_image_pool,
-        # same as every other source's last resort.
-        generation_count = min(len(prompts), MAX_GOOGLE_IMAGES_PER_VIDEO, unique_generation_count or MAX_GOOGLE_IMAGES_PER_VIDEO)
-        originals = [p for p in fetch_google_images(prompts[:generation_count]) if p]
+        # Same bounded-pool-then-cycle approach as the AI-only branch above —
+        # no arbitrary cap beyond whatever "Nombre de visuels" the creator
+        # set (image_style.max_unique_images), since each image is billed
+        # per use (see fetch_google_images) rather than rationed by us. Any
+        # scene Google turns up nothing for falls back to synthetic
+        # placeholder art via get_image_pool, same as every other source's
+        # last resort.
+        generation_count = min(len(prompts), unique_generation_count or len(prompts))
+        originals = [p for p in fetch_google_images(prompts[:generation_count], user_id=user_id) if p]
         if not originals:
             return get_image_pool(output_dir, len(prompts))
         sequence = expand_randomly(originals, len(prompts))
