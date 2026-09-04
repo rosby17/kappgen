@@ -4,6 +4,10 @@ from typing import Optional, Dict, Any
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg, get_audio_duration
 
+# Keep this off globally until the advanced treatment chain has been rebuilt
+# and approved. It applies equally to legacy channel configurations.
+ADVANCED_STUDIO_MIX_ENABLED = False
+
 
 def _unit(value: Any, default: float) -> float:
     try:
@@ -13,7 +17,13 @@ def _unit(value: Any, default: float) -> float:
 
 
 def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict[str, Any]) -> str:
-    """Build functional server-side equivalents of a polished FL insert chain."""
+    """Build the safe baseline music/voice mix.
+
+    Advanced studio processing is intentionally suspended product-wide while
+    its sound quality is being reworked. Existing channels may still carry old
+    opt-in flags in their JSON configuration; never let those legacy values
+    alter a new render during the suspension.
+    """
     duration = max(0.1, duration)
     fade_in = min(max(0.0, float(settings.get("fade_in_seconds", 2.0))), duration / 2)
     fade_out = min(max(0.0, float(settings.get("fade_out_seconds", 3.0))), duration / 2)
@@ -21,7 +31,7 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
     # Only split the narration when sidechain ducking will consume the second
     # branch. FFmpeg rejects an unconnected asplit output when ducking is off.
     voice_input = "[0:a]highpass=f=70,loudnorm=I=-15:TP=-1.2:LRA=11"
-    ducking_enabled = settings.get("auto_ducking", True)
+    ducking_enabled = ADVANCED_STUDIO_MIX_ENABLED and bool(settings.get("auto_ducking", False))
     parts = [
         voice_input + (",asplit=2[voice_fx][voice_sc]" if ducking_enabled else "[voice_fx]"),
         f"[1:a]aloop=loop=-1:size=2e+09,atrim=duration={duration:.3f},asetpts=N/SR/TB,"
@@ -45,7 +55,7 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
     # Keep the music clean and process the voice before the final mix.
     current = "voice_fx"
 
-    if settings.get("soundgoodizer_enabled", False):
+    if ADVANCED_STUDIO_MIX_ENABLED and settings.get("soundgoodizer_enabled", False):
         amount = _unit(settings.get("soundgoodizer_amount"), 0.35)
         ratio = 2.0 + amount * 6.0
         makeup = 1.0 + amount * 0.55
@@ -57,7 +67,7 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
         )
         current = "voice_good"
 
-    if settings.get("maximus_enabled", True):
+    if ADVANCED_STUDIO_MIX_ENABLED and settings.get("maximus_enabled", False):
         amount = _unit(settings.get("maximus_amount"), 0.40)
         ratio = 2.0 + amount * 4.5
         parts.extend([
@@ -69,7 +79,7 @@ def build_studio_mix_filter(duration: float, music_volume: float, settings: Dict
         ])
         current = "voice_master"
 
-    if settings.get("reverb_enabled", False):
+    if ADVANCED_STUDIO_MIX_ENABLED and settings.get("reverb_enabled", False):
         amount = _unit(settings.get("reverb_amount"), 0.15)
         # Parallel reverb: the untouched narration remains at full level while
         # a filtered, quieter echo tail sits behind it. This avoids the hollow,
@@ -132,8 +142,8 @@ def mix_audio_tracks(
     ])
     logger.info(
         "Studio mix complete (music %.0f%%, ducking=%s, enhancer=%s, reverb=%s, multiband=%s) -> %s",
-        music_volume * 100, settings.get("auto_ducking", True),
-        settings.get("soundgoodizer_enabled", False), settings.get("reverb_enabled", False),
-        settings.get("maximus_enabled", True), output_audio_path,
+        music_volume * 100, ADVANCED_STUDIO_MIX_ENABLED and settings.get("auto_ducking", False),
+        ADVANCED_STUDIO_MIX_ENABLED and settings.get("soundgoodizer_enabled", False), ADVANCED_STUDIO_MIX_ENABLED and settings.get("reverb_enabled", False),
+        ADVANCED_STUDIO_MIX_ENABLED and settings.get("maximus_enabled", False), output_audio_path,
     )
     return output_audio_path
