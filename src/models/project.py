@@ -139,6 +139,13 @@ class EffectsConfig(BaseModel):
     grain_intensity: int = 50           # 0-100, scales the noise/grain amount
     vignette_intensity: int = 50        # 0-100, scales how dark the vignette edges get
     particle_intensity: int = 50        # 0-100, shared strength for atmospheric/particle effects
+    # Fine controls for the animated particle overlays. These live in the
+    # channel JSON config, so old channels keep their established result.
+    particle_density: int = 50          # 0-100, adds subtle foreground/depth layers
+    particle_size: int = 50             # 0-100, small/far to large/near particles
+    particle_speed: int = 50            # 0-100, calm drift to faster movement
+    particle_dispersion: int = 50       # 0-100, compact to wide distribution
+    particle_direction: str = "auto"    # auto | up | down | left | right
     zoom_min_pct: float = 1.0
     zoom_max_pct: float = 1.15
     watermark_enabled: bool = True       # large centered official logo at low opacity — free-tier default

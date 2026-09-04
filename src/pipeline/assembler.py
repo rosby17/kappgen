@@ -64,6 +64,45 @@ PARTICLE_ASSETS = {
     "sparks": PARTICLES_DIR / "sparks.mp4",
 }
 
+# Every layer is a looping video decoder. Cap the composition so a creator can
+# stack effects without recreating the memory pressure of a multi-input render.
+MAX_PARTICLE_LAYERS = 6
+
+
+def _bounded_number(value: Any, default: float, minimum: float, maximum: float) -> float:
+    """Read a creator setting safely, including configs saved by older clients."""
+    try:
+        return max(minimum, min(maximum, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_particle_layers(effects: Dict[str, Any], active_particles: List[str]) -> tuple:
+    """Build a restrained multi-depth particle composition.
+
+    Older configs default to a single layer per effect, preserving their visual
+    result. Extra, offset layers only begin above the density midpoint.
+    """
+    density = _bounded_number(effects.get("particle_density", 50), 50, 0, 100)
+    copies = 1 if density <= 50 else 2 if density <= 82 else 3
+    # Give each chosen effect its base layer first. Extra depth is then shared
+    # fairly, so enabling stars + dust + snow never makes the later selections
+    # disappear merely because an earlier effect consumed the layer budget.
+    layers = [{"id": particle_id, "depth": 0, "copies": copies} for particle_id in active_particles]
+    layers = layers[:MAX_PARTICLE_LAYERS]
+    for depth in range(1, copies):
+        for particle_id in active_particles:
+            if len(layers) >= MAX_PARTICLE_LAYERS:
+                actual_counts = {pid: sum(item["id"] == pid for item in layers) for pid in active_particles}
+                for item in layers:
+                    item["copies"] = actual_counts[item["id"]]
+                return layers, density
+            layers.append({"id": particle_id, "depth": depth, "copies": copies})
+    actual_counts = {pid: sum(item["id"] == pid for item in layers) for pid in active_particles}
+    for item in layers:
+        item["copies"] = actual_counts[item["id"]]
+    return layers, density
+
 # Gentle dissolves only — wipes/slides/circle-opens read as abrupt "cuts with
 # a gimmick" rather than a smooth blend between scenes.
 XFADE_TRANSITIONS = ["fade", "fadeblack", "dissolve"]
@@ -218,8 +257,15 @@ def assemble_final_video(
 
     grain_frac = max(0, min(100, effects.get("grain_intensity", 50))) / 100
     vignette_frac = max(0, min(100, effects.get("vignette_intensity", 50))) / 100
-    particle_frac = max(0, min(100, effects.get("particle_intensity", 50))) / 100
+    particle_frac = _bounded_number(effects.get("particle_intensity", 50), 50, 0, 100) / 100
     active_particles = [pid for pid in ("stars", "dust", "snow", "rain", "sparks") if pid in overlay_effects and PARTICLE_ASSETS[pid].exists()]
+    particle_layers, _particle_density = _build_particle_layers(effects, active_particles)
+    particle_size = _bounded_number(effects.get("particle_size", 50), 50, 0, 100)
+    particle_speed = _bounded_number(effects.get("particle_speed", 50), 50, 0, 100)
+    particle_dispersion = _bounded_number(effects.get("particle_dispersion", 50), 50, 0, 100)
+    particle_direction = effects.get("particle_direction", "auto")
+    if particle_direction not in {"auto", "up", "down", "left", "right"}:
+        particle_direction = "auto"
 
     # alls ranges chosen so 50% lands near the old fixed defaults (8 / 22)
     grain_alls = round(2 + grain_frac * 28)
@@ -429,34 +475,61 @@ def assemble_final_video(
 
     for ov in image_overlays:
         cmd.extend(["-i", str(ov["path"].resolve())])
-    for pid in active_particles:
+    for layer in particle_layers:
         # -stream_loop -1 repeats the (few-second) clip indefinitely; -shortest
         # on the final output mux is what actually stops it once the real
         # video/audio end, so it never has to be trimmed to an exact duration.
-        cmd.extend(["-stream_loop", "-1", "-i", str(PARTICLE_ASSETS[pid].resolve())])
+        cmd.extend(["-stream_loop", "-1", "-i", str(PARTICLE_ASSETS[layer["id"]].resolve())])
     if has_watermark:
         cmd.extend(["-i", str(WATERMARK_PATH.resolve())])
 
     cmd.extend(["-i", str(audio_path.resolve())])
-    audio_input_index = (len(clip_paths) if use_xfade else 1) + len(image_overlays) + len(active_particles) + (1 if has_watermark else 0)
+    audio_input_index = (len(clip_paths) if use_xfade else 1) + len(image_overlays) + len(particle_layers) + (1 if has_watermark else 0)
 
     filter_parts = [video_chain] if use_xfade else []
     base_label = "v_joined" if use_xfade else "0:v"
     overlay_base_index = len(clip_paths) if use_xfade else 1
     particles_base_index = overlay_base_index + len(image_overlays)
-    watermark_index = particles_base_index + len(active_particles)
+    watermark_index = particles_base_index + len(particle_layers)
 
     def _apply_effects_step():
         nonlocal base_label
         if effects_vf_string:
             filter_parts.append(f"[{base_label}]{effects_vf_string}[v_eff]")
             base_label = "v_eff"
-        for i, pid in enumerate(active_particles):
+        # Layered, slightly offset particle fields create a natural sense of
+        # depth instead of a single, obvious stock texture over the frame.
+        size_factor = 0.76 + (particle_size / 100) * 0.62
+        speed_factor = 0.55 + (particle_speed / 100) * 1.45
+        spread_factor = particle_dispersion / 100
+        direction_filter = {
+            "auto": "", "down": "", "up": ",vflip",
+            "left": ",transpose=1", "right": ",transpose=2",
+        }[particle_direction]
+        for i, layer in enumerate(particle_layers):
             idx = particles_base_index + i
             scaled_label = f"part{i}"
-            filter_parts.append(f"[{idx}:v]scale=1920:1080[{scaled_label}]")
+            depth = layer["depth"]
+            layer_scale = size_factor * (0.88 + depth * 0.16)
+            scaled_w = max(64, round(1920 * layer_scale))
+            scaled_h = max(64, round(1080 * layer_scale))
+            if layer_scale >= 1:
+                extra_x = max(0, scaled_w - 1920)
+                extra_y = max(0, scaled_h - 1080)
+                x = round(extra_x * ((depth + 1) / (layer["copies"] + 1)) * spread_factor)
+                y = round(extra_y * ((layer["copies"] - depth) / (layer["copies"] + 1)) * spread_factor)
+                framing = f"crop=1920:1080:{x}:{y}"
+            else:
+                framing = "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black"
+            filter_parts.append(
+                f"[{idx}:v]setpts=PTS/{speed_factor:.3f}{direction_filter},"
+                f"scale={scaled_w}:{scaled_h},{framing}[{scaled_label}]"
+            )
             out_label = f"v_part{i}"
-            filter_parts.append(f"[{base_label}][{scaled_label}]blend=all_mode=screen:all_opacity={particle_frac:.3f}[{out_label}]")
+            # One layer retains the previous strength. Added depth layers are
+            # attenuated so density adds atmosphere rather than a white veil.
+            layer_opacity = particle_frac / (1 if layer["copies"] == 1 else layer["copies"] ** 0.68)
+            filter_parts.append(f"[{base_label}][{scaled_label}]blend=all_mode=screen:all_opacity={layer_opacity:.3f}[{out_label}]")
             base_label = out_label
 
     def _apply_subtitles_step():
