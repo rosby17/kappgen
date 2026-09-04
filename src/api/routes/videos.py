@@ -448,7 +448,7 @@ def _video_cost_transactions(db: Session, video: Video, user_id: str):
 # A creator was able to regenerate the same video's AI thumbnail unlimited
 # times (one account ran up 7 regenerations, 14 000 cr., on a single video)
 # before this cap existed — see regenerate_video_thumbnail below.
-MAX_THUMBNAIL_REGENERATIONS = 3
+MAX_THUMBNAIL_REGENERATIONS = 5
 
 _CLIENT_COST_LABELS = [
     (re.compile(r"^ai_thumbnail_generation\b"), "Miniature générée par IA"),
