@@ -38,10 +38,17 @@ def to_ass_color(color: str, default: str = "&H00FFFFFF", opacity: float = 100) 
     format (starting with &H) pass through unchanged (opacity is ignored in
     that case — it's already baked into the AA byte).
     opacity is 0-100; ASS alpha is inverted (00 = opaque, FF = fully clear).
+    "transparent" (what the "Aucune couleur" picker sends) must resolve to
+    fully-clear here, not fall through to `default` — `default` is meant for
+    a genuinely missing/invalid value, but str "transparent" was landing on
+    that same branch and coming out as opaque black, so picking "Aucune" for
+    the subtitle outline silently kept rendering a solid black stroke.
     """
     if not color:
         return default
     color = color.strip()
+    if color.lower() == "transparent":
+        return "&HFF000000"
     if color.upper().startswith("&H"):
         return color
     if color.startswith("#"):
