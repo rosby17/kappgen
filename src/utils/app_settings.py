@@ -9,16 +9,17 @@ from typing import List, Optional
 from src.db.session import SessionLocal
 from src.db.models import AppSetting
 
-# Thumbnails default to Izivoice's GPT Image 2 (best style/character-reference
-# behavior admins are used to), with fal.ai's own GPT Image 2 as an actual
-# fallback now (see generate_thumbnail_image, images.py) rather than being
-# hardcoded to Izivoice alone regardless of this setting — Izivoice's account
-# hitting its own quota/auth issues used to mean a total thumbnail outage
-# with no way to fail over, even though the admin settings UI already
-# offered fal as a choice here. Scene images keep their own independent
-# source/provider policy.
+# Thumbnails: ai33.pro direct (bypasses Izivoice's own account/quota
+# entirely — same reasoning as voiceover_provider_order below), Izivoice,
+# and fal.ai's own GPT Image 2 all wrap the same underlying model, so this
+# is purely about which account's quota gets spent and which one to fail
+# over to (see generate_thumbnail_image, images.py) — it used to be
+# hardcoded to Izivoice alone regardless of this setting, which meant a
+# total thumbnail outage with no way to fail over the moment Izivoice's
+# account hit its own quota/auth issues. Scene images keep their own
+# independent source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
-THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal"]
+THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro"]
 THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 

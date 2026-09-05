@@ -6,7 +6,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS, AI33PRO_API_KEY
 from src.utils.logger import logger
 
 # Image models often invent misspelled copy when a scene mentions a concept,
@@ -408,6 +408,32 @@ def _generate_with_fal_gpt_image_2(prompt: str, output_path: Path, client: httpx
     return output_path
 
 
+def _generate_with_ai33pro_image(prompt: str, output_path: Path, client: httpx.Client, reference_image_paths: Optional[List[Path]] = None, api_key: Optional[str] = None) -> Path:
+    """Generates a thumbnail by calling ai33.pro directly instead of going
+    through Izivoice's wrapper (api.izivoice.app/api/images) — same upstream
+    model (gpt-image-2), same request shape, since Izivoice's route just
+    forwards this multipart body verbatim (see ai33_provider.submit_image_generation's
+    own docstring for the source reference). Bypasses Izivoice's own account
+    quota entirely, the same reasoning already applied to voiceover TTS/STT."""
+    from src.pipeline import ai33_provider
+    task_id = ai33_provider.submit_image_generation(
+        client, text_free_image_prompt(prompt), model_id=IZIVOICE_IMAGE_MODEL_ID,
+        reference_image_paths=reference_image_paths, api_key=api_key,
+    )
+    task = ai33_provider.poll_task(task_id, client, api_key=api_key)
+    result_images = (task.get("metadata") or {}).get("result_images") or []
+    if not result_images:
+        raise ValueError(f"ai33.pro image task {task_id} completed with no result_images: {task}")
+
+    image_url = result_images[0]["imageUrl"]
+    img_resp = client.get(image_url, timeout=60.0)
+    img_resp.raise_for_status()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(img_resp.content)
+    log_usage("ai33pro_image", "thumbnail", 1, "images", estimate_image_cost(1), meta={"model": IZIVOICE_IMAGE_MODEL_ID, "task_id": task_id})
+    return output_path
+
+
 def _provider_accounts_from_db(provider: str, env_fallback_keys: Optional[List[str]] = None) -> List[Any]:
     """Admin-managed key pool for one image-generation provider
     (src/api/routes/admin.py's image-provider-keys routes) — "huggingface",
@@ -552,22 +578,23 @@ def generate_thumbnail_image(
     reference_image_paths: Optional[List[Path]] = None,
     provider_order: Optional[List[str]] = None,
 ) -> Path:
-    """Generate a thumbnail via GPT Image 2 — Izivoice by default (matches
-    the existing style/character-reference behavior admins are used to), but
-    now actually honors an admin-configured provider_order (see
-    thumbnail_provider_order(), app_settings.py) instead of hardcoding
-    Izivoice as the only option. Falling through to fal.ai's own GPT Image 2
-    when Izivoice's account is down/rate-limited (both wrap the same
-    underlying model) is strictly more resilient than a total outage, and
-    the admin settings UI already offers fal as a choice here — it just
-    never actually took effect until now."""
-    order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface")] or ["izivoice"]
+    """Generate a thumbnail via GPT Image 2 — ai33.pro direct by default
+    (bypasses Izivoice's own account/quota entirely, same reasoning already
+    applied to voiceover TTS/STT — see ai33_provider.py), with Izivoice and
+    fal.ai as fallbacks (all three wrap the same underlying model, so quality
+    doesn't change, only which account's quota is spent). Now actually
+    honors an admin-configured provider_order (see thumbnail_provider_order(),
+    app_settings.py) instead of hardcoding a single provider — the admin
+    settings UI already offered fal as a choice here, it just never actually
+    took effect until this was wired up."""
+    order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface", "ai33pro")] or ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),
         "izivoice": lambda: _generate_with_key_pool("izivoice", IZIVOICE_API_KEY, lambda key: generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths, api_key=key)),
+        "ai33pro": lambda: _generate_with_key_pool("ai33pro", AI33PRO_API_KEY, lambda key: _generate_with_ai33pro_image(prompt, output_path, client, reference_image_paths=reference_image_paths, api_key=key)),
     }
-    labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice"}
+    labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice", "ai33pro": "ai33.pro (direct)"}
     last_exc: Optional[Exception] = None
     for name in order:
         try:

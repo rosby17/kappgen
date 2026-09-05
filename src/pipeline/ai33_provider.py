@@ -1,8 +1,9 @@
-"""Direct client for ai33.pro — the actual upstream TTS/STT/voice provider
-that Izivoice (a separate business, also owned by the operator) resells.
-KappGen's automated volume was consuming Izivoice's own account quota; this
-lets an admin route KappGen's calls straight to ai33.pro instead, via
-src/utils/app_settings.py's voiceover_provider_order().
+"""Direct client for ai33.pro — the actual upstream TTS/STT/voice/image
+provider that Izivoice (a separate business, also owned by the operator)
+resells. KappGen's automated volume was consuming Izivoice's own account
+quota; this lets an admin route KappGen's calls straight to ai33.pro
+instead, via src/utils/app_settings.py's voiceover_provider_order() (voice)
+and thumbnail_provider_order() (images).
 
 Protocol reverse-engineered from Izivoice's own source (which calls ai33.pro
 this same way for its own product) — see the "Connexion directe à ai33.pro"
@@ -12,15 +13,19 @@ bodies are FormData (not JSON), and the task-status path is singular
 `/v1/task/{id}` (not Izivoice's own `/tasks/{id}`).
 
 The task metadata shape once a job is "done" (`audio_url`, or `json_url`/
-`srt_url` for STT) is the same raw shape Izivoice's own UI reads directly off
-`task.metadata` — so voiceover.py's existing `_extract_words_from_stt_metadata`
-works unchanged against it, only the submission/polling transport differs.
+`srt_url` for STT, or `result_images` for image generation) is the same raw
+shape Izivoice's own UI reads directly off `task.metadata` — so voiceover.py's
+existing `_extract_words_from_stt_metadata` works unchanged against it, and
+image generation reads `metadata.result_images` the same way Izivoice's own
+public /api/images docs describe (docs/image-api.fr.md in the izivoice repo)
+— only the submission/polling transport differs.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -198,3 +203,65 @@ def await_stt_webhook_result(task_id: str, timeout: float = STT_WEBHOOK_WAIT_TIM
         time.sleep(interval)
         elapsed += interval
     raise TimeoutError(f"ai33.pro STT webhook for task {task_id} did not arrive within {timeout}s")
+
+
+def submit_image_generation(
+    client: httpx.Client,
+    prompt: str,
+    model_id: str = "gpt-image-2",
+    generations_count: int = 1,
+    model_parameters: Optional[Dict[str, Any]] = None,
+    reference_image_paths: Optional[List[Path]] = None,
+    api_key: Optional[str] = None,
+) -> str:
+    """POST /v1i/task/generate-image (FormData) — returns task_id. Poll with
+    poll_task(); a "done" task's metadata.result_images[0].imageUrl is the
+    generated image, same shape Izivoice's own public docs describe for its
+    /api/images wrapper around this exact endpoint (docs/image-api.fr.md,
+    izivoice repo — confirmed against src/app/api/images/generate/route.ts
+    there: same base path `/v1i/task/generate-image`, same `xi-api-key`
+    header, same field names, Izivoice just forwards the multipart body
+    verbatim).
+
+    Reference images ride in `assets`, referenced from the prompt via
+    `@img1`, `@img2`, ... in file order — required by ai33.pro's own
+    validation (Izivoice's route rejects a request whose @imgN references
+    don't exactly match the asset count), unlike Izivoice's own
+    best-effort `reference_images` field name used elsewhere in this
+    codebase's direct-Izivoice path (images.py's _submit_izivoice_image_task,
+    a guess since Izivoice doesn't publish that internal schema)."""
+    params = dict(model_parameters or {"aspect_ratio": "16:9", "resolution": "2K"})
+    existing_paths = [p for p in (reference_image_paths or []) if p.exists()][:10]
+    # ai33.pro (via Izivoice's own validation, which forwards these fields
+    # verbatim) rejects the request unless the prompt's @imgN references
+    # exactly match the asset count — append them rather than trust every
+    # caller to remember the exact token syntax.
+    final_prompt = prompt
+    if existing_paths and not any(f"@img{i + 1}" in prompt for i in range(len(existing_paths))):
+        refs = " ".join(f"@img{i + 1}" for i in range(len(existing_paths)))
+        final_prompt = f"{prompt}, using {refs} as style/character reference"
+    open_files = []
+    parts: List[tuple] = [
+        ("prompt", (None, final_prompt)),
+        ("model_id", (None, model_id)),
+        ("generations_count", (None, str(generations_count))),
+        ("model_parameters", (None, json.dumps(params))),
+    ]
+    try:
+        for path in existing_paths:
+            fh = open(path, "rb")
+            open_files.append(fh)
+            media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+            parts.append(("assets", (path.name, fh, media_type)))
+        resp = _post_with_retry(
+            client, f"{AI33PRO_BASE_URL}/v1i/task/generate-image",
+            headers=_headers(api_key), files=parts, timeout=30.0,
+        )
+    finally:
+        for fh in open_files:
+            fh.close()
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success") or not data.get("task_id"):
+        raise RuntimeError(f"Unexpected ai33.pro generate-image response: {data}")
+    return data["task_id"]

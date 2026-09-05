@@ -1381,9 +1381,12 @@ def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin),
 
 
 # --- Global image-generation provider switches ------------------------------
-# Thumbnails use IziVoice GPT Image 2 exclusively; this remains separate
-# from provider choices for scene images and AI text.
-THUMBNAIL_IMAGE_PROVIDERS = ["izivoice"]
+# Thumbnails use GPT Image 2 either via ai33.pro direct, Izivoice's wrapper
+# around the same model, or fal.ai's own hosted copy — this remains separate
+# from provider choices for scene images and AI text. Must stay in sync with
+# THUMBNAIL_PROVIDERS_ALL (app_settings.py), which the actual reader
+# (thumbnail_provider_order()) filters against.
+THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro"]
 
 
 @router.get("/settings/thumbnail-provider-mode")
