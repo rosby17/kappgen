@@ -132,6 +132,15 @@ def process_single_queued_video() -> bool:
         ready_for_render = or_(
             Video.is_reassembly.is_(True),
             Channel.automation_mode != "auto",
+            # Music channels (content_type == "music") never have a
+            # script_text at all — render_music_video works from
+            # music_channel_config directly (style prompt, image count,
+            # duration), skipping the script/voiceover pipeline entirely.
+            # Without this exemption, an auto-mode music channel's video
+            # never satisfied the script_text check below and stayed
+            # "queued" forever — no background script writer was ever
+            # going to fill in a field this content type doesn't use.
+            Channel.content_type == "music",
             and_(Video.script_text.is_not(None), Video.script_text != ""),
         )
         video = (
@@ -283,14 +292,21 @@ def process_single_queued_video() -> bool:
             video.status = VideoStatus.DONE.value
             video.is_reassembly = False
             video.finished_at = datetime.utcnow()
-            _finalize_output_storage(db, video, output_mp4)
             video.error_message = None
             video.progress_stage = "Vidéo prête"
             video.progress_percent = 100
             db.commit()
             logger.info(f"Worker successfully reassembled video ID: {video.id}")
+            # Must run BEFORE _finalize_output_storage: both read output_mp4
+            # from local disk, which that call uploads to B2 and deletes
+            # locally on success — reversing the order left every SD-variant
+            # pregeneration and thumbnail retry failing with "No such file or
+            # directory" against a file already moved to B2 (see queue_runner
+            # commit history, Sept 2026 B2 migration).
             try_ensure_sd_variant(output_mp4)
             await_parallel_thumbnail()
+            _finalize_output_storage(db, video, output_mp4)
+            db.commit()
             return True
 
         # Music Video channels (content_type == "music") skip the entire
@@ -340,14 +356,17 @@ def process_single_queued_video() -> bool:
 
             video.status = VideoStatus.DONE.value
             video.finished_at = datetime.utcnow()
-            _finalize_output_storage(db, video, output_mp4)
             video.error_message = None
             video.progress_stage = "Vidéo prête"
             video.progress_percent = 100
             db.commit()
             logger.info(f"Worker successfully finished rendering music video ID: {video.id}")
 
+            # Before _finalize_output_storage — see the reassembly branch
+            # above for why the order matters.
             await_parallel_thumbnail()
+            _finalize_output_storage(db, video, output_mp4)
+            db.commit()
 
             if channel.youtube_refresh_token:
                 if channel.publish_mode in ("auto", "scheduled"):
@@ -495,7 +514,6 @@ def process_single_queued_video() -> bool:
 
         video.status = VideoStatus.DONE.value
         video.finished_at = datetime.utcnow()
-        _finalize_output_storage(db, video, output_mp4)
         video.source_assets_path = str((video_dir / "source").relative_to(STORAGE_PATH) if STORAGE_PATH in (video_dir / "source").parents else (video_dir / "source"))
         video.error_message = None
         video.progress_stage = "Vidéo prête"
@@ -567,6 +585,14 @@ def process_single_queued_video() -> bool:
                 )
                 logger.warning(f"Post-render thumbnail retry failed for video {video.id}, leaving no thumbnail: {exc}")
             db.commit()
+
+        # Only now, after every step that reads output_mp4 from local disk
+        # (SD-variant pregeneration, the thumbnail frame-grab fallback above)
+        # — uploading to B2 and deleting the local copy any earlier left both
+        # of those failing with "No such file or directory" against a file
+        # that had already been moved (Sept 2026 B2 migration regression).
+        _finalize_output_storage(db, video, output_mp4)
+        db.commit()
 
         # A Trust Score is part of the finished video, not something the
         # creator has to remember to request. Run this final, post-render
