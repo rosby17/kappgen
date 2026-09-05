@@ -1813,12 +1813,13 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
     ]
     title = pick_music_video_title(style_prompt, music_config.get("title_examples"), recent_titles)
     target_duration_minutes = float(music_config.get("target_duration_minutes") or 10)
-    # The generator may create at most 20 tracks. Pre-authorize that maximum
-    # so a long music render can never exceed the creator's available balance.
-    can_render, reason = user_can_render(db, owner, IZIVOICE_MUSIC_CREDITS * 20)
-    if not can_render:
-        logger.info(f"Music video: channel {channel.id} ('{channel.name}') skipped — {reason}")
-        return None
+    # Imported music has no generation cost. Izivoice needs the conservative
+    # reserve because a compilation can contain several generated tracks.
+    if music_source_mode == "ai_generate":
+        can_render, reason = user_can_render(db, owner, IZIVOICE_MUSIC_CREDITS * 20)
+        if not can_render:
+            logger.info(f"Music video: channel {channel.id} ('{channel.name}') skipped — {reason}")
+            return None
 
     video = Video(
         channel_id=channel.id,
@@ -2103,16 +2104,9 @@ def run_daily_automation():
     """
     db = SessionLocal()
     try:
-        # content_type == "music" excluded: this loop only knows how to write
-        # a narration script (generate_and_queue_auto_video calls Claude with
-        # the channel's niche/script_structure, neither of which mean anything
-        # for a music channel) — daily automation for music channels is its
-        # own not-yet-built feature (Phase 5), not this loop silently
-        # mis-running them through the narration pipeline in the meantime.
         channels = db.query(Channel).filter(
             Channel.automation_mode == "auto",
             Channel.is_active.is_(True),
-            Channel.content_type != "music",
         ).all()
         for channel in channels:
             # Re-fetch this channel's current state right before using it —
@@ -2172,7 +2166,7 @@ def run_daily_automation():
                 continue
 
             try:
-                video = generate_and_queue_auto_video(db, channel)
+                video = generate_and_queue_music_video(db, channel) if channel.content_type == "music" else generate_and_queue_auto_video(db, channel)
             except Exception as exc:
                 # An unhandled exception here (e.g. a DB session error mid
                 # script-write) used to propagate straight out of this
@@ -2188,14 +2182,15 @@ def run_daily_automation():
                 # 19h on 2026-09-04 before this fix.
                 logger.warning(f"Daily automation: exception generating video for channel {channel.id} ('{channel.name}'): {exc}")
                 db.rollback()
-                db.query(Video).filter(
-                    Video.channel_id == channel.id,
-                    Video.status == VideoStatus.QUEUED.value,
-                    or_(Video.script_text.is_(None), Video.script_text == ""),
-                ).update(
-                    {"status": VideoStatus.FAILED.value, "error_message": "Génération automatique interrompue par une erreur inattendue."},
-                    synchronize_session=False,
-                )
+                if channel.content_type != "music":
+                    db.query(Video).filter(
+                        Video.channel_id == channel.id,
+                        Video.status == VideoStatus.QUEUED.value,
+                        or_(Video.script_text.is_(None), Video.script_text == ""),
+                    ).update(
+                        {"status": VideoStatus.FAILED.value, "error_message": "Génération automatique interrompue par une erreur inattendue."},
+                        synchronize_session=False,
+                    )
                 db.commit()
                 video = None
             if not video:

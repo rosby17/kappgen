@@ -24,7 +24,6 @@ from typing import List, Optional, Tuple
 
 from src.pipeline.clip_builder import build_image_clip
 from src.pipeline.music import generate_music_izivoice, _generate_synthetic_fallback_track
-from src.pipeline.ai_text import generate_text
 from src.utils.ffmpeg_runner import run_ffmpeg, get_audio_duration
 from src.utils.logger import logger
 from src.config import ASSETS_PATH, STORAGE_PATH
@@ -38,10 +37,11 @@ WATERMARK_PATH = ASSETS_PATH / "branding" / "watermark.png"
 
 
 def pick_music_video_title(style_prompt: str, title_examples: Optional[str], recent_titles: List[str]) -> str:
-    """Picks a title for a new music video — prefers the creator's own example
-    titles (rotating through them, skipping ones already used) since those
-    are exactly what the creator said they want, and only asks Claude to
-    invent a new one in that style when the example list runs out."""
+    """Pick a creator-provided title or a free, predictable fallback.
+
+    Automation must not depend on a paid text model. Examples rotate first;
+    otherwise the channel's own style becomes a readable series title.
+    """
     examples = [line.strip() for line in (title_examples or "").splitlines() if line.strip()]
     unused = [t for t in examples if t not in recent_titles]
     if unused:
@@ -50,15 +50,8 @@ def pick_music_video_title(style_prompt: str, title_examples: Optional[str], rec
         # Every example has been used at least once already — cycle back
         # rather than block production on Claude being available.
         return random.choice(examples)
-    try:
-        avoid = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet)"
-        instruction = f"""Invent ONE short, appealing YouTube title for a music video with this style: {style_prompt}
-Already-used titles on this channel (don't repeat): {avoid}
-Respond with ONLY the title text, nothing else."""
-        return generate_text(instruction, max_tokens=60, operation="music_video_title").strip().strip('"')
-    except Exception as e:
-        logger.warning(f"Music video title generation failed, using a generic fallback: {e}")
-        return "Musique originale"
+    style_label = " ".join((style_prompt or "Musique originale").split()[:7]).strip(" .,:;-")
+    return f"{style_label.title()} — Session {len(recent_titles) + 1}"[:100]
 
 
 def _generate_audio_track(style_prompt: str, index: int, output_dir: Path, user_id: str | None = None, video_id: str | None = None) -> Path:
