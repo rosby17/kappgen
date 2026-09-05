@@ -1141,22 +1141,30 @@ def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     except OSError:
         size_bytes = None
 
-    if size_bytes and b2_storage.should_upload_to_b2(db, size_bytes):
-        channel_name = video.channel.name if video.channel else None
-        channel_slug = b2_storage.slugify(channel_name)
-        channel_short = b2_storage.short_id(video.channel_id)
-        video_short = b2_storage.short_id(video.id)
-        object_key = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/output.mp4"
-        url = b2_storage.upload_video(output_mp4, object_key)
-        if url:
-            video.output_path = url
-            video.storage_backend = "b2"
-            video.output_size_bytes = size_bytes
-            try:
-                output_mp4.unlink()
-            except OSError:
-                pass
-            return
+    # The whole B2 attempt is best-effort: an unexpected exception here (not
+    # just upload_video returning falsy — a real bug once left a video
+    # "done" with output_path permanently None, since this function used to
+    # abort entirely instead of falling through to the local path below) must
+    # never prevent the local-path fallback from being set.
+    try:
+        if size_bytes and b2_storage.should_upload_to_b2(db, size_bytes):
+            channel_name = video.channel.name if video.channel else None
+            channel_slug = b2_storage.slugify(channel_name)
+            channel_short = b2_storage.short_id(video.channel_id)
+            video_short = b2_storage.short_id(video.id)
+            object_key = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/output.mp4"
+            url = b2_storage.upload_video(output_mp4, object_key)
+            if url:
+                video.output_path = url
+                video.storage_backend = "b2"
+                video.output_size_bytes = size_bytes
+                try:
+                    output_mp4.unlink()
+                except OSError:
+                    pass
+                return
+    except Exception as exc:
+        logger.warning(f"B2 upload attempt failed for video {video.id}, falling back to local storage: {exc}")
 
     video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
     video.storage_backend = "local"

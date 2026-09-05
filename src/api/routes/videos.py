@@ -647,6 +647,13 @@ _CLIENT_COST_LABELS = [
     (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de montage vidéo"),
     (re.compile(r"^Conservation vidéo\b"), "Conservation prolongée"),
 ]
+# A "Vidéo Musicale" channel has no voiceover/transcript/script step at all —
+# always-zero rows for those read as broken/opaque pricing rather than "not
+# used this time". Its own music-video-only categories are symmetrically
+# excluded from a narration channel's recap. Every other category (thumbnail,
+# AI music/background, stock illustration, montage fee, retention) is shared.
+_NARRATION_ONLY_LABELS = {"Voix off (synthèse vocale)", "Transcription (sous-titres)", "Script généré automatiquement"}
+_MUSIC_ONLY_LABELS = {"Génération de la vidéo musicale"}
 
 
 def _client_cost_label(description: str) -> str:
@@ -682,9 +689,11 @@ def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current
     # transcription, thumbnail, etc. Any label a description didn't match
     # (an unrecognized/legacy debit description) still appears too, appended
     # after the fixed categories in first-seen order.
-    all_labels = [label for _, label in _CLIENT_COST_LABELS]
+    is_music_channel = bool(video.channel and video.channel.content_type == "music")
+    excluded_labels = _NARRATION_ONLY_LABELS if is_music_channel else _MUSIC_ONLY_LABELS
+    all_labels = [label for _, label in _CLIENT_COST_LABELS if label not in excluded_labels]
     for label in grouped:
-        if label not in all_labels:
+        if label not in all_labels and label not in excluded_labels:
             all_labels.append(label)
     items = [
         {
