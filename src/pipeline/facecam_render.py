@@ -63,14 +63,44 @@ def card_image(path, text, size, settings):
     height = max(font_size * 2, len(lines) * round(font_size * 1.35)) + padding * 2
     left, top, right = round(w * .07), round(h * .13), round(w * .93)
     accent = settings["accent_color"]
-    bold = settings["card_style"] == "bold"
-    editorial = settings["card_style"] == "editorial"
+    # A library preset changes the card composition while the channel accent
+    # remains the visual cue that makes the creator's work recognisable.
+    preset = settings.get("editing_style", "kappgen")
+    treatments = {
+        "vox": ("paper", "editorial"), "kallaway": ("midnight", "bold"),
+        "keynote": ("clean", "minimal"), "atlas": ("documentary", "editorial"),
+        "terminal": ("terminal", "bold"), "data": ("data", "editorial"),
+        "optimist": ("optimist", "minimal"), "kappgen": ("kappgen", settings["card_style"]),
+    }
+    visual, card_treatment = treatments.get(preset, ("kappgen", settings["card_style"]))
+    surface = {
+        "paper": (239, 233, 220, 244), "midnight": (10, 14, 25, 240),
+        "clean": (244, 246, 250, 244), "documentary": (22, 19, 14, 244),
+        "terminal": (9, 23, 19, 244), "data": (241, 238, 230, 244),
+        "optimist": (248, 245, 239, 244), "kappgen": (12, 17, 25, 235),
+    }[visual]
+    dark_text = visual in {"paper", "clean", "data", "optimist"}
+    bold = card_treatment == "bold"
+    editorial = card_treatment == "editorial"
     draw.rounded_rectangle((left, top, right, top + height), radius=6 if editorial else 22,
-                           fill=accent if bold else (12, 17, 25, 235))
+                           fill=accent if bold else surface)
     if not bold:
         draw.rectangle((left, top, left + 5, top + height), fill=accent)
     draw.multiline_text((left + padding, top + padding), "\n".join(lines), font=font,
-                        fill="#071018" if bold else "white", spacing=round(font_size * .35))
+                        fill="#071018" if bold or dark_text else "white", spacing=round(font_size * .35))
+    template_labels = {
+        "split": "DÉMONSTRATION", "before-after": "AVANT / APRÈS",
+        "tutorial": "ÉTAPE CLÉ", "facecam": "",
+    }
+    label = template_labels.get(settings.get("format_template", "facecam"), "")
+    if label:
+        try:
+            badge_font = ImageFont.truetype(font_path, max(11, round(font_size * .28)))
+        except OSError:
+            badge_font = ImageFont.load_default(size=max(11, round(font_size * .28)))
+        badge_y = top - max(20, round(font_size * .52))
+        draw.rounded_rectangle((left, badge_y, left + draw.textlength(label, font=badge_font) + padding * 2, top - 5), radius=5, fill=accent)
+        draw.text((left + padding, badge_y + 4), label, font=badge_font, fill="#071018")
     image.save(path)
     return path
 

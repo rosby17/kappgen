@@ -29,6 +29,10 @@ class FacecamSettings(BaseModel):
     format: Literal["original", "vertical", "square", "landscape"] = "original"
     quality: Literal["draft", "master"] = "draft"
     card_style: Literal["minimal", "bold", "editorial"] = "minimal"
+    # The library preset records the editorial system chosen by the creator.
+    # `card_style` remains the renderer-compatible treatment for now.
+    editing_style: Literal["kappgen", "vox", "kallaway", "keynote", "atlas", "terminal", "data", "optimist"] = "kappgen"
+    format_template: Literal["facecam", "split", "before-after", "tutorial"] = "facecam"
     accent_color: str = Field(default="#00c2ff", pattern=r"^#[0-9a-fA-F]{6}$")
     font_family: Literal["DejaVu Sans", "Arial", "Inter", "Montserrat", "Roboto", "Poppins"] = "DejaVu Sans"
     caption_position: Literal["bottom", "center", "top"] = "bottom"

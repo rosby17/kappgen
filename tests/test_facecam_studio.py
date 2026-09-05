@@ -12,6 +12,9 @@ def test_settings_reject_invalid_color_and_format():
         project.FacecamSettings(accent_color='red;display:none')
     with pytest.raises(ValidationError):
         project.FacecamSettings(format='cinema')
+    assert project.FacecamSettings(editing_style='vox', format_template='tutorial').editing_style == 'vox'
+    with pytest.raises(ValidationError):
+        project.FacecamSettings(editing_style='unknown-style')
 
 
 def test_silence_plan_uses_full_source_duration():
