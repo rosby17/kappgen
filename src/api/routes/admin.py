@@ -1380,13 +1380,39 @@ def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin),
     return {"deleted": True}
 
 
+# --- Emergency kill switch: stop every paid API call platform-wide ---------
+# One flag (app_settings.py's paid_apis_disabled), checked from every
+# provider-order resolver in the codebase (ai_providers.py for text/vision,
+# voiceover.py, music.py, images.py's generate_thumbnail_image). For "I'm out
+# of credits on my personal Izivoice/Anthropic/ai33.pro/fal.ai/OpenAI
+# accounts, stop spending on all of them right now" — flip it off again once
+# those accounts are topped back up. Categories with a genuine free tier
+# (text/vision via Groq/Gemini, thumbnails via Hugging Face) keep working;
+# voice and music generation have no free alternative, so they simply pause.
+@router.get("/settings/paid-apis-kill-switch")
+def get_paid_apis_kill_switch(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import paid_apis_disabled
+    return {"disabled": paid_apis_disabled()}
+
+
+class PaidApisKillSwitchPayload(BaseModel):
+    disabled: bool
+
+
+@router.patch("/settings/paid-apis-kill-switch")
+def set_paid_apis_kill_switch(payload: PaidApisKillSwitchPayload, admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import set_paid_apis_disabled
+    set_paid_apis_disabled(payload.disabled)
+    return {"disabled": payload.disabled}
+
+
 # --- Global image-generation provider switches ------------------------------
 # Thumbnails use GPT Image 2 either via ai33.pro direct, Izivoice's wrapper
 # around the same model, or fal.ai's own hosted copy — this remains separate
 # from provider choices for scene images and AI text. Must stay in sync with
 # THUMBNAIL_PROVIDERS_ALL (app_settings.py), which the actual reader
 # (thumbnail_provider_order()) filters against.
-THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro"]
+THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "huggingface"]
 
 
 @router.get("/settings/thumbnail-provider-mode")

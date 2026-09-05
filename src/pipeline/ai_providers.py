@@ -36,8 +36,20 @@ _BY_ID = {p["id"]: p for p in PROVIDERS}
 def ids_for(capability: str) -> List[str]:
     """Every registered provider able to serve this kind of call, in default
     order. A provider missing the capability is skipped rather than occupying
-    a slot in the chain (DeepSeek has no image input, for instance)."""
-    return [p["id"] for p in PROVIDERS if capability in p["capabilities"]]
+    a slot in the chain (DeepSeek has no image input, for instance).
+
+    When the admin's emergency kill switch is on (app_settings.py's
+    paid_apis_disabled — "stop everything that spends money right now"),
+    every provider not in AI_TEXT_FREE_PROVIDERS is dropped here rather than
+    in ordered_ids()'s own ranking logic, since that function always appends
+    every capable-but-unranked provider behind the ranked ones — an order
+    list alone can reorder the chain but never actually remove a provider
+    from it. This is the one place that can."""
+    capable = [p["id"] for p in PROVIDERS if capability in p["capabilities"]]
+    from src.utils.app_settings import paid_apis_disabled, AI_TEXT_FREE_PROVIDERS
+    if paid_apis_disabled():
+        return [pid for pid in capable if pid in AI_TEXT_FREE_PROVIDERS]
+    return capable
 
 
 def is_configured(provider_id: str) -> bool:

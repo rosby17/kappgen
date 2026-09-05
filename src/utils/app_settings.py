@@ -9,6 +9,27 @@ from typing import List, Optional
 from src.db.session import SessionLocal
 from src.db.models import AppSetting
 
+# Emergency kill switch: one flag, checked from every provider-order resolver
+# in the codebase (ai_providers.py for text/vision, voiceover.py, music.py,
+# images.py's generate_thumbnail_image) — when on, each of those drops every
+# provider not explicitly marked free (see each call site's own "free" set)
+# from its candidate list, so a personal account running out of credits
+# (Izivoice, Claude/Anthropic, ai33.pro, fal.ai, OpenAI...) can't keep
+# getting billed by KappGen's automated renders while the operator tops it
+# back up. Categories with no free alternative (voice, music) simply stop
+# generating rather than degrade to something free-but-wrong — silently
+# spending money nobody currently has is worse than a paused feature.
+PAID_APIS_DISABLED_KEY = "paid_apis_disabled"
+
+
+def paid_apis_disabled() -> bool:
+    return get_setting(PAID_APIS_DISABLED_KEY, "false") == "true"
+
+
+def set_paid_apis_disabled(disabled: bool) -> None:
+    set_setting(PAID_APIS_DISABLED_KEY, "true" if disabled else "false")
+
+
 # Thumbnails: ai33.pro direct (bypasses Izivoice's own account/quota
 # entirely — same reasoning as voiceover_provider_order below), Izivoice,
 # and fal.ai's own GPT Image 2 all wrap the same underlying model, so this
@@ -19,8 +40,15 @@ from src.db.models import AppSetting
 # account hit its own quota/auth issues. Scene images keep their own
 # independent source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
-THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro"]
+THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro", "huggingface"]
 THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
+# The only genuinely free option here — same FLUX.1-schnell free tier the
+# scene-image generator already defaults to. Forced into the order (even if
+# the admin never explicitly enabled it) when paid_apis_disabled() is on, so
+# the kill switch degrades to "still generates something" rather than
+# "thumbnails stop working entirely" for a channel that had never touched
+# this setting.
+THUMBNAIL_FREE_PROVIDERS = {"huggingface"}
 
 
 def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -48,12 +76,17 @@ def set_setting(key: str, value: str) -> None:
 def thumbnail_provider_order() -> List[str]:
     raw = get_setting(THUMBNAIL_PROVIDER_ORDER_KEY, None)
     if raw is None:
-        return list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
-    try:
-        order = json.loads(raw)
-        return [p for p in order if p in THUMBNAIL_PROVIDERS_ALL] if isinstance(order, list) else list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
-    except (ValueError, TypeError):
-        return list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+        order = list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+    else:
+        try:
+            parsed = json.loads(raw)
+            order = [p for p in parsed if p in THUMBNAIL_PROVIDERS_ALL] if isinstance(parsed, list) else list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+        except (ValueError, TypeError):
+            order = list(THUMBNAIL_PROVIDER_ORDER_DEFAULT)
+    if paid_apis_disabled():
+        free_only = [p for p in order if p in THUMBNAIL_FREE_PROVIDERS]
+        return free_only or ["huggingface"]
+    return order
 
 
 def set_thumbnail_provider_order(order: List[str]) -> None:
@@ -68,6 +101,18 @@ def set_thumbnail_provider_order(order: List[str]) -> None:
 # providers to the front, e.g. move off Claude the instant its balance runs
 # low, without a redeploy. Set from the "Ressources" tab.
 AI_TEXT_PROVIDER_ORDER_KEY = "ai_text_provider_order"
+
+
+# Groq and Gemini are the only text/vision providers with a real free tier
+# this codebase relies on (see ai_text.py's generate_text docstring: "Groq's
+# free tier", "Gemini before any paid provider") — Anthropic, DeepSeek, fal.ai
+# and OpenAI are all pay-per-token. The actual enforcement point is
+# ai_providers.py's ids_for() (the single choke point every text AND vision
+# call in the app goes through) rather than here, since ordered_ids() always
+# appends every capable-but-unranked provider behind the ranked ones — this
+# order list alone can only reorder, never actually remove a provider from
+# the chain.
+AI_TEXT_FREE_PROVIDERS = {"groq", "gemini"}
 
 
 def ai_text_provider_order() -> List[str]:
@@ -100,6 +145,11 @@ VOICEOVER_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 
 def voiceover_provider_order() -> List[str]:
+    if paid_apis_disabled():
+        # Both izivoice and ai33pro are paid — no free voice provider exists
+        # in this codebase, so the kill switch means voice generation simply
+        # stops rather than degrading to something free-but-wrong.
+        return []
     raw = get_setting(VOICEOVER_PROVIDER_ORDER_KEY, None)
     if raw is None:
         return list(VOICEOVER_PROVIDER_ORDER_DEFAULT)
@@ -124,6 +174,12 @@ MUSIC_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 
 def music_provider_order() -> List[str]:
+    if paid_apis_disabled():
+        # Both izivoice and ai33pro are paid — no free music provider exists,
+        # so the kill switch means music generation simply stops (the
+        # existing synthetic-drone fallback still kicks in downstream, same
+        # as any other total-failure case — see _generate_synthetic_fallback_track).
+        return []
     raw = get_setting(MUSIC_PROVIDER_ORDER_KEY, None)
     if raw is None:
         return list(MUSIC_PROVIDER_ORDER_DEFAULT)
