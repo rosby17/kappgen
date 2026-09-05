@@ -84,7 +84,11 @@ def set_ai_text_provider_order(order: List[str]) -> None:
 # a second provider (e.g. ElevenLabs) can be added later without changing the
 # admin UI's shape, just this list.
 VOICEOVER_PROVIDER_ORDER_KEY = "voiceover_provider_order"
-VOICEOVER_PROVIDERS_ALL = ["izivoice"]
+# "ai33pro" is the direct upstream provider Izivoice itself resells (see
+# src/pipeline/ai33_provider.py) — added so KappGen's own automated volume
+# can stop consuming Izivoice's separate business account. Default order is
+# unchanged (izivoice first) so this is opt-in only, from the admin UI.
+VOICEOVER_PROVIDERS_ALL = ["izivoice", "ai33pro"]
 VOICEOVER_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 

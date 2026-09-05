@@ -1118,3 +1118,21 @@ class ApiCreditTransaction(Base):
     description = Column(Text, nullable=True)
     request_id = Column(String(80), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Ai33TaskResult(Base):
+    """Landing spot for ai33.pro's speech-to-text webhook (see
+    src/api/routes/webhooks.py + src/pipeline/ai33_provider.py::transcribe_ai33).
+
+    ai33.pro's webhook carries no signature — anyone could POST a payload for
+    an arbitrary task_id. The mitigation isn't verifying the write (nothing
+    to verify against), it's that a row is only ever meaningful to the one
+    caller actively polling this table for the exact task_id it itself
+    submitted moments earlier; an unsolicited row for an unknown task_id is
+    simply never read by anything. Rows are transient — cleaned up by
+    queue_runner.py's existing purge sweep alongside old videos/uploads."""
+    __tablename__ = "ai33_task_results"
+    task_id = Column(String(64), primary_key=True)
+    status = Column(String(30), nullable=False)
+    payload = Column(JSON, nullable=False)
+    received_at = Column(DateTime, default=datetime.utcnow, index=True)

@@ -53,6 +53,16 @@ B2_FREE_TIER_CAP_BYTES = int(os.getenv("B2_FREE_TIER_CAP_BYTES", "0"))
 IZIVOICE_API_KEY = os.getenv("IZIVOICE_API_KEY", "")
 IZIVOICE_BASE_URL = os.getenv("IZIVOICE_BASE_URL", "https://api.izivoice.app/api")
 IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked from GET /voices if empty
+# Direct connection to ai33.pro — the actual upstream provider Izivoice itself
+# resells — so KappGen's own automated volume stops consuming Izivoice's
+# separate business account. Different protocol from Izivoice's own wrapper:
+# `xi-api-key` header (not `Authorization: Bearer`), FormData bodies, and
+# singular `/v1/task/{id}` (not Izivoice's own `/tasks/{id}`) — see
+# src/pipeline/ai33_provider.py. Admin picks which provider is actually used
+# per src/utils/app_settings.py's voiceover_provider_order(); this being set
+# only makes ai33pro selectable, it does not switch anything by itself.
+AI33PRO_API_KEY = os.getenv("AI33PRO_API_KEY", "")
+AI33PRO_BASE_URL = os.getenv("AI33PRO_BASE_URL", "https://api.ai33.pro")
 # Product policy: video renders are sequential FIFO. Only an explicit admin
 # override may move a video ahead of older work; a creator's plan never changes
 # the order. Kept as a compatibility constant for older deployment configuration,

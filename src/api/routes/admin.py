@@ -1413,18 +1413,20 @@ def set_thumbnail_provider_mode(payload: ThumbnailProviderOrderPayload, admin: U
 
 
 # --- Voiceover/TTS provider switch -------------------------------------
-# Same order-picker structure as thumbnails above — only "izivoice" exists
-# today (one shared key, not a pool), but this leaves room to add another
-# TTS provider (e.g. ElevenLabs) later without changing the admin UI's shape.
+# Same order-picker structure as thumbnails above. "ai33pro" is the direct
+# upstream provider Izivoice (a separate business, also operator-owned)
+# itself resells — added so KappGen's own automated volume can be routed
+# straight to ai33.pro instead of consuming Izivoice's account quota. See
+# src/pipeline/ai33_provider.py.
 
-VOICEOVER_PROVIDERS = ["izivoice"]
+VOICEOVER_PROVIDERS = ["izivoice", "ai33pro"]
 
 
 @router.get("/settings/voiceover-provider-mode")
 def get_voiceover_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import voiceover_provider_order
-    from src.config import IZIVOICE_API_KEY
-    configured = {"izivoice": bool(IZIVOICE_API_KEY)}
+    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY
+    configured = {"izivoice": bool(IZIVOICE_API_KEY), "ai33pro": bool(AI33PRO_API_KEY)}
     order = voiceover_provider_order()
     return {"order": order, "available": VOICEOVER_PROVIDERS, "configured": configured}
 

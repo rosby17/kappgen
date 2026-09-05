@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 import httpx
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS, AI33PRO_API_KEY
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 from src.utils.cost_tracking import log_usage, estimate_izivoice_tts_cost, estimate_izivoice_stt_cost
@@ -58,6 +58,17 @@ def synthetic_word_timings(text: str, duration: float) -> List[Dict[str, Any]]:
 
 def _izivoice_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     return {"Authorization": f"Bearer {api_key or IZIVOICE_API_KEY}"}
+
+
+def _configured_providers() -> List[str]:
+    """Admin-ordered voiceover providers (src/utils/app_settings.py), filtered
+    to whichever actually have a key configured. "ai33pro" is ai33.pro
+    directly (src/pipeline/ai33_provider.py) — the upstream provider Izivoice
+    itself resells; opt-in only, default order is unchanged ("izivoice")."""
+    from src.utils.app_settings import voiceover_provider_order
+    keys = {"izivoice": IZIVOICE_API_KEY, "ai33pro": AI33PRO_API_KEY}
+    providers = [p for p in voiceover_provider_order() if keys.get(p)]
+    return providers or (["izivoice"] if IZIVOICE_API_KEY else [])
 
 
 def _post_with_retry(client: httpx.Client, url: str, max_retries: int = 5, **kwargs) -> httpx.Response:
@@ -291,11 +302,12 @@ def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
     return sorted(chunk_dir.glob("chunk_*.mp3"))
 
 
-def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None, provider: str = "izivoice") -> Dict[str, Any]:
     """
-    Transcribes an audio file via Izivoice's speech-to-text, chunking long files
-    (10min+/3h videos) to stay under the API's per-request size limit, and stitching
-    word-level timing back together with per-chunk offsets.
+    Transcribes an audio file via speech-to-text (Izivoice, or ai33.pro direct
+    when provider="ai33pro" — src/pipeline/ai33_provider.py), chunking long
+    files (10min+/3h videos) to stay under the API's per-request size limit,
+    and stitching word-level timing back together with per-chunk offsets.
     """
     total_duration = get_audio_duration(audio_path)
     if user_id:
@@ -336,20 +348,26 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
                 try:
-                    with _izivoice_semaphore:
-                        with open(chunk_path, "rb") as f:
-                            resp = _post_with_retry(
-                                client,
-                                f"{IZIVOICE_BASE_URL}/speech-to-text",
-                                headers=_izivoice_headers(api_key),
-                                files={"file": (chunk_path.name, f, "audio/mpeg")},
-                                timeout=60.0
-                            )
-                        resp.raise_for_status()
-                        task_id = resp.json()["task_id"]
-                        task = _poll_task(task_id, client, api_key)
-                        metadata = task.get("metadata", {}) or {}
-                        chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
+                    if provider == "ai33pro":
+                        from src.pipeline import ai33_provider
+                        with _izivoice_semaphore:
+                            task_id = ai33_provider.submit_stt_with_webhook(client, chunk_path, api_key)
+                            metadata = ai33_provider.await_stt_webhook_result(task_id)
+                    else:
+                        with _izivoice_semaphore:
+                            with open(chunk_path, "rb") as f:
+                                resp = _post_with_retry(
+                                    client,
+                                    f"{IZIVOICE_BASE_URL}/speech-to-text",
+                                    headers=_izivoice_headers(api_key),
+                                    files={"file": (chunk_path.name, f, "audio/mpeg")},
+                                    timeout=60.0
+                                )
+                            resp.raise_for_status()
+                            task_id = resp.json()["task_id"]
+                            task = _poll_task(task_id, client, api_key)
+                            metadata = task.get("metadata", {}) or {}
+                    chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
                 except Exception as chunk_err:
                     # One chunk failing (Izivoice has returned 500s on some
                     # requests) must not throw away transcript already
@@ -431,12 +449,12 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     if not all_words:
         all_words = synthetic_word_timings(full_text, total_duration)
 
-    log_usage("izivoice_stt", "transcription", total_duration, "seconds", estimate_izivoice_stt_cost(total_duration), user_id=user_id)
+    log_usage(f"{provider}_stt", "transcription", total_duration, "seconds", estimate_izivoice_stt_cost(total_duration), user_id=user_id)
     return {
         "text": full_text,
         "duration": total_duration,
         "words": all_words,
-        "transcription_source": "izivoice",
+        "transcription_source": provider,
         "transcription_partial": bool(failed_chunks),
     }
 
@@ -444,11 +462,15 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
 def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Public entrypoint used by the orchestrator for pre-recorded/uploaded audio:
-    real transcription via Izivoice speech-to-text when configured, else a
-    synthetic even-split alignment over the fallback title/text.
+    real transcription via the admin-ordered voiceover provider (Izivoice,
+    and/or ai33.pro direct) when configured, falling through to the next one
+    on failure, else a synthetic even-split alignment over the fallback
+    title/text. An explicit `api_key` (BYOK) always means Izivoice
+    specifically, same as generate_voiceover.
     """
-    if not (api_key or IZIVOICE_API_KEY):
-        logger.info("IZIVOICE_API_KEY not set. Using synthetic subtitle timing for uploaded audio.")
+    providers = ["izivoice"] if api_key else _configured_providers()
+    if not providers:
+        logger.info("No voiceover provider configured. Using synthetic subtitle timing for uploaded audio.")
         duration = get_audio_duration(audio_path)
         return {
             "text": fallback_text or "Audio préenregistré",
@@ -457,17 +479,85 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
             "transcription_source": "fallback",
         }
 
-    try:
-        return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=api_key, user_id=user_id, video_id=video_id)
-    except Exception as e:
-        logger.warning(f"Izivoice speech-to-text failed ({e}). Falling back to synthetic subtitle timing.")
-        duration = get_audio_duration(audio_path)
-        return {
-            "text": fallback_text or "Audio préenregistré",
-            "duration": duration,
-            "words": synthetic_word_timings(fallback_text or "Audio préenregistré", duration),
-            "transcription_source": "fallback",
-        }
+    last_error: Optional[Exception] = None
+    for provider in providers:
+        effective_key = api_key or (AI33PRO_API_KEY if provider == "ai33pro" else IZIVOICE_API_KEY)
+        try:
+            return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider)
+        except Exception as e:
+            last_error = e
+            logger.warning(f"{provider} speech-to-text failed ({e}); trying next configured provider if any.")
+            continue
+
+    logger.warning(f"Speech-to-text failed on every configured provider ({last_error}). Falling back to synthetic subtitle timing.")
+    duration = get_audio_duration(audio_path)
+    return {
+        "text": fallback_text or "Audio préenregistré",
+        "duration": duration,
+        "words": synthetic_word_timings(fallback_text or "Audio préenregistré", duration),
+        "transcription_source": "fallback",
+    }
+
+
+def _tts_via_izivoice(client: httpx.Client, script_text: str, voice_id: Optional[str], voice_settings: Optional[Dict[str, Any]], api_key: str) -> Tuple[str, str]:
+    """Returns (voice_id_used, audio_url)."""
+    voice_id = voice_id or _get_default_voice_id(client, api_key)
+    logger.info("Requesting voiceover from Izivoice /text-to-speech...")
+    with _izivoice_semaphore:
+        resp = _post_with_retry(
+            client,
+            f"{IZIVOICE_BASE_URL}/text-to-speech",
+            headers=_izivoice_headers(api_key),
+            # Izivoice's /text-to-speech now requires a JSON body — sending
+            # this as form-urlencoded (the old `data=` kwarg) gets rejected
+            # with a generic 400 "Requête invalide" regardless of the
+            # voice_id or fields used (confirmed by reproducing the same
+            # 400 with a guaranteed-valid voice_id and minimal fields, then
+            # getting 200 by switching only the transport to `json=`).
+            json={
+                "text": script_text,
+                "voice_id": voice_id,
+                "speed": (voice_settings or {}).get("speed", 0.845),
+                "with_transcript": False,
+                "stability": (voice_settings or {}).get("stability", 0.8),
+                "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
+                "style": (voice_settings or {}).get("style", 0.0),
+                # Izivoice's own studio always sends these three on every
+                # generation (confirmed by reading its deployed client
+                # bundle) — pitch/volume neutral, and use_speaker_boost
+                # true. We were silently omitting all three, which can
+                # make Izivoice fall back to different server-side
+                # defaults (notably speaker boost off) and produce an
+                # audibly thinner/less faithful clone than what the same
+                # voice sounds like in Izivoice's own app.
+                "pitch": (voice_settings or {}).get("pitch", 0),
+                "volume": (voice_settings or {}).get("volume", 1),
+                "use_speaker_boost": (voice_settings or {}).get("use_speaker_boost", True),
+            },
+            timeout=30.0
+        )
+        resp.raise_for_status()
+        task_id = resp.json()["task_id"]
+        task = _poll_task(task_id, client, api_key)
+    audio_url = (task.get("metadata") or {}).get("audio_url")
+    if not audio_url:
+        raise ValueError(f"Unexpected Izivoice text-to-speech response: {task}")
+    return voice_id, audio_url
+
+
+def _tts_via_ai33(client: httpx.Client, script_text: str, voice_id: Optional[str], voice_settings: Optional[Dict[str, Any]], api_key: str) -> Tuple[str, str]:
+    """Returns (voice_id_used, audio_url) — same shape as _tts_via_izivoice,
+    ai33.pro directly (see src/pipeline/ai33_provider.py)."""
+    from src.pipeline import ai33_provider
+    voice_id = voice_id or ai33_provider.default_voice_id(client, api_key)
+    logger.info("Requesting voiceover from ai33.pro /v3/text-to-speech...")
+    with _izivoice_semaphore:
+        task_id = ai33_provider.submit_tts(client, script_text, voice_id, voice_settings, api_key)
+        task = ai33_provider.poll_task(task_id, client, api_key)
+    audio_url = (task.get("metadata") or {}).get("audio_url")
+    if not audio_url:
+        raise ValueError(f"Unexpected ai33.pro text-to-speech response: {task}")
+    return voice_id, audio_url
 
 
 def generate_voiceover(
@@ -477,83 +567,69 @@ def generate_voiceover(
     transcribe: bool = True,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
-    Generates voiceover TTS audio via the Izivoice API (or local fallback when no key is set),
-    then derives word-level subtitle timing via Izivoice speech-to-text on the resulting audio
-    (Izivoice's /text-to-speech does not return alignment data itself) — unless `transcribe` is
-    False, in which case subtitle timing is approximated by evenly spreading the known script
-    text over the audio's real duration. That's a deliberate quality/cost tradeoff exposed as a
-    per-video choice (Video.transcribe_audio): real STT costs Izivoice credits per audio second
-    but keeps captions in sync through pauses/silences; the synthetic fallback is free but drifts
-    on anything that isn't a constant speech rate.
+    Generates voiceover TTS audio via the admin-ordered voiceover provider
+    (Izivoice, and/or ai33.pro direct — src/utils/app_settings.py's
+    voiceover_provider_order(); falls through to the next configured provider
+    if one fails, same philosophy as ai_text.py's text-provider chain), or a
+    local fallback when none is configured. Then derives word-level subtitle
+    timing via speech-to-text on the resulting audio (TTS does not return
+    alignment data itself) — unless `transcribe` is False, in which case
+    subtitle timing is approximated by evenly spreading the known script text
+    over the audio's real duration. That's a deliberate quality/cost tradeoff
+    exposed as a per-video choice (Video.transcribe_audio): real STT costs
+    credits per audio second but keeps captions in sync through pauses/
+    silences; the synthetic fallback is free but drifts on anything that
+    isn't a constant speech rate.
+
+    An explicit `api_key` (BYOK) always means Izivoice specifically — ai33.pro
+    is a wholly separate account system with no per-user key concept here —
+    so it bypasses the admin's provider order entirely, exactly as before.
     """
     script_text = clean_script_text(script_text)
 
-    effective_key = api_key or IZIVOICE_API_KEY
-    if not effective_key:
-        logger.info("IZIVOICE_API_KEY not set. Using local TTS fallback.")
+    providers = ["izivoice"] if api_key else _configured_providers()
+    if not providers:
+        logger.info("No voiceover provider configured. Using local TTS fallback.")
         return generate_mock_voiceover(script_text, output_audio_path)
 
+    char_count = len(script_text)
+    if user_id:
+        from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
+        if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts", video_id=video_id):
+            raise RuntimeError("Solde de crédits KappGen insuffisant pour la synthèse vocale.")
+
+    last_error: Optional[Exception] = None
+    for provider in providers:
+        effective_key = AI33PRO_API_KEY if provider == "ai33pro" else IZIVOICE_API_KEY
+        try:
+            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            with httpx.Client() as client:
+                if provider == "ai33pro":
+                    resolved_voice_id, audio_url = _tts_via_ai33(client, script_text, voice_id, voice_settings, effective_key)
+                else:
+                    resolved_voice_id, audio_url = _tts_via_izivoice(client, script_text, voice_id, voice_settings, effective_key)
+
+                audio_resp = client.get(audio_url, timeout=60.0)
+                audio_resp.raise_for_status()
+                output_audio_path.write_bytes(audio_resp.content)
+            voice_id = resolved_voice_id
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(f"{provider} text-to-speech failed ({e}); trying next configured provider if any.")
+            continue
+    else:
+        raise RuntimeError(f"Voiceover generation failed on every configured provider: {last_error}") from last_error
+
     try:
-        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
-        with httpx.Client() as client:
-            voice_id = voice_id or _get_default_voice_id(client, effective_key)
+        # `provider` still holds whichever one succeeded above (the for/else
+        # loop only exits via `break`, never falling off the end here).
+        effective_key = api_key if provider == "izivoice" and api_key else (AI33PRO_API_KEY if provider == "ai33pro" else IZIVOICE_API_KEY)
 
-            char_count = len(script_text)
-            if user_id:
-                from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
-                if not debit_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts", video_id=video_id):
-                    raise RuntimeError("Solde de crédits KappGen insuffisant pour la synthèse vocale.")
-
-            logger.info("Requesting voiceover from Izivoice /text-to-speech...")
-            with _izivoice_semaphore:
-                resp = _post_with_retry(
-                    client,
-                    f"{IZIVOICE_BASE_URL}/text-to-speech",
-                    headers=_izivoice_headers(effective_key),
-                    # Izivoice's /text-to-speech now requires a JSON body — sending
-                    # this as form-urlencoded (the old `data=` kwarg) gets rejected
-                    # with a generic 400 "Requête invalide" regardless of the
-                    # voice_id or fields used (confirmed by reproducing the same
-                    # 400 with a guaranteed-valid voice_id and minimal fields, then
-                    # getting 200 by switching only the transport to `json=`).
-                    json={
-                        "text": script_text,
-                        "voice_id": voice_id,
-                        "speed": (voice_settings or {}).get("speed", 0.845),
-                        "with_transcript": False,
-                        "stability": (voice_settings or {}).get("stability", 0.8),
-                        "similarity_boost": (voice_settings or {}).get("similarity_boost", 0.9),
-                        "style": (voice_settings or {}).get("style", 0.0),
-                        # Izivoice's own studio always sends these three on every
-                        # generation (confirmed by reading its deployed client
-                        # bundle) — pitch/volume neutral, and use_speaker_boost
-                        # true. We were silently omitting all three, which can
-                        # make Izivoice fall back to different server-side
-                        # defaults (notably speaker boost off) and produce an
-                        # audibly thinner/less faithful clone than what the same
-                        # voice sounds like in Izivoice's own app.
-                        "pitch": (voice_settings or {}).get("pitch", 0),
-                        "volume": (voice_settings or {}).get("volume", 1),
-                        "use_speaker_boost": (voice_settings or {}).get("use_speaker_boost", True),
-                    },
-                    timeout=30.0
-                )
-                resp.raise_for_status()
-                task_id = resp.json()["task_id"]
-
-                task = _poll_task(task_id, client, effective_key)
-            audio_url = (task.get("metadata") or {}).get("audio_url")
-            if not audio_url:
-                raise ValueError(f"Unexpected Izivoice text-to-speech response: {task}")
-
-            audio_resp = client.get(audio_url, timeout=60.0)
-            audio_resp.raise_for_status()
-            output_audio_path.write_bytes(audio_resp.content)
-
-        # Izivoice's /text-to-speech has been observed returning a 200 with a
-        # genuinely truncated audio file for very long scripts — no error, just
+        # TTS providers have been observed returning a 200 with a genuinely
+        # truncated audio file for very long scripts — no error, just
         # noticeably less audio than the script implies. Nothing downstream
-        # would catch this: the video pipeline entirely on
+        # would catch this: the video pipeline relies entirely on
         # transcript_info["duration"] to pace scenes, so a silently-truncated
         # voiceover just produces a short, "successfully" finished video with
         # no error anywhere. 20 chars/sec is a deliberately generous ceiling —
@@ -569,15 +645,15 @@ def generate_voiceover(
                 raise RuntimeError(
                     f"La voix off générée ({raw_duration:.1f}s) est bien trop courte pour un script de "
                     f"{char_count} caractères (attendu : au moins {expected_min_duration * 0.5:.1f}s) — "
-                    "Izivoice a probablement tronqué le texte silencieusement. Relance le rendu."
+                    f"{provider} a probablement tronqué le texte silencieusement. Relance le rendu."
                 )
 
         log_usage(
             "izivoice_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
-            user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id},
+            user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id, "provider": provider},
         )
         if transcribe:
-            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id, video_id=video_id)
+            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider)
         else:
             transcript_info = {
                 "text": script_text,
@@ -587,11 +663,12 @@ def generate_voiceover(
         return output_audio_path, transcript_info
 
     except Exception as e:
-        # Do NOT fall back to the sine-tone mock generator here — a real key
-        # is configured, so a failure means the video's actual voiceover
-        # could not be produced. Silently shipping a placeholder tone instead
-        # was masking real Izivoice failures as "successful" renders (users
-        # got a whistling sound for the whole video with no error anywhere).
-        # Let this propagate so the video is correctly marked failed and can
-        # be retried, instead of silently succeeding with unusable audio.
-        raise RuntimeError(f"Izivoice text-to-speech failed: {e}") from e
+        # Do NOT fall back to the sine-tone mock generator here — a real
+        # provider is configured, so a failure means the video's actual
+        # voiceover could not be produced. Silently shipping a placeholder
+        # tone instead was masking real provider failures as "successful"
+        # renders (users got a whistling sound for the whole video with no
+        # error anywhere). Let this propagate so the video is correctly
+        # marked failed and can be retried, instead of silently succeeding
+        # with unusable audio.
+        raise RuntimeError(f"{provider} text-to-speech failed: {e}") from e
