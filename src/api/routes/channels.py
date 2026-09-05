@@ -2500,7 +2500,7 @@ async def stage_channel_library_images(
 def attach_staged_channel_library(
     channel_id: str,
     staging_token: str = Form(...),
-    share_with_community: bool = Form(False),
+    share_with_community: bool = Form(True),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -2546,7 +2546,7 @@ async def upload_channel_library_images(
     channel_id: str,
     files: List[UploadFile] = File(...),
     append: bool = Form(False),
-    share_with_community: bool = Form(False),
+    share_with_community: bool = Form(True),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

@@ -76,6 +76,12 @@ class BrandingConfig(BaseModel):
     logo_size_percent: float = 5        # width as % of the 1920px-wide render frame (≈100px, matches the old fixed size)
     logo_shape: str = "rectangle"       # "rectangle" | "rounded" | "circle" — same masking as overlays
     channel_name_text: Optional[str] = None
+    # Facecam channel identity. These stay separate from an individual
+    # project's settings so future imports inherit the same visual system.
+    accent_color: str = "#00c2ff"
+    font_family: str = "DejaVu Sans"
+    facecam_default_style: str = "kappgen"
+    facecam_default_format: str = "facecam"
     overlays: List[OverlayItem] = Field(default_factory=list)
 
 class MusicPreference(BaseModel):
@@ -121,10 +127,14 @@ class ImageStyle(BaseModel):
     # continuous "pillar clip" behavior (e.g. a single talking-head avatar
     # recording meant to play through naturally).
     broll_shuffle: bool = False
-    # Opt-in only, set at upload time — this channel's own library becomes
-    # eligible for admin curation into its niche's shared community library
-    # (see CommunityLibraryFolder). Never shared without this being true.
-    share_with_community: bool = False
+    # Opt-out, not opt-in: a channel's own library feeds its niche's shared
+    # community library (see CommunityLibraryFolder) by default — a
+    # deliberate policy choice (product decision, Sept 2026) so the platform
+    # library actually grows over time instead of depending on creators
+    # remembering to turn a switch on. A creator who explicitly disables
+    # this keeps their images stored normally, just excluded from what
+    # other channels/renders can pull from — never deleted for opting out.
+    share_with_community: bool = True
     # How many distinct AI images to generate per video before recycling —
     # "auto" (max_unique_images=None) lets the pipeline pick a sensible count
     # from the video's own length; "manual" pins it to a specific number.
