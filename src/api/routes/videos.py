@@ -674,9 +674,24 @@ def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current
         entry = grouped.setdefault(label, {"description": label, "credits": 0, "count": 0})
         entry["credits"] += -t.amount
         entry["count"] += 1
+    # Every possible cost category is always shown, at 0 credits when this
+    # particular video never used it, instead of only listing whichever ones
+    # happened to fire — a music/audio video showing just one bare "Frais de
+    # rendu" line looked like a different, opaque pricing model instead of
+    # the same one as a narration video that simply skipped voix off,
+    # transcription, thumbnail, etc. Any label a description didn't match
+    # (an unrecognized/legacy debit description) still appears too, appended
+    # after the fixed categories in first-seen order.
+    all_labels = [label for _, label in _CLIENT_COST_LABELS]
+    for label in grouped:
+        if label not in all_labels:
+            all_labels.append(label)
     items = [
-        {**entry, "description": f'{entry["description"]} × {entry["count"]}' if entry["count"] > 1 else entry["description"]}
-        for entry in grouped.values()
+        {
+            **(entry := grouped.get(label, {"description": label, "credits": 0, "count": 0})),
+            "description": f'{entry["description"]} × {entry["count"]}' if entry["count"] > 1 else entry["description"],
+        }
+        for label in all_labels
     ]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
