@@ -222,6 +222,17 @@ def init_db():
                     logger.info(f"Migrating community_library_image_placements table: adding {col_name} column.")
                     conn.execute(text(ddl))
 
+    if "community_library_folders" in inspector.get_table_names():
+        existing_clf_columns = {col["name"] for col in inspector.get_columns("community_library_folders")}
+        clf_migrations = {
+            "admin_forced": "ALTER TABLE community_library_folders ADD COLUMN admin_forced BOOLEAN DEFAULT FALSE NOT NULL",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in clf_migrations.items():
+                if col_name not in existing_clf_columns:
+                    logger.info(f"Migrating community_library_folders table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
     if "folders" in inspector.get_table_names():
         existing_folder_columns = {col["name"] for col in inspector.get_columns("folders")}
         folder_migrations = {

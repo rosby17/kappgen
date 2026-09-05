@@ -533,9 +533,12 @@ def admin_list_orders(admin: User = Depends(get_current_admin), db: Session = De
 # ── Bibliothèque collaborative ──────────────────────────────────────────
 # Curation of channel image libraries their owners opted to share with the
 # community (see Channel.image_style.share_with_community and
-# CommunityLibraryFolder in models.py). A niche's "master" library is just
-# the union of every folder here with status="approved" for that niche —
-# approving a second folder into a niche IS the merge, no files are copied.
+# CommunityLibraryFolder in models.py). A niche's "master" library is the
+# union of every folder here that ISN'T status="flagged" for that niche — a
+# creator's own opt-in is trusted live by default (pending counts too, not
+# just approved); "flagged" is the admin's reactive moderation tool to pull
+# something back out after the fact, not a gate everything must clear first.
+# Approving/flagging a folder is the merge/exclude — no files are copied.
 
 # Mirrors the frontend's NICHE_OPTIONS (App.jsx) — kept as a separate literal
 # rather than a shared import since the two projects don't share a package;
@@ -1192,11 +1195,12 @@ def admin_force_share_channel_library(
         existing.status = payload.status
         existing.image_count = count
         existing.niche = channel.niche
+        existing.admin_forced = True
         folder = existing
     else:
         folder = CommunityLibraryFolder(
             channel_id=channel.id, user_id=channel.user_id, niche=channel.niche,
-            image_count=count, status=payload.status,
+            image_count=count, status=payload.status, admin_forced=True,
         )
         db.add(folder)
     db.commit()

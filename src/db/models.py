@@ -944,6 +944,15 @@ class CommunityLibraryFolder(Base):
     niche = Column(String(255), nullable=False, index=True)
     image_count = Column(Integer, nullable=False, default=0)
     status = Column(String(20), nullable=False, default="pending")  # "pending" | "approved" | "flagged"
+    # Set only by admin.py's force-share endpoint — marks a row the admin
+    # deliberately put into the niche's shared pool regardless of the
+    # channel owner's own share_with_community toggle. Without this,
+    # _sync_community_library_folder (channels.py — runs on every channel
+    # save, not just sharing-related ones) unconditionally deleted this row
+    # the instant the creator saved their channel for any unrelated reason,
+    # since their own flag was still false — silently undoing an admin's
+    # force-share on the creator's very next edit.
+    admin_forced = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -960,6 +969,7 @@ class CommunityLibraryFolder(Base):
             "niche": self.niche,
             "image_count": self.image_count,
             "status": self.status,
+            "admin_forced": self.admin_forced,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -92,7 +92,12 @@ def _sync_community_library_folder(db: Session, channel: Channel, share_with_com
     Caller is responsible for the db.commit()."""
     existing = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel.id).first()
     if not share_with_community or image_count <= 0:
-        if existing:
+        # Never delete a row the admin deliberately force-shared (see
+        # admin.py's force-share endpoint) just because the owner's own
+        # toggle is off — that toggle is their default/starting point, not a
+        # hard block on the admin's own call, and this function runs on
+        # every channel save, not just sharing-related ones.
+        if existing and not existing.admin_forced:
             db.delete(existing)
         return
     if existing:
@@ -997,14 +1002,14 @@ def community_library_availability(niche: str, db: Session = Depends(get_db)):
     creator having to try it first and hit a render-time error."""
     folders = (
         db.query(CommunityLibraryFolder)
-        .filter(CommunityLibraryFolder.status == "approved", CommunityLibraryFolder.niche.ilike(niche))
+        .filter(CommunityLibraryFolder.status != "flagged", CommunityLibraryFolder.niche.ilike(niche))
         .all()
     )
     moved_count = db.query(CommunityLibraryImagePlacement).join(
         CommunityLibraryFolder,
         CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
     ).filter(
-        CommunityLibraryFolder.status == "approved",
+        CommunityLibraryFolder.status != "flagged",
         CommunityLibraryImagePlacement.niche.ilike(niche),
         ~CommunityLibraryFolder.niche.ilike(niche),
     ).count()
@@ -1012,7 +1017,7 @@ def community_library_availability(niche: str, db: Session = Depends(get_db)):
         CommunityLibraryFolder,
         CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
     ).filter(
-        CommunityLibraryFolder.status == "approved",
+        CommunityLibraryFolder.status != "flagged",
         CommunityLibraryFolder.niche.ilike(niche),
         ~CommunityLibraryImagePlacement.niche.ilike(niche),
     ).count()
@@ -1055,13 +1060,13 @@ def search_public_library(
     if media_type == "photos":
         normalized_query = clean_query.casefold()
         query_words = {word for word in re.findall(r"\w+", normalized_query) if len(word) > 2}
-        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status == "approved").all()
+        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status != "flagged").all()
         placements = {
             (placement.channel_id, placement.filename): placement.niche
             for placement in db.query(CommunityLibraryImagePlacement).join(
                 CommunityLibraryFolder,
                 CommunityLibraryFolder.channel_id == CommunityLibraryImagePlacement.channel_id,
-            ).filter(CommunityLibraryFolder.status == "approved").all()
+            ).filter(CommunityLibraryFolder.status != "flagged").all()
         }
         # Real content keywords a background vision pass tagged each image
         # with (see queue_runner.py's tag_untagged_community_images) — lets a
@@ -1074,7 +1079,7 @@ def search_public_library(
             for tag in db.query(CommunityLibraryImageTag).join(
                 CommunityLibraryFolder,
                 CommunityLibraryFolder.channel_id == CommunityLibraryImageTag.channel_id,
-            ).filter(CommunityLibraryFolder.status == "approved").all()
+            ).filter(CommunityLibraryFolder.status != "flagged").all()
         }
         for folder in folders:
             library_dir = STORAGE_PATH / "channels" / folder.channel_id / "library"
@@ -1197,7 +1202,7 @@ def search_public_library(
 def _resolve_approved_community_asset(db: Session, channel_id: str, filename: str) -> Path:
     folder = db.query(CommunityLibraryFolder).filter(
         CommunityLibraryFolder.channel_id == channel_id,
-        CommunityLibraryFolder.status == "approved",
+        CommunityLibraryFolder.status != "flagged",
     ).first()
     if not folder:
         raise HTTPException(status_code=404, detail="Ressource publique introuvable.")
@@ -1287,7 +1292,7 @@ async def import_public_library_asset(
             raise HTTPException(status_code=400, detail="Ressource communautaire incomplète.")
         folder = db.query(CommunityLibraryFolder).filter(
             CommunityLibraryFolder.channel_id == payload.source_channel_id,
-            CommunityLibraryFolder.status == "approved",
+            CommunityLibraryFolder.status != "flagged",
         ).first()
         if not folder:
             raise HTTPException(status_code=404, detail="Ressource communautaire introuvable.")
