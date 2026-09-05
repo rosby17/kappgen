@@ -7,6 +7,7 @@ import httpx
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -345,9 +346,31 @@ async def submit_video_subject(
         if not can_render:
             raise HTTPException(status_code=402, detail=reason)
 
+        # Without an explicit title, this row used to sit in "Mes Vidéos"
+        # showing its own raw script_text as a fallback (queue_runner only
+        # overwrites video.title once the worker actually picks the job up,
+        # and even then only if it's still falsy — so a video that waits any
+        # length of time in the queue had nothing better to show). The full
+        # script is already known here, so there's no reason to wait: generate
+        # the real title (and description/thumbnail_text, cached for reuse by
+        # generate_metadata's reuse_existing path later — no second LLM call)
+        # right now, before the row is even created.
+        quick_title, quick_description, quick_thumbnail_text = explicit_title, None, None
+        if not explicit_title:
+            try:
+                stub = SimpleNamespace(script_text=script_text.strip(), duration_seconds=None, id=None)
+                meta = generate_metadata(stub, channel)
+                quick_title = meta["title"]
+                quick_description = meta["description"]
+                quick_thumbnail_text = meta["thumbnail_text"]
+            except Exception as exc:
+                logger.warning(f"Could not generate an early title for a new text video on channel {channel.id}: {exc}")
+
         video = Video(
             channel_id=channel.id,
-            title=explicit_title,
+            title=quick_title,
+            youtube_description=quick_description,
+            thumbnail_text=quick_thumbnail_text,
             script_text=script_text.strip(),
             input_type="text",
             creation_source="script",
