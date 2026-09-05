@@ -644,7 +644,7 @@ _CLIENT_COST_LABELS = [
     (re.compile(r"^music_video_generation\b"), "Génération de la vidéo musicale"),
     (re.compile(r"^stock_media\b"), "Image & vidéos d'illustration"),
     (re.compile(r"^Génération auto de script\b"), "Script généré automatiquement"),
-    (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de rendu"),
+    (re.compile(r"^Frais forfaitaire vidéo\b"), "Frais de montage vidéo"),
     (re.compile(r"^Conservation vidéo\b"), "Conservation prolongée"),
 ]
 
