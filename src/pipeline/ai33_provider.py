@@ -205,6 +205,38 @@ def await_stt_webhook_result(task_id: str, timeout: float = STT_WEBHOOK_WAIT_TIM
     raise TimeoutError(f"ai33.pro STT webhook for task {task_id} did not arrive within {timeout}s")
 
 
+def submit_music_generation(
+    client: httpx.Client,
+    prompt: str,
+    make_instrumental: bool = True,
+    api_key: Optional[str] = None,
+) -> str:
+    """POST /v1s/task/music-generation (JSON, not FormData — confirmed
+    against Izivoice's own source, src/app/api/music/route.ts in the
+    izivoice repo: that route is a thin passthrough straight to this same
+    ai33.pro path). "simple" create_mode only — the same mode
+    music.py's Izivoice path already uses; "custom" mode (title/lyrics/
+    tags/vocal_gender) is available upstream but unused here since
+    background music is always instrumental. Poll with poll_task(); a
+    "done" task's metadata.audio_url is the generated track, same shape
+    Izivoice's own wrapper returns."""
+    resp = _post_with_retry(
+        client, f"{AI33PRO_BASE_URL}/v1s/task/music-generation",
+        headers={**_headers(api_key), "Content-Type": "application/json"},
+        json={
+            "create_mode": "simple",
+            "gpt_description_prompt": prompt[:2000],
+            "make_instrumental": make_instrumental,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success") or not data.get("task_id"):
+        raise RuntimeError(f"Unexpected ai33.pro music-generation response: {data}")
+    return data["task_id"]
+
+
 def submit_image_generation(
     client: httpx.Client,
     prompt: str,

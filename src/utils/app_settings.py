@@ -114,6 +114,30 @@ def set_voiceover_provider_order(order: List[str]) -> None:
     set_setting(VOICEOVER_PROVIDER_ORDER_KEY, json.dumps(order))
 
 
+# Same order-picker structure again, for background music generation
+# (src/pipeline/music.py) — Izivoice's own /music route is itself a thin
+# passthrough to this same ai33.pro endpoint, so routing there directly
+# bypasses Izivoice's account/quota the same way voice and thumbnails do.
+MUSIC_PROVIDER_ORDER_KEY = "music_provider_order"
+MUSIC_PROVIDERS_ALL = ["izivoice", "ai33pro"]
+MUSIC_PROVIDER_ORDER_DEFAULT = ["izivoice"]
+
+
+def music_provider_order() -> List[str]:
+    raw = get_setting(MUSIC_PROVIDER_ORDER_KEY, None)
+    if raw is None:
+        return list(MUSIC_PROVIDER_ORDER_DEFAULT)
+    try:
+        order = json.loads(raw)
+        return [p for p in order if p in MUSIC_PROVIDERS_ALL] if isinstance(order, list) else list(MUSIC_PROVIDER_ORDER_DEFAULT)
+    except (ValueError, TypeError):
+        return list(MUSIC_PROVIDER_ORDER_DEFAULT)
+
+
+def set_music_provider_order(order: List[str]) -> None:
+    set_setting(MUSIC_PROVIDER_ORDER_KEY, json.dumps(order))
+
+
 # Admin-adjustable number of videos the worker renders at once. Read live by
 # each render lane on every poll (see src/worker/queue_runner.py) rather than
 # once at process boot, so turning this up or down from the admin UI takes

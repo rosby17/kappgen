@@ -1451,6 +1451,39 @@ def set_voiceover_provider_mode(payload: VoiceoverProviderOrderPayload, admin: U
     return {"order": cleaned}
 
 
+# --- Background music provider switch -----------------------------------
+# Same order-picker structure again. Izivoice's own /music route is itself a
+# thin passthrough to this same ai33.pro endpoint (v1s/task/music-generation)
+# — see src/pipeline/music.py.
+MUSIC_PROVIDERS = ["izivoice", "ai33pro"]
+
+
+@router.get("/settings/music-provider-mode")
+def get_music_provider_mode(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import music_provider_order
+    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY
+    configured = {"izivoice": bool(IZIVOICE_API_KEY), "ai33pro": bool(AI33PRO_API_KEY)}
+    order = music_provider_order()
+    return {"order": order, "available": MUSIC_PROVIDERS, "configured": configured}
+
+
+class MusicProviderOrderPayload(BaseModel):
+    order: List[str]
+
+
+@router.patch("/settings/music-provider-mode")
+def set_music_provider_mode(payload: MusicProviderOrderPayload, admin: User = Depends(get_current_admin)):
+    cleaned = []
+    for p in payload.order:
+        if p not in MUSIC_PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
+        if p not in cleaned:
+            cleaned.append(p)
+    from src.utils.app_settings import set_music_provider_order
+    set_music_provider_order(cleaned)
+    return {"order": cleaned}
+
+
 # --- Render concurrency (how many videos the worker renders at once) ---
 # Live-adjustable, no redeploy: each render lane re-reads this setting on
 # every poll cycle (a few seconds), so turning it up when demand/load allows

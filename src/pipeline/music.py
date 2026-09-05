@@ -4,9 +4,22 @@ import time
 import httpx
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from src.config import ASSETS_PATH, STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL
+from src.config import ASSETS_PATH, STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, AI33PRO_API_KEY
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
+
+
+def _configured_music_providers() -> List[str]:
+    """Admin-ordered music providers (src/utils/app_settings.py), filtered to
+    whichever actually have a key configured — same pattern as voiceover.py's
+    _configured_providers(). "ai33pro" is ai33.pro directly
+    (src/pipeline/ai33_provider.py): Izivoice's own /music route is itself a
+    thin passthrough to that same upstream endpoint, so this bypasses
+    Izivoice's account/quota entirely rather than changing what's generated."""
+    from src.utils.app_settings import music_provider_order
+    keys = {"izivoice": IZIVOICE_API_KEY, "ai33pro": AI33PRO_API_KEY}
+    providers = [p for p in music_provider_order() if keys.get(p)]
+    return providers or (["izivoice"] if IZIVOICE_API_KEY else [])
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
 # A real Izivoice music generation commonly runs well past 90s (the same
@@ -52,7 +65,7 @@ def _poll_izivoice_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     raise TimeoutError(f"Izivoice music task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s")
 
 
-def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> Path:
+def _music_via_izivoice(client: httpx.Client, prompt: str, output_path: Path) -> Path:
     """
     Generates a background music track via Izivoice's music-generation endpoint.
 
@@ -66,32 +79,75 @@ def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> 
     task_id}, polled via GET /tasks/{task_id} until status == "done", at
     which point metadata.audio_url holds the track.
     """
-    with httpx.Client() as client:
-        resp = client.post(
-            f"{IZIVOICE_BASE_URL}/music",
-            headers=_izivoice_headers(),
-            json={
-                "create_mode": "simple",
-                "gpt_description_prompt": prompt[:2000],
-                "make_instrumental": True,
-            },
-            timeout=30.0
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("success") or not data.get("task_id"):
-            raise ValueError(f"Unexpected Izivoice music-generate response: {data}")
+    resp = client.post(
+        f"{IZIVOICE_BASE_URL}/music",
+        headers=_izivoice_headers(),
+        json={
+            "create_mode": "simple",
+            "gpt_description_prompt": prompt[:2000],
+            "make_instrumental": True,
+        },
+        timeout=30.0
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success") or not data.get("task_id"):
+        raise ValueError(f"Unexpected Izivoice music-generate response: {data}")
 
-        task = _poll_izivoice_task(data["task_id"], client)
-        audio_url = (task.get("metadata") or {}).get("audio_url")
-        if not audio_url:
-            raise ValueError(f"Izivoice music task {data['task_id']} completed with no audio_url: {task}")
+    task = _poll_izivoice_task(data["task_id"], client)
+    audio_url = (task.get("metadata") or {}).get("audio_url")
+    if not audio_url:
+        raise ValueError(f"Izivoice music task {data['task_id']} completed with no audio_url: {task}")
 
-        audio_resp = client.get(audio_url, timeout=60.0)
-        audio_resp.raise_for_status()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(audio_resp.content)
+    audio_resp = client.get(audio_url, timeout=60.0)
+    audio_resp.raise_for_status()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(audio_resp.content)
     return output_path
+
+
+def _music_via_ai33(client: httpx.Client, prompt: str, output_path: Path) -> Path:
+    """Same shape as _music_via_izivoice, ai33.pro directly (see
+    src/pipeline/ai33_provider.py) — bypasses Izivoice's own account/quota
+    entirely rather than changing what's generated (Izivoice's own /music
+    route is itself a thin passthrough to this same upstream endpoint)."""
+    from src.pipeline import ai33_provider
+    task_id = ai33_provider.submit_music_generation(client, prompt, make_instrumental=True, api_key=AI33PRO_API_KEY)
+    task = ai33_provider.poll_task(task_id, client, AI33PRO_API_KEY)
+    audio_url = (task.get("metadata") or {}).get("audio_url")
+    if not audio_url:
+        raise ValueError(f"ai33.pro music task {task_id} completed with no audio_url: {task}")
+
+    audio_resp = client.get(audio_url, timeout=60.0)
+    audio_resp.raise_for_status()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(audio_resp.content)
+    return output_path
+
+
+def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> Path:
+    """Public entrypoint (kept its historical name — every call site expects
+    it) — tries the admin-ordered music providers (see
+    _configured_music_providers()) in turn, falling through to the next one
+    on failure. `duration` is unused by every provider so far (neither
+    Izivoice nor ai33.pro accepts a target length; the API decides), kept in
+    the signature only for call-site compatibility."""
+    providers = _configured_music_providers()
+    if not providers:
+        raise RuntimeError("No music provider configured (IZIVOICE_API_KEY / AI33PRO_API_KEY both missing).")
+
+    last_error: Optional[Exception] = None
+    with httpx.Client() as client:
+        for provider in providers:
+            try:
+                if provider == "ai33pro":
+                    return _music_via_ai33(client, prompt, output_path)
+                return _music_via_izivoice(client, prompt, output_path)
+            except Exception as e:
+                last_error = e
+                logger.warning(f"{provider} music generation failed ({e}); trying next configured provider if any.")
+                continue
+    raise last_error or RuntimeError("Music generation failed on every configured provider.")
 
 
 def _generate_synthetic_fallback_track(duration: float) -> Path:
