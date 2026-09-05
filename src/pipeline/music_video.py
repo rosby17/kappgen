@@ -27,7 +27,7 @@ from src.pipeline.music import generate_music_izivoice, _generate_synthetic_fall
 from src.pipeline.ai_text import generate_text
 from src.utils.ffmpeg_runner import run_ffmpeg, get_audio_duration
 from src.utils.logger import logger
-from src.config import ASSETS_PATH
+from src.config import ASSETS_PATH, STORAGE_PATH
 
 WIDTH, HEIGHT = 1920, 1080
 XFADE_DURATION = 1.5  # seconds of overlap between consecutive background images
@@ -81,11 +81,48 @@ def build_audio(
     output_dir: Path,
     user_id: str | None = None,
     video_id: str | None = None,
+    music_source_mode: str = "ai_generate",
+    own_tracks: Optional[List[str]] = None,
 ) -> Tuple[Path, int]:
     """Returns (final_audio_path, tracks_generated) — tracks_generated feeds
     the single end-of-render credit charge (see MUSIC_VIDEO_CREDITS)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     tracks_generated = 0
+
+    # "Importer mes propres pistes": the creator's own uploaded files
+    # (channel.music_preference.tracks, storage-relative — same field a
+    # faceless channel's background music reuses) stand in for every AI
+    # generation call below. No credits debited, no Izivoice wait at all —
+    # this is the whole point of the option.
+    if music_source_mode == "library":
+        candidates = [STORAGE_PATH / t for t in (own_tracks or []) if (STORAGE_PATH / t).exists()]
+        if candidates:
+            if edit_mode == "compilation" and len(candidates) > 1:
+                segments: List[Path] = []
+                total = 0.0
+                shuffled = candidates[:]
+                random.shuffle(shuffled)
+                i = 0
+                while total < target_duration_seconds and len(segments) < 40:
+                    track = shuffled[i % len(shuffled)]
+                    segments.append(track)
+                    total += get_audio_duration(track)
+                    i += 1
+                concat_list = output_dir / "concat_list.txt"
+                concat_list.write_text("".join(f"file '{p.resolve()}'\n" for p in segments), encoding="utf-8")
+                concatenated = output_dir / "compilation.mp3"
+                run_ffmpeg(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c:a", "libmp3lame", str(concatenated)])
+                final_audio = output_dir / "final_audio.mp3"
+                run_ffmpeg(["ffmpeg", "-y", "-i", str(concatenated), "-t", f"{target_duration_seconds:.3f}", "-c", "copy", str(final_audio)])
+                return final_audio, 0
+            track = random.choice(candidates)
+            final_audio = output_dir / "final_audio.mp3"
+            run_ffmpeg([
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(track),
+                "-t", f"{target_duration_seconds:.3f}", "-c:a", "libmp3lame", str(final_audio),
+            ])
+            return final_audio, 0
+        logger.warning("Music source mode is 'library' but no tracks are uploaded; falling back to AI generation.")
 
     if edit_mode == "compilation":
         # Generate tracks until their combined length covers the target,
@@ -119,11 +156,18 @@ def build_audio(
     return final_audio, tracks_generated
 
 
-def build_background_video(image_paths: List[Path], target_duration_seconds: float, output_path: Path) -> Path:
+def build_background_video(
+    image_paths: List[Path],
+    target_duration_seconds: float,
+    output_path: Path,
+    zoom_min_pct: float = 1.0,
+    zoom_max_pct: float = 1.12,
+) -> Path:
     """0 images: a slow-drifting flat gradient (no AI cost, still not a
     static frozen frame). 1+ images: a Ken Burns clip per image (reusing
-    clip_builder's existing per-scene helper), cross-faded together to fill
-    the target duration — same visual language the narration pipeline
+    clip_builder's existing per-scene helper, same zoom_min_pct/zoom_max_pct
+    the narration pipeline's Effets step controls), cross-faded together to
+    fill the target duration — same visual language the narration pipeline
     already uses for its own scene images."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -137,14 +181,14 @@ def build_background_video(image_paths: List[Path], target_duration_seconds: flo
         return output_path
 
     if len(image_paths) == 1:
-        return build_image_clip(image_paths[0], output_path, target_duration_seconds)
+        return build_image_clip(image_paths[0], output_path, target_duration_seconds, zoom_min_pct=zoom_min_pct, zoom_max_pct=zoom_max_pct)
 
     # Each image gets an equal slice, minus the overlap eaten by the xfade
     # transitions between consecutive clips.
     per_image = target_duration_seconds / len(image_paths) + XFADE_DURATION * (len(image_paths) - 1) / len(image_paths)
     tmp_dir = output_path.parent / "bg_clips"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    clips = [build_image_clip(p, tmp_dir / f"clip_{i}.mp4", per_image) for i, p in enumerate(image_paths)]
+    clips = [build_image_clip(p, tmp_dir / f"clip_{i}.mp4", per_image, zoom_min_pct=zoom_min_pct, zoom_max_pct=zoom_max_pct) for i, p in enumerate(image_paths)]
 
     inputs: List[str] = []
     for c in clips:
@@ -169,7 +213,79 @@ def build_background_video(image_paths: List[Path], target_duration_seconds: flo
     return output_path
 
 
-def compose_final_video(background_video: Path, final_audio: Path, output_path: Path, watermark_enabled: bool = True) -> Path:
+def _escape_drawtext(text: str) -> str:
+    """Minimal escaping for ffmpeg's drawtext filter argument — backslash and
+    single-quote would otherwise break out of the filtergraph's own quoting,
+    colon would be read as the next key=value separator. Real newlines
+    become the literal two-character `\\n` drawtext itself renders as a
+    line break."""
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    return escaped.replace("\n", "\\n")
+
+
+def _effects_video_filter(effects_config: Optional[dict]) -> Optional[str]:
+    """Same two effects the narration pipeline's Effets step exposes (grain,
+    vignette) — a deliberately small subset of assembler.py's full effect
+    system, since that one is written inline against variables the narration
+    render loop computes for itself and isn't a standalone importable
+    helper. Returns None when neither is enabled (no-op filter)."""
+    if not effects_config:
+        return None
+    enabled = effects_config.get("overlay_effects") or []
+    parts = []
+    if "grain" in enabled:
+        intensity = int(effects_config.get("grain_intensity") or 50)
+        parts.append(f"noise=alls={max(1, round(intensity * 0.3)):d}:allf=t+u")
+    if "vignette" in enabled:
+        intensity = int(effects_config.get("vignette_intensity") or 50)
+        parts.append(f"vignette=PI/{max(3, round(8 - intensity / 20)):d}")
+    return ",".join(parts) if parts else None
+
+
+def _subtitle_drawtext_filter(subtitle_style: Optional[dict], subtitle_text: str) -> Optional[str]:
+    """Burns a static title/lyrics text across the whole video — no per-word
+    timing (there's no narration transcript to time it against, unlike the
+    faceless pipeline's karaoke-style ASS subtitles), just the styled text
+    shown throughout. subtitle_style uses the same field names as the
+    faceless wizard's subtitle_style, trimmed to what a static display
+    needs (see MusicChannelWizard's own comment on the same shape)."""
+    text = (subtitle_text or "").strip()
+    if not subtitle_style or not subtitle_style.get("enabled") or not text:
+        return None
+    size = int(subtitle_style.get("size") or 44)
+    color = subtitle_style.get("base_color") or "#FFFFFF"
+    outline_color = subtitle_style.get("outline_color") or "#000000"
+    outline_width = int(subtitle_style.get("outline_width") or 0)
+    position = subtitle_style.get("position") or "bottom"
+    box_color = subtitle_style.get("box_color") or "transparent"
+    font = subtitle_style.get("font") or "Inter"
+    y_expr = {"top": "80", "center": "(h-text_h)/2", "middle": "(h-text_h)/2"}.get(position, "h-text_h-80")
+    parts = [
+        f"drawtext=font='{font}'",
+        f"text='{_escape_drawtext(text)}'",
+        f"fontsize={size}",
+        f"fontcolor={color}",
+        "x=(w-text_w)/2",
+        f"y={y_expr}",
+        "line_spacing=6",
+    ]
+    if outline_width > 0:
+        parts.append(f"bordercolor={outline_color}")
+        parts.append(f"borderw={outline_width}")
+    if box_color and box_color != "transparent":
+        parts.append(f"box=1:boxcolor={box_color}@0.6:boxborderw=14")
+    return ":".join(parts)
+
+
+def compose_final_video(
+    background_video: Path,
+    final_audio: Path,
+    output_path: Path,
+    watermark_enabled: bool = True,
+    effects_config: Optional[dict] = None,
+    subtitle_style: Optional[dict] = None,
+    subtitle_text: str = "",
+) -> Path:
     """Overlays an audio-reactive waveform strip over the background video
     and muxes in the final audio track — the one visual element that makes
     a plain looping background feel like a real "music video" instead of a
@@ -178,23 +294,33 @@ def compose_final_video(background_video: Path, final_audio: Path, output_path: 
     entitlement rule and look (scale=900:-1, 0.22 opacity, dead center) as
     the narration pipeline's own watermark (assembler.py); this pipeline
     never shared that code path, so without this a music video would have
-    rendered watermark-free regardless of whether the creator ever paid."""
+    rendered watermark-free regardless of whether the creator ever paid.
+    Optionally also applies the Effets step's grain/vignette and burns in a
+    static title/lyrics text from the Sous-titres step."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     has_watermark = watermark_enabled and WATERMARK_PATH.exists()
-    filter_complex = (
+    effects_filter = _effects_video_filter(effects_config)
+    base_label = "0:v" if not effects_filter else "vfx"
+    filter_complex = f"[0:v]{effects_filter}[vfx];" if effects_filter else ""
+    filter_complex += (
         f"[1:a]showwaves=s={WIDTH}x260:mode=cline:colors=0x00c2ff|0x38d0ff:scale=sqrt,format=yuva420p,"
         f"colorchannelmixer=aa=0.85[wave];"
-        f"[0:v][wave]overlay=(W-w)/2:H-h-70:shortest=1[vbase]"
+        f"[{base_label}][wave]overlay=(W-w)/2:H-h-70:shortest=1[vbase]"
     )
     inputs = ["-i", str(background_video), "-i", str(final_audio)]
+    next_label = "vbase"
     if has_watermark:
         inputs += ["-i", str(WATERMARK_PATH)]
         filter_complex += (
-            ";[2:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.22[wm];"
-            "[vbase][wm]overlay=(W-w)/2:(H-h)/2[vout]"
+            f";[2:v]scale=900:-1,format=rgba,colorchannelmixer=aa=0.22[wm];"
+            f"[{next_label}][wm]overlay=(W-w)/2:(H-h)/2[vwm]"
         )
+        next_label = "vwm"
+    subtitle_filter = _subtitle_drawtext_filter(subtitle_style, subtitle_text)
+    if subtitle_filter:
+        filter_complex += f";[{next_label}]{subtitle_filter}[vout]"
     else:
-        filter_complex += ";[vbase]copy[vout]"
+        filter_complex += f";[{next_label}]copy[vout]"
     run_ffmpeg([
         "ffmpeg", "-y",
         *inputs,
@@ -219,6 +345,13 @@ def render_music_video(
     watermark_enabled: bool = True,
     user_id: str | None = None,
     video_id: str | None = None,
+    music_source_mode: str = "ai_generate",
+    own_tracks: Optional[List[str]] = None,
+    image_style: Optional[dict] = None,
+    effects_config: Optional[dict] = None,
+    subtitle_style: Optional[dict] = None,
+    subtitle_text: str = "",
+    channel_id: str | None = None,
 ) -> Tuple[Path, int]:
     """Main entry point, called from the worker (see queue_runner.py). Returns
     (output_mp4, tracks_generated) — tracks_generated feeds the single
@@ -231,30 +364,45 @@ def render_music_video(
     audio_dir = output_dir / "source" / "audio"
 
     progress("Génération de la musique", 15)
-    final_audio, tracks_generated = build_audio(style_prompt, edit_mode, target_duration_seconds, audio_dir, user_id=user_id, video_id=video_id)
+    final_audio, tracks_generated = build_audio(
+        style_prompt, edit_mode, target_duration_seconds, audio_dir,
+        user_id=user_id, video_id=video_id,
+        music_source_mode=music_source_mode, own_tracks=own_tracks,
+    )
 
     progress("Génération des images", 45)
     image_paths: List[Path] = []
     if image_count > 0:
-        from src.pipeline.images import _generate_with_huggingface_flux
-        import httpx
+        from src.pipeline.images import fetch_or_generate_images
         images_dir = output_dir / "source" / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
         prompt = f"{style_prompt}, in the visual context of {niche}" if niche else style_prompt
-        with httpx.Client(limits=httpx.Limits(max_connections=4)) as client:
-            for i in range(image_count):
-                img_path = images_dir / f"bg_{i+1}.png"
-                try:
-                    _generate_with_huggingface_flux(prompt, img_path, client, size="1280x720", operation="music_video_background")
-                    image_paths.append(img_path)
-                except Exception as e:
-                    logger.warning(f"Music video background image {i+1} failed (free tier only, no paid fallback): {e}")
+        # A music channel saved before Visuels/Sources existed (or one that
+        # never touched that step) has no image_style at all — default to
+        # exactly the old always-AI-generate behavior instead of
+        # resolve_enabled_image_sources' own general-purpose default
+        # ("library", meant for narration channels, which is empty here and
+        # would silently produce zero images for every such channel).
+        effective_style = image_style if (image_style and image_style.get("sources")) else {"sources": ["ai_generated"], "style_prompt": ""}
+        try:
+            image_paths = fetch_or_generate_images(
+                [prompt] * image_count, images_dir, effective_style,
+                unique_generation_count=image_count,
+                user_id=user_id, niche=niche, channel_id=channel_id,
+            )
+        except Exception as e:
+            logger.warning(f"Music video background image sourcing failed: {e}")
 
     progress("Montage de la vidéo", 70)
-    background_video = build_background_video(image_paths, target_duration_seconds, output_dir / "background.mp4")
+    zoom_min_pct = float((effects_config or {}).get("zoom_min_pct") or 1.0)
+    zoom_max_pct = float((effects_config or {}).get("zoom_max_pct") or 1.12)
+    background_video = build_background_video(image_paths, target_duration_seconds, output_dir / "background.mp4", zoom_min_pct=zoom_min_pct, zoom_max_pct=zoom_max_pct)
 
     progress("Assemblage final", 90)
-    output_mp4 = compose_final_video(background_video, final_audio, output_dir / "output.mp4", watermark_enabled=watermark_enabled)
+    output_mp4 = compose_final_video(
+        background_video, final_audio, output_dir / "output.mp4",
+        watermark_enabled=watermark_enabled,
+        effects_config=effects_config, subtitle_style=subtitle_style, subtitle_text=subtitle_text,
+    )
 
     progress("Vidéo prête", 100)
     return output_mp4, tracks_generated

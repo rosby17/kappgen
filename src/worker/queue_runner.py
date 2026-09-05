@@ -353,6 +353,13 @@ def process_single_queued_video() -> bool:
                 watermark_enabled=watermark_enabled,
                 user_id=channel.user_id,
                 video_id=video.id,
+                music_source_mode=music_config.get("music_source_mode") or "ai_generate",
+                own_tracks=(channel.music_preference or {}).get("tracks") or [],
+                image_style=channel.image_style,
+                effects_config=channel.effects_config,
+                subtitle_style=channel.subtitle_style,
+                subtitle_text=music_config.get("subtitle_text") or "",
+                channel_id=channel.id,
             )
 
             try:
@@ -1712,7 +1719,12 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
         return None
     music_config = channel.music_channel_config or {}
     style_prompt = (music_config.get("style_prompt") or "").strip()
-    if not style_prompt:
+    music_source_mode = music_config.get("music_source_mode") or "ai_generate"
+    # A style description drives both the AI-generated track and the AI
+    # background images — required when generating either. In "library"
+    # mode (own uploaded tracks), it's optional: pick_music_video_title
+    # below already has its own generic fallback when it's blank.
+    if not style_prompt and music_source_mode != "library":
         logger.warning(f"Music video: channel {channel.id} ('{channel.name}') has no style configured; skipping.")
         return None
 
