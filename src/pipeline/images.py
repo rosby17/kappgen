@@ -65,7 +65,30 @@ def _izivoice_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     return {"Authorization": f"Bearer {api_key or IZIVOICE_API_KEY}"}
 
 
-def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
+def _all_niche_library_files(db, niche: str) -> List[Path]:
+    """Every channel's own image library for this niche, regardless of
+    share_with_community/CommunityLibraryFolder status — the admin-only
+    bypass _approved_community_library_files falls into. Bypasses the
+    community-sharing gate entirely rather than reusing that table, so a
+    creator who never opted in is still fully available to the platform
+    operator's own renders without that opt-out ever showing as a "share"
+    anywhere in their own UI."""
+    from src.db.models import Channel
+    from src.config import STORAGE_PATH
+    extensions = IMAGE_UPLOAD_EXTENSIONS
+    files: List[Path] = []
+    for channel in db.query(Channel).filter(Channel.niche.ilike(niche)).all():
+        library_dir = STORAGE_PATH / "channels" / channel.id / "library"
+        if not library_dir.is_dir():
+            continue
+        files.extend(
+            path for path in library_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in extensions
+        )
+    return files
+
+
+def _approved_community_library_files(niche: Optional[str], user_id: Optional[str] = None) -> List[Path]:
     """Every other channel's own image library that's been opted into the
     community-sharing program (Channel.image_style.share_with_community) and
     approved by an admin for this niche — read live off disk, never copied.
@@ -73,14 +96,23 @@ def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
     deliberate choice) and, as of the free-fallback chain below, as the
     imagery-quality safety net when free AI generation itself fails: real,
     niche-relevant photos from other creators beat generic synthetic
-    gradient artwork with zero niche relevance."""
+    gradient artwork with zero niche relevance.
+
+    An admin's own render is the one exception to "opted in only": rendering
+    their own channels, an admin sees every client's library for the niche,
+    shared or not — per-creator privacy between OTHER creators is untouched,
+    this only ever widens what the platform operator's own account can pull
+    from for their own content."""
     if not niche:
         return []
     from src.db.session import SessionLocal
-    from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement, User
     from src.config import STORAGE_PATH
     db = SessionLocal()
     try:
+        is_admin = bool(user_id and db.query(User.is_admin).filter(User.id == user_id).scalar())
+        if is_admin:
+            return _all_niche_library_files(db, niche)
         # "pending" counts too, not just "approved" — a creator's own opt-in
         # is trusted by default (moderation is reactive: an admin flags bad
         # content after the fact, rather than every share sitting invisible
@@ -735,7 +767,7 @@ def fetch_or_generate_images(
                 fallback = get_image_pool(
                     output_dir, 1,
                     custom_library_path=library_path if "library" in enabled else None,
-                    additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
+                    additional_library_files=_approved_community_library_files(niche, user_id=user_id) if "community" in enabled else [],
                     niche=niche,
                 )
                 return (fallback[0] if fallback else None), False
@@ -815,7 +847,7 @@ def fetch_or_generate_images(
             distinct_pool = get_image_pool(
                 output_dir, pool_target,
                 custom_library_path=library_path if "library" in enabled else None,
-                additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
+                additional_library_files=_approved_community_library_files(niche, user_id=user_id) if "community" in enabled else [],
                 niche=niche,
             )
             pool = iter(expand_randomly(distinct_pool, still_needed))
@@ -874,7 +906,7 @@ def fetch_or_generate_images(
     # existing images get cycled, though: it has no way to conjure up new
     # library/community images that were never uploaded in the first place —
     # a small pool set to "auto" already uses everything available.
-    community_files = _approved_community_library_files(niche) if "community" in enabled else []
+    community_files = _approved_community_library_files(niche, user_id=user_id) if "community" in enabled else []
     logger.info(
         f"No AI generation enabled — using {'library' if 'library' in enabled else ''}"
         f"{' + ' if 'library' in enabled and 'community' in enabled else ''}"
