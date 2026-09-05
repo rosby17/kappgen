@@ -342,11 +342,23 @@ def process_single_queued_video() -> bool:
             watermark_enabled = not user_has_purchased_credits(db, channel.user)
 
             music_config = channel.music_channel_config or {}
+            target_duration_minutes = float(music_config.get("target_duration_minutes") or 10)
+            raw_image_count = music_config.get("image_count")
+            if raw_image_count in (None, "", "auto"):
+                # No fixed UI cap here (there used to be one, hardcoded to 0-3
+                # regardless of how long the video was, which looped the same
+                # handful of images for hours on a long compilation) — instead
+                # scale with the actual target duration: one distinct image
+                # roughly every 40s, so a fixed image never overstays its
+                # welcome. Mirrors the frontend's own 'auto' default exactly.
+                image_count = max(1, round(target_duration_minutes * 60 / 40))
+            else:
+                image_count = int(raw_image_count)
             output_mp4, tracks_generated = render_music_video(
                 style_prompt=music_config.get("style_prompt") or "",
                 edit_mode=music_config.get("edit_mode") or "loop",
-                image_count=int(music_config.get("image_count") or 0),
-                target_duration_minutes=float(music_config.get("target_duration_minutes") or 10),
+                image_count=image_count,
+                target_duration_minutes=target_duration_minutes,
                 niche=channel.niche,
                 output_dir=video_dir,
                 progress_callback=update_progress,
