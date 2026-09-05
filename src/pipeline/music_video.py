@@ -317,10 +317,14 @@ def compose_final_video(
     effects_filter = _effects_video_filter(effects_config)
     base_label = "0:v" if not effects_filter else "vfx"
     filter_complex = f"[0:v]{effects_filter}[vfx];" if effects_filter else ""
+    # A full-width, saturated cyan waveform read as an ugly bar slapped across
+    # the whole frame — a slim, soft, centered strip (roughly half the frame
+    # width) reads as an actual design element instead of a debug overlay.
+    waveform_width = WIDTH // 2
     filter_complex += (
-        f"[1:a]showwaves=s={WIDTH}x260:mode=cline:colors=0x00c2ff|0x38d0ff:scale=sqrt,format=yuva420p,"
-        f"colorchannelmixer=aa=0.85[wave];"
-        f"[{base_label}][wave]overlay=(W-w)/2:H-h-70:shortest=1[vbase]"
+        f"[1:a]showwaves=s={waveform_width}x160:mode=cline:colors=0xffffff:scale=sqrt,format=yuva420p,"
+        f"colorchannelmixer=aa=0.55[wave];"
+        f"[{base_label}][wave]overlay=(W-w)/2:H-h-90:shortest=1[vbase]"
     )
     inputs = ["-i", str(background_video), "-i", str(final_audio)]
     next_label = "vbase"
