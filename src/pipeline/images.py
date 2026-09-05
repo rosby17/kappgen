@@ -552,12 +552,16 @@ def generate_thumbnail_image(
     reference_image_paths: Optional[List[Path]] = None,
     provider_order: Optional[List[str]] = None,
 ) -> Path:
-    """Generate a thumbnail with IziVoice GPT Image 2 only.
-
-    The optional order remains for call-site compatibility, but it is
-    deliberately ignored: a thumbnail must never select another provider.
-    """
-    order = ["izivoice"]
+    """Generate a thumbnail via GPT Image 2 — Izivoice by default (matches
+    the existing style/character-reference behavior admins are used to), but
+    now actually honors an admin-configured provider_order (see
+    thumbnail_provider_order(), app_settings.py) instead of hardcoding
+    Izivoice as the only option. Falling through to fal.ai's own GPT Image 2
+    when Izivoice's account is down/rate-limited (both wrap the same
+    underlying model) is strictly more resilient than a total outage, and
+    the admin settings UI already offers fal as a choice here — it just
+    never actually took effect until now."""
+    order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface")] or ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),

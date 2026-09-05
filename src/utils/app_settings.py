@@ -9,10 +9,16 @@ from typing import List, Optional
 from src.db.session import SessionLocal
 from src.db.models import AppSetting
 
-# Thumbnails intentionally use one renderer: IziVoice's GPT Image 2. Scene
-# images keep their own independent source/provider policy.
+# Thumbnails default to Izivoice's GPT Image 2 (best style/character-reference
+# behavior admins are used to), with fal.ai's own GPT Image 2 as an actual
+# fallback now (see generate_thumbnail_image, images.py) rather than being
+# hardcoded to Izivoice alone regardless of this setting — Izivoice's account
+# hitting its own quota/auth issues used to mean a total thumbnail outage
+# with no way to fail over, even though the admin settings UI already
+# offered fal as a choice here. Scene images keep their own independent
+# source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
-THUMBNAIL_PROVIDERS_ALL = ["izivoice"]
+THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal"]
 THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 
