@@ -623,6 +623,40 @@ def debit_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, opera
         return False
 
 
+def refund_izivoice_usage_by_user_id(user_id: str, izivoice_credits: float, operation: str, video_id: Optional[str] = None) -> None:
+    """Refunds one specific Izivoice debit — for a call site that already
+    charged credits up front (see debit_izivoice_usage_by_user_id) and then
+    discovered the provider call itself failed and fell back to a free,
+    lesser substitute (e.g. music_video.py's synthetic ambient drone in
+    place of real AI-generated music). Unlike refund_video_credits, this
+    isn't "the whole video failed, refund everything" — the video still
+    renders and is delivered, just with the fallback asset — so only the
+    specific charge for the thing that didn't actually happen is credited
+    back, not the render fee or anything else genuinely provided.
+    Self-contained session, mirroring debit_izivoice_usage_by_user_id's
+    shape; best-effort — a failure here must never crash the render that's
+    already succeeded past this point, just log it."""
+    if not user_id or izivoice_credits <= 0:
+        return
+    try:
+        from src.db.session import SessionLocal
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return
+            amount = int(round(izivoice_credits))
+            pot = CreditPot(user_id=user.id, amount=amount, original_amount=amount, expires_at=datetime.utcnow() + timedelta(days=365))
+            db.add(pot)
+            db.add(CreditTransaction(user_id=user.id, video_id=video_id, amount=amount, transaction_type="refund", description=f"{operation} (échec du fournisseur, repli gratuit utilisé)"))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        from src.utils.logger import logger
+        logger.error(f"Izivoice refund failed for user {user_id}, operation {operation}: {exc}")
+
+
 def estimate_script_generation_cost(total_words: int, num_parts: int) -> dict:
     """Predicts what an "Automatique" script generation of this shape will
     actually cost, in the same terms debit_script_generation_cost charges

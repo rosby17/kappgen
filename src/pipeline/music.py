@@ -165,9 +165,20 @@ def get_background_music_track(
                 if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "ai_music_generation", video_id=video_id):
                     logger.warning(f"Insufficient KappGen credit balance for AI music generation (user {user_id}); using fallback tone instead.")
                     return _generate_synthetic_fallback_track(duration)
-            return generate_music_izivoice(prompt, duration, output_path)
+            try:
+                return generate_music_izivoice(prompt, duration, output_path)
+            except Exception:
+                # One immediate retry before giving up — Izivoice's /music
+                # endpoint has been seen returning a transient 500 that
+                # succeeds on a second try.
+                return generate_music_izivoice(prompt, duration, output_path)
         except Exception as e:
             logger.warning(f"Izivoice music generation failed ({e}). Falling back to synthetic tone.")
+            if user_id:
+                # Already charged as if generation succeeded — it didn't, so
+                # the free fallback tone must not be paid for.
+                from src.utils.billing import refund_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
+                refund_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "ai_music_generation", video_id=video_id)
             return _generate_synthetic_fallback_track(duration)
 
     return _generate_synthetic_fallback_track(duration)
