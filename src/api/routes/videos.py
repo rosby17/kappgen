@@ -704,6 +704,21 @@ def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current
     ]
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
+def _content_disposition_header(disposition_type: str, filename: str) -> str:
+    """Same encoding FileResponse itself applies internally (Starlette's
+    quote(filename) != filename check) — but StreamingResponse builds its
+    headers from a plain dict with no such handling, so a title with any
+    non-latin-1 character (accents are fine, but an em dash or emoji is not)
+    crashed the whole request with a raw UnicodeEncodeError instead of a
+    clean download. Needed only for the remote-stream branch below; the
+    FileResponse branches already do this on their own."""
+    from urllib.parse import quote
+    encoded = quote(filename)
+    if encoded != filename:
+        return f"{disposition_type}; filename*=utf-8''{encoded}"
+    return f'{disposition_type}; filename="{filename}"'
+
+
 def _download_filename(video: Video, suffix: str) -> str:
     """Uses the video's real title (sanitized to a safe filename) instead of
     its opaque id, so a manually re-uploaded/re-posted video keeps its title
@@ -751,7 +766,7 @@ def download_video(video_id: str, quality: str = "hd", share: bool = False, db: 
         return StreamingResponse(
             remote_stream(),
             media_type="video/mp4",
-            headers={"Content-Disposition": f'{disposition_type}; filename="{filename}"'},
+            headers={"Content-Disposition": _content_disposition_header(disposition_type, filename)},
         )
 
     source_path = STORAGE_PATH / video.output_path if not is_remote else None
