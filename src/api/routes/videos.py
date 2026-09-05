@@ -1289,7 +1289,9 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
     thumbnail_style = channel.thumbnail_style or {}
-    configured_references = thumbnail_style.get("reference_image_paths") or ([] if not thumbnail_style.get("reference_image_path") else [thumbnail_style["reference_image_path"]])
+    configured_references = [] if thumbnail_style.get("disabled") else (
+        thumbnail_style.get("reference_image_paths") or ([] if not thumbnail_style.get("reference_image_path") else [thumbnail_style["reference_image_path"]])
+    )
     if not configured_references:
         raise HTTPException(
             status_code=409,

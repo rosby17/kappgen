@@ -199,8 +199,13 @@ def process_single_queued_video() -> bool:
         # A thumbnail exists only when the creator supplied its style references.
         # The moodboard is therefore both the creative brief and explicit consent
         # to spend thumbnail credits; a legacy boolean alone is never enough.
+        # `disabled` is the explicit opt-out ("je ne veux pas de miniature") —
+        # checked first so stale reference_image_paths left over from before
+        # the creator opted out can never silently re-enable paid generation.
         thumbnail_style = channel.thumbnail_style or {}
-        thumbnail_enabled = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
+        thumbnail_enabled = (not thumbnail_style.get("disabled")) and bool(
+            thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path")
+        )
         # /retry and /retry-visuals both re-queue this same video row without
         # ever touching thumbnail.jpg — only images/clips/scenes.json (or
         # nothing at all, for a plain full retry) get cleared. Without this
