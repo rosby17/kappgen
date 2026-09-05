@@ -1229,11 +1229,17 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             current = video_path.with_name("thumbnail.jpg")
         if not channel or not video_path or not video_path.exists():
             return
-        if current.exists():
-            history_dir = current.parent / "thumbnail_history"
-            history_dir.mkdir(parents=True, exist_ok=True)
-            archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-            shutil.copy2(current, archive)
+        # Archiving used to happen unconditionally right here, before the
+        # attempt even ran — so a failed generation (provider out of credits,
+        # rate-limited, whatever) still counted against
+        # MAX_THUMBNAIL_REGENERATIONS below, exactly as if it had produced a
+        # real new thumbnail. A creator whose every attempt failed all
+        # afternoon (Izivoice/ai33.pro credits, fal.ai 403 — see today's
+        # incident) could hit "limite atteinte" without ever getting a single
+        # working AI thumbnail. Keep the previous image in memory instead,
+        # and only actually archive it (the thing that counts toward the
+        # limit) once generate_thumbnail below has genuinely succeeded.
+        previous_thumbnail_bytes = current.read_bytes() if current.exists() else None
         # A manual thumbnail regeneration is explicitly a fresh creative
         # request. Re-read the actual script here instead of recycling the
         # previous caption (which may have been an old, title-derived draft).
@@ -1250,8 +1256,18 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         # clearly, not silently swap one mediocre image for another.
         thumbnail_style = channel.thumbnail_style or {}
         strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
-        generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
+        _, ai_used = generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
         succeeded = True
+        # Only a genuine paid-provider success counts toward
+        # MAX_THUMBNAIL_REGENERATIONS — a channel with no reference style
+        # configured (strict=False) falling back to a plain video-frame grab
+        # is a free, unlimited operation, not a "regeneration" in the sense
+        # the cap exists to bound.
+        if ai_used and previous_thumbnail_bytes is not None:
+            history_dir = current.parent / "thumbnail_history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+            archive.write_bytes(previous_thumbnail_bytes)
     except Exception as e:
         logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
     finally:
