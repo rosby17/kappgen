@@ -47,7 +47,7 @@ THUMBNAIL_CREDITS = 2000
 # render economics. See orchestrator.py's stock-footage/photo fallback.
 STOCK_MEDIA_CREDITS = 100
 # On-demand 4K upscale/export from the finished 1080p master.
-FOUR_K_EXPORT_CREDITS = 5000
+FOUR_K_EXPORT_CREDITS = 3000
 # Base cost of an automated facecam edit (transcription + silence/mistake
 # cuts + verification pass), debited once when the pipeline starts — separate
 # from STOCK_MEDIA_CREDITS (b-roll) and the LLM cost of the editorial retake
