@@ -5,18 +5,26 @@ FROM python:3.11-slim-bookworm
 # dependency of the existing faceless render. Adopted deliberately despite
 # the extra runtime (see ROADMAP.md): HyperFrames renders HTML/CSS/GSAP
 # compositions via headless Chrome, which the base ffmpeg pipeline has no
-# equivalent for. Chrome's own shared-lib dependencies are installed right
-# after Node so `hyperframes browser ensure` (below) can actually launch it
-# at build time instead of failing/downloading on a video's first render.
+# equivalent for.
+#
+# HyperFrames' own `browser ensure` step (previously run below, now removed)
+# fetches a pinned "Chrome for Testing" build straight from Google's CDN —
+# every single deploy since this was added either failed or hung for over an
+# hour on it, never once completing (so Docker had nothing to cache and
+# re-tried the same stuck download from scratch every time), pointing at
+# that CDN being slow/blocked from this host's network. HyperFrames also
+# happily runs against a plain system Chromium (it auto-detects
+# /usr/bin/chromium, and HYPERFRAMES_BROWSER_PATH below makes that explicit
+# rather than relying on the fallback order) — `apt-get install chromium`
+# uses the same Debian mirror every other package here already installs
+# from fine, and pulls in all of Chrome's shared-lib dependencies itself,
+# so the long hand-picked libnss3/libatk/... list is gone too.
 RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends nodejs chromium \
     && npm install -g hyperframes \
-    && apt-get install -y --no-install-recommends \
-        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-        libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
-        libpangocairo-1.0-0 libpango-1.0-0 libcairo2 libx11-6 libxext6 \
     && rm -rf /var/lib/apt/lists/*
+ENV HYPERFRAMES_BROWSER_PATH=/usr/bin/chromium
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -112,10 +120,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 RUN mkdir -p storage data
-
-# Bakes the headless-Chrome binary HyperFrames renders with into the image,
-# so a facecam video's first card render doesn't pay a cold-start download.
-RUN npx --yes hyperframes browser ensure
 
 EXPOSE 8000
 
