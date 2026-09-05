@@ -1529,13 +1529,32 @@ def retry_video_visuals(video_id: str, current_user: User = Depends(get_current_
     return video.to_dict()
 
 
+# A finished video now lives on B2 (see _finalize_output_storage) for
+# VIDEO_RETENTION_HOURS (30 days) free of charge before queue_runner.py's
+# purge sweep archives it — see purge_old_videos_and_uploads. Beyond that,
+# a creator pays to extend, and it's always a fresh purchase for a fixed
+# window: no "à vie" tier, on purpose, so storage cost for an inactive video
+# never goes permanently unpaid — each tier just moves retention_until
+# further out from whichever is later (now or the current expiry), and
+# lapses again once that window passes, same as before.
+RETENTION_TIERS: Dict[str, Dict[str, Any]] = {
+    "1d": {"days": 1, "credits": 200, "label": "1 jour"},
+    "1w": {"days": 7, "credits": 800, "label": "1 semaine"},
+    "1m": {"days": 30, "credits": 3000, "label": "1 mois"},
+    "2m": {"days": 60, "credits": 5500, "label": "2 mois"},
+    "3m": {"days": 90, "credits": 7500, "label": "3 mois"},
+    "6m": {"days": 180, "credits": 13000, "label": "6 mois"},
+    "1y": {"days": 365, "credits": 22000, "label": "1 an"},
+}
+
+
 class VideoUpdate(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None
     clear_folder: bool = False
     approved_for_publish: Optional[bool] = None
     extended_retention: Optional[bool] = None
-    retention_days: Optional[int] = None
+    retention_tier: Optional[str] = None
     # Opportunistic script edit — see update_video below: only takes effect
     # while the video is still 'queued', on a best-effort basis (no delay is
     # introduced to let a creator "catch" it; the worker may already have
@@ -1571,26 +1590,27 @@ def update_video(video_id: str, payload: VideoUpdate, current_user: User = Depen
         video.script_text = new_script
         video.estimated_duration_seconds = max(3.0, len(new_script.split()) / 2.5)
 
-    if payload.retention_days is not None:
+    if payload.retention_tier is not None:
         from datetime import timedelta
         from src.utils.billing import debit_credits, get_credit_balance
-        allowed_days = {1, 2, 3, 7, 30}
-        if payload.retention_days not in allowed_days:
-            raise HTTPException(status_code=400, detail="Choisissez 1, 2, 3, 7 ou 30 jours de conservation.")
+        from src.worker.queue_runner import VIDEO_RETENTION_HOURS
+        tier = RETENTION_TIERS.get(payload.retention_tier)
+        if not tier:
+            raise HTTPException(status_code=400, detail=f"Palier de conservation inconnu. Choisissez parmi : {', '.join(RETENTION_TIERS)}.")
         if video.purged_at or not video.output_path:
             raise HTTPException(status_code=409, detail="Cette vidéo a déjà été supprimée du stockage.")
-        cost = payload.retention_days * 1000
-        if not debit_credits(db, current_user, cost, f"Conservation vidéo +{payload.retention_days} jour(s)", video_id=video.id):
+        cost = tier["credits"]
+        if not debit_credits(db, current_user, cost, f"Conservation vidéo +{tier['label']}", video_id=video.id):
             raise HTTPException(status_code=402, detail=f"Crédits insuffisants : {cost} crédits requis, {get_credit_balance(db, current_user)} disponibles.")
-        default_expiry = (video.finished_at or datetime.utcnow()) + timedelta(hours=48)
+        default_expiry = (video.finished_at or datetime.utcnow()) + timedelta(hours=VIDEO_RETENTION_HOURS)
         base = max(default_expiry, video.retention_until or default_expiry, datetime.utcnow())
-        video.retention_until = base + timedelta(days=payload.retention_days)
+        video.retention_until = base + timedelta(days=tier["days"])
         video.extended_retention = True
         video.purged_at = None
 
     if payload.extended_retention is False:
         # Cancelling prevents future purchases; credits already consumed are
-        # not refundable and the normal 48-hour deletion rule applies again.
+        # not refundable and the normal free-window deletion rule applies again.
         video.extended_retention = False
         video.retention_until = None
 

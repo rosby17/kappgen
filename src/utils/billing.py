@@ -84,42 +84,32 @@ CREDIT_VALUE_FCFA = STARTER_PACK_PRICE_FCFA / STARTER_PACK_CREDITS  # 0.035 FCFA
 # to price it as steeply as a scarce/paid resource.
 SCRIPT_GENERATION_COST_MARKUP_MULTIPLIER = 1.5
 
-# Flat "conventional" fee charged on a render that used NO paid AI feature at
-# all — own script, own voice recording (transcription off), own images, own
-# music. Those creators generate zero Izivoice/Anthropic/fal.ai spend, but
-# still cost real server compute (ffmpeg) and storage, so this covers that
-# instead of letting a fully-BYO video render for free. Only applies when the
-# render triggered no other debit — see maybe_debit_base_render_fee below.
+# Flat montage/assembly fee charged on every finished render, in addition to
+# whatever paid AI features (voix off, transcription, miniature, images,
+# musique...) it also used. Covers the real server cost (ffmpeg encode,
+# storage) that every video incurs regardless of how much AI spend it
+# triggered — a fully-BYO video (own script, own voice, own images, own
+# music) used to render for free otherwise. See debit_base_render_fee below.
 BASE_RENDER_FEE_FCFA = 100
 
 def _base_render_fee_credits() -> int:
     return ceil(BASE_RENDER_FEE_FCFA / CREDIT_VALUE_FCFA)
 
 
-def maybe_debit_base_render_fee(db: Session, user: User, video) -> None:
-    """Charges BASE_RENDER_FEE_FCFA for a just-finished render, but only if
-    nothing else was already debited for it — i.e. the creator used no paid
-    AI feature (transcription, AI images/thumbnail, Izivoice voice/music) at
-    all. Since most debits along the pipeline don't have a video_id to tag
-    themselves with (see debit_credits), "nothing else was debited" is
-    approximated by no debit existing for this user between the video's
-    render start and now — good enough in practice since a single creator
-    rarely has two videos rendering in the exact same window. Best-effort:
-    never raises, never blocks/undoes the render itself if the balance is
-    short (same fail-open posture as debit_script_generation_cost)."""
+def debit_base_render_fee(db: Session, user: User, video) -> None:
+    """Charges BASE_RENDER_FEE_FCFA for a just-finished render — unconditionally,
+    on top of any other feature already billed for it (voix off, transcription,
+    miniature, images, musique...), not just as a fallback for an otherwise-free
+    render. Called once per finished video from queue_runner.py, right after
+    status flips to DONE. Best-effort: never raises, never blocks/undoes the
+    render itself if the balance is short (same fail-open posture as
+    debit_script_generation_cost)."""
     if not video.started_at:
-        return
-    already_debited = db.query(CreditTransaction).filter(
-        CreditTransaction.user_id == user.id,
-        CreditTransaction.transaction_type == "debit",
-        CreditTransaction.created_at >= video.started_at,
-    ).first() is not None
-    if already_debited:
         return
     charge = _base_render_fee_credits()
     ok = debit_credits(
         db, user, charge,
-        f"Frais forfaitaire vidéo ({BASE_RENDER_FEE_FCFA} FCFA — aucune fonctionnalité IA payante utilisée)",
+        f"Frais forfaitaire vidéo ({BASE_RENDER_FEE_FCFA} FCFA)",
         video_id=video.id,
     )
     if not ok:
