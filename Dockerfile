@@ -31,12 +31,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation2 \
     fonts-comfortaa \
     fonts-cabin \
+    # fonts-noto-core/-ui-core only — kept purely as a broad-Unicode fallback
+    # so a stray non-Latin character (an accented proper noun, a symbol) in
+    # an otherwise French script doesn't render as a missing-glyph box.
+    # fonts-noto-extra/-cjk/-cjk-extra/-ui-extra dropped entirely: they cover
+    # scripts (Tamil, Thai, CJK, etc.) this French-language product never
+    # renders, the API's font picker now excludes every Noto face outright
+    # anyway (see list_render_fonts in channels.py), and they're some of the
+    # largest packages in this whole install list — dead weight that was
+    # only ever slowing every build down.
     fonts-noto-core \
-    fonts-noto-extra \
-    fonts-noto-cjk \
-    fonts-noto-cjk-extra \
     fonts-noto-ui-core \
-    fonts-noto-ui-extra \
     fonts-comic-neue \
     # Extra display/script/serif families for the subtitle font picker. The
     # API reads their real family names from fontconfig after installation,
