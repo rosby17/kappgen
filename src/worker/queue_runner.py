@@ -2071,11 +2071,19 @@ def tag_untagged_community_images():
     found nothing until the tagging pass caught up. Getting there ahead of
     approval means the catalogue is already searchable the moment an admin
     flips the switch.
+
+    Also classifies each image's actual niche (independent of the sharing
+    channel's own niche label) in the same pass, and auto-inserts a
+    CommunityLibraryImagePlacement row when it disagrees with the channel's
+    declared niche — see classify_image_niche in vision.py. This is what
+    lets the shared pools grow correctly even from channels whose library
+    isn't perfectly on-topic for their own niche.
     """
     from src.config import STORAGE_PATH
-    from src.db.models import CommunityLibraryFolder, CommunityLibraryImageTag
+    from src.db.models import CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag
     from src.api.routes.channels import ALLOWED_LIBRARY_EXTENSIONS
-    from src.pipeline.vision import analyze_image_content_tags
+    from src.api.routes.admin import KNOWN_NICHES
+    from src.pipeline.vision import analyze_image_content_tags, classify_image_niche
     import mimetypes
 
     db = SessionLocal()
@@ -2084,6 +2092,10 @@ def tag_untagged_community_images():
         already_tagged = {
             (row.channel_id, row.filename)
             for row in db.query(CommunityLibraryImageTag.channel_id, CommunityLibraryImageTag.filename).all()
+        }
+        existing_placements = {
+            (row.channel_id, row.filename)
+            for row in db.query(CommunityLibraryImagePlacement.channel_id, CommunityLibraryImagePlacement.filename).all()
         }
         tagged_this_pass = 0
         for folder in folders:
@@ -2100,21 +2112,45 @@ def tag_untagged_community_images():
                 if (folder.channel_id, asset.name) in already_tagged:
                     continue
                 media_type = mimetypes.guess_type(asset.name)[0] or "image/jpeg"
+                image_bytes = asset.read_bytes()
                 try:
-                    tags = analyze_image_content_tags(asset.read_bytes(), media_type)
+                    tags = analyze_image_content_tags(image_bytes, media_type)
                 except Exception as exc:
                     logger.warning(f"Content tagging failed for {folder.channel_id}/{asset.name}: {exc}")
                     tags = []
+                # Auto niche classification: an image's actual content
+                # sometimes belongs to a different niche than the channel
+                # that shared it, so it should still feed THAT niche's pool
+                # rather than sitting invisible to every search/render that
+                # doesn't happen to match the sharing channel's own label.
+                # Never touches a row an admin already set by hand.
+                detected_niche = None
+                try:
+                    detected_niche = classify_image_niche(image_bytes, media_type, KNOWN_NICHES)
+                except Exception as exc:
+                    logger.warning(f"Niche classification failed for {folder.channel_id}/{asset.name}: {exc}")
+                if (
+                    detected_niche
+                    and detected_niche.casefold() != (folder.niche or "").casefold()
+                    and (folder.channel_id, asset.name) not in existing_placements
+                ):
+                    db.add(CommunityLibraryImagePlacement(
+                        channel_id=folder.channel_id,
+                        filename=asset.name,
+                        niche=detected_niche,
+                    ))
+                    existing_placements.add((folder.channel_id, asset.name))
                 db.add(CommunityLibraryImageTag(
                     channel_id=folder.channel_id,
                     filename=asset.name,
                     tags_json=json.dumps(tags),
+                    detected_niche=detected_niche,
                 ))
                 db.commit()
                 already_tagged.add((folder.channel_id, asset.name))
                 tagged_this_pass += 1
         if tagged_this_pass:
-            logger.info(f"Tagged {tagged_this_pass} community library image(s) for public-library search.")
+            logger.info(f"Tagged and niche-classified {tagged_this_pass} community library image(s).")
     except Exception as exc:
         logger.error(f"tag_untagged_community_images failed: {exc}")
     finally:

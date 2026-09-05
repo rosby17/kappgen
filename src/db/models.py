@@ -1015,6 +1015,14 @@ class CommunityLibraryImageTag(Base):
     filename = Column(String(512), nullable=False)
     tags_json = Column(Text, nullable=False)  # JSON list of lowercase English keywords
     analyzed_at = Column(DateTime, default=datetime.utcnow)
+    # The vision model's own guess at which KNOWN_NICHES entry this image
+    # actually belongs to, from the same pass as tags_json above — null when
+    # nothing in the list fit confidently. Used only to auto-populate
+    # CommunityLibraryImagePlacement (see queue_runner.py's classification
+    # pass) when it disagrees with the sharing channel's own declared niche,
+    # e.g. a fitness photo shared by a channel whose niche is "Santé". Never
+    # overwrites a placement an admin set by hand.
+    detected_niche = Column(String(255), nullable=True)
 
 
 class ChannelSoundEffect(Base):

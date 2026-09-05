@@ -410,6 +410,40 @@ def analyze_image_content_tags(image_bytes: bytes, media_type: str) -> list:
     return cleaned_tags[:10]
 
 
+def classify_image_niche(image_bytes: bytes, media_type: str, known_niches: list) -> "str | None":
+    """Guesses which of `known_niches` this image's actual content belongs to
+    — independent of whichever channel happens to have shared it. A channel's
+    library is sometimes broader than its own declared niche (e.g. a
+    "Santé" channel that also has a handful of fitness shots), so trusting
+    the channel's niche label alone under-serves other niches' pools and
+    over-serves this one's. Returns None when nothing in the list is a
+    confident fit — never invents a new niche name, so the shared pool
+    namings stay exactly the admin-curated list."""
+    if not known_niches:
+        return None
+    niches_list = "\n".join(f"- {n}" for n in known_niches)
+    instruction = (
+        "You are sorting one photo into a stock-photo library organized by niche. "
+        f"Look at the image and pick the SINGLE best-matching niche from this exact list "
+        f"(reply with the niche exactly as written, nothing else):\n{niches_list}\n\n"
+        "If none of them is a confident, clear match for what the image actually shows, "
+        "reply with exactly: aucune\n"
+        "Reply with ONLY the niche name (or \"aucune\") — no punctuation, no explanation."
+    )
+    try:
+        raw = _run_with_fallback(_vision_chain([(image_bytes, media_type)], instruction))
+    except Exception as exc:
+        logger.warning(f"Niche classification failed, leaving image unclassified: {exc}")
+        return None
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip().strip('"').strip(".")
+    if not cleaned or cleaned.casefold() == "aucune":
+        return None
+    for niche in known_niches:
+        if niche.casefold() == cleaned.casefold():
+            return niche
+    return None
+
+
 def analyze_reference_image(image_bytes: bytes, media_type: str) -> str:
     """Analyzes a reference image and returns a reusable image-generation style prompt.
     Tries Anthropic first, falls back to fal.ai (Claude via OpenRouter), then OpenAI."""

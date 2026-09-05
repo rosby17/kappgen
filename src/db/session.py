@@ -233,6 +233,17 @@ def init_db():
                     logger.info(f"Migrating community_library_folders table: adding {col_name} column.")
                     conn.execute(text(ddl))
 
+    if "community_library_image_tags" in inspector.get_table_names():
+        existing_clit_columns = {col["name"] for col in inspector.get_columns("community_library_image_tags")}
+        clit_migrations = {
+            "detected_niche": "ALTER TABLE community_library_image_tags ADD COLUMN detected_niche VARCHAR(255)",
+        }
+        with engine.begin() as conn:
+            for col_name, ddl in clit_migrations.items():
+                if col_name not in existing_clit_columns:
+                    logger.info(f"Migrating community_library_image_tags table: adding {col_name} column.")
+                    conn.execute(text(ddl))
+
     if "folders" in inspector.get_table_names():
         existing_folder_columns = {col["name"] for col in inspector.get_columns("folders")}
         folder_migrations = {
