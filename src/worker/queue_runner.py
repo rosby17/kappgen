@@ -1020,7 +1020,35 @@ def requeue_orphaned_videos():
                     restart_script_ids.append(video.id)
         if orphaned:
             db.commit()
-        for video_id in restart_script_ids:
+
+        # A second, separate kind of orphan: an automatic video can also be
+        # interrupted while STILL 'queued' — either in _wait_for_auto_video_turn's
+        # FIFO wait (generate_and_queue_auto_video/retry_auto_video_script_background
+        # both set status back to 'queued' on every loop tick while waiting for an
+        # older video ahead of it) or in the brief window between the row being
+        # inserted and that wait starting. The render picker permanently ignores
+        # an automatic 'queued' row with no script_text (see ready_for_render
+        # above), and nothing else was ever going to come back and restart its
+        # writer — this is exactly the "ghost video, no title, never launches"
+        # bug: ​a row stuck here forever, silently, with only its placeholder
+        # title ("<channel> — nouvelle vidéo") to show for it.
+        stuck_queued_ids = [
+            v.id for v in (
+                db.query(Video)
+                .join(Channel, Video.channel_id == Channel.id)
+                .filter(
+                    Video.status == VideoStatus.QUEUED.value,
+                    Video.creation_source == "automatic",
+                    or_(Video.script_text.is_(None), Video.script_text == ""),
+                    Channel.content_type != "music",
+                )
+                .all()
+            )
+            if v.id not in restart_script_ids
+        ]
+        for video_id in stuck_queued_ids:
+            logger.warning(f"Re-queuing stranded queued video {video_id} (interrupted before its script writer ever started).")
+        for video_id in restart_script_ids + stuck_queued_ids:
             threading.Thread(target=retry_auto_video_script_background, args=(video_id,), daemon=True).start()
     finally:
         db.close()
