@@ -141,6 +141,12 @@ def process_single_queued_video() -> bool:
             # "queued" forever — no background script writer was ever
             # going to fill in a field this content type doesn't use.
             Channel.content_type == "music",
+            # Same reasoning, same latent bug: a facecam upload (creator's
+            # own talking-head recording, edited via facecam_editor.py) never
+            # has a script_text either — nothing generates one. An auto-mode
+            # channel would otherwise trap it in "queued" forever exactly
+            # like the music case above.
+            Video.input_type == "facecam",
             and_(Video.script_text.is_not(None), Video.script_text != ""),
         )
         video = (
