@@ -112,6 +112,13 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 YOUTUBE_OAUTH_REDIRECT_URI = os.getenv("YOUTUBE_OAUTH_REDIRECT_URI", "")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://app.kappgen.com")
+# Comma-separated first-party browser origins. Keep this explicit because the
+# API uses credentialed cookies; a wildcard origin is invalid and unsafe here.
+CORS_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("CORS_ORIGINS", "https://app.kappgen.com,https://kappgen.com,http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if origin.strip()
+]
 # This backend's own public URL — needed to build webhook callback URLs (Tara
 # Money) that point back at the server, not the frontend.
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://api.kappgen.com")

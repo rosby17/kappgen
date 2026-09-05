@@ -44,6 +44,19 @@ def test_api_health():
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
+
+def test_cors_allows_the_first_party_app_origin():
+    response = client.options(
+        "/api/channels",
+        headers={
+            "Origin": "https://app.kappgen.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://app.kappgen.com"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
 def test_user_registration_and_login():
     reg_payload = {
         "email": "user_test@nichecut.com",

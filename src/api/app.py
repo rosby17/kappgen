@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.config import STORAGE_PATH
+from src.config import STORAGE_PATH, CORS_ORIGINS
 from src.db.session import init_db
 from src.utils.error_tracking import init_error_tracking
 from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin, facecam
@@ -67,7 +67,7 @@ generated media are returned as short-lived URLs where applicable.
 # with access-control-allow-credentials: true).
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://([a-z0-9-]+\.)?kappgen\.com|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?",
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
