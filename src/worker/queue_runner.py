@@ -184,6 +184,15 @@ def process_single_queued_video() -> bool:
         # to spend thumbnail credits; a legacy boolean alone is never enough.
         thumbnail_style = channel.thumbnail_style or {}
         thumbnail_enabled = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
+        # /retry and /retry-visuals both re-queue this same video row without
+        # ever touching thumbnail.jpg — only images/clips/scenes.json (or
+        # nothing at all, for a plain full retry) get cleared. Without this
+        # check, every retry silently paid THUMBNAIL_CREDITS again for a
+        # brand-new AI thumbnail the creator never asked for, on top of
+        # whatever the retry itself was scoped to fix. A creator who
+        # deliberately wants a new one already has the explicit regenerate/
+        # resync endpoints in videos.py for that.
+        thumbnail_already_exists = thumbnail_destination.exists()
         # video.thumbnail_text is only ever populated by the post-render
         # metadata step further down — at this point, before render has even
         # started, it's still empty, so this used to fall back straight to
@@ -205,7 +214,7 @@ def process_single_queued_video() -> bool:
             video_dir / "__thumbnail_source__.mp4", thumbnail_destination,
             video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
             channel, video.id, strict=True,
-        ) if thumbnail_enabled else None
+        ) if (thumbnail_enabled and not thumbnail_already_exists) else None
 
         def await_parallel_thumbnail():
             """Returns (path, ai_used) — ai_used=False means generate_thumbnail
@@ -533,7 +542,7 @@ def process_single_queued_video() -> bool:
         # Every finished video must have a visible card thumbnail. Channels
         # without a reference style skip the parallel AI job, but still get a
         # representative frame from the finished MP4 here.
-        if not thumbnail_ai_used:
+        if not thumbnail_ai_used and not thumbnail_already_exists:
             # The parallel attempt above started before the video existed and
             # failed its AI call — strict=True means it raised rather than
             # writing a generic, unstyled placeholder (see
