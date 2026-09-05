@@ -387,7 +387,15 @@ def render_music_video(
     if image_count > 0:
         from src.pipeline.images import fetch_or_generate_images
         images_dir = output_dir / "source" / "images"
-        prompt = f"{style_prompt}, in the visual context of {niche}" if niche else style_prompt
+        # "natural, balanced colors, no heavy color tint or filter" is a
+        # deliberate counterweight: a mood-only prompt (e.g. a music style
+        # description like "dreamy, nocturnal, melancholic") reliably pushes
+        # the free-tier generator (FLUX.1-schnell) toward a single dominant
+        # color wash (magenta/purple was the reported case) — technically
+        # "on theme", but not what a creator expects from "an image related
+        # to my music", and there's no color-grading filter anywhere in this
+        # pipeline that could otherwise explain a full-frame tint like that.
+        prompt = f"{style_prompt}, in the visual context of {niche}, natural balanced colors, no heavy color tint or filter" if niche else f"{style_prompt}, natural balanced colors, no heavy color tint or filter"
         # A music channel saved before Visuels/Sources existed (or one that
         # never touched that step) has no image_style at all — default to
         # exactly the old always-AI-generate behavior instead of
