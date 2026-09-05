@@ -67,11 +67,26 @@ def _generate_audio_track(style_prompt: str, index: int, output_dir: Path, user_
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
         if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "music_video_generation", video_id=video_id):
             raise RuntimeError("Solde de crédits KappGen insuffisant pour générer la musique.")
-    try:
-        return generate_music_izivoice(style_prompt, 180.0, output_path)
-    except Exception as e:
-        logger.warning(f"AI music generation failed for track {index} ({e}); using a synthetic fallback tone.")
-        return _generate_synthetic_fallback_track(180.0)
+    # One retry before giving up: Izivoice's /music endpoint has been seen
+    # returning a transient 500 that succeeds on an immediate second try —
+    # worth it before falling all the way back to the synthetic drone,
+    # which a creator correctly does not experience as "the music they
+    # asked for" (production report: a whole 10-minute music video that
+    # was just this looped tone, from a single failed attempt).
+    last_exc = None
+    for attempt in range(2):
+        try:
+            return generate_music_izivoice(style_prompt, 180.0, output_path)
+        except Exception as e:
+            last_exc = e
+            logger.warning(f"AI music generation failed for track {index}, attempt {attempt + 1}/2 ({e}).")
+    logger.warning(f"AI music generation failed for track {index} after retry ({last_exc}); using a synthetic fallback tone.")
+    if user_id:
+        # The creator was already charged as if AI generation succeeded —
+        # it didn't, so the free fallback tone must not be paid for.
+        from src.utils.billing import refund_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
+        refund_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "music_video_generation", video_id=video_id)
+    return _generate_synthetic_fallback_track(180.0)
 
 
 def build_audio(
@@ -302,10 +317,14 @@ def compose_final_video(
     effects_filter = _effects_video_filter(effects_config)
     base_label = "0:v" if not effects_filter else "vfx"
     filter_complex = f"[0:v]{effects_filter}[vfx];" if effects_filter else ""
+    # A full-width, saturated cyan waveform read as an ugly bar slapped across
+    # the whole frame — a slim, soft, centered strip (roughly half the frame
+    # width) reads as an actual design element instead of a debug overlay.
+    waveform_width = WIDTH // 2
     filter_complex += (
-        f"[1:a]showwaves=s={WIDTH}x260:mode=cline:colors=0x00c2ff|0x38d0ff:scale=sqrt,format=yuva420p,"
-        f"colorchannelmixer=aa=0.85[wave];"
-        f"[{base_label}][wave]overlay=(W-w)/2:H-h-70:shortest=1[vbase]"
+        f"[1:a]showwaves=s={waveform_width}x160:mode=cline:colors=0xffffff:scale=sqrt,format=yuva420p,"
+        f"colorchannelmixer=aa=0.55[wave];"
+        f"[{base_label}][wave]overlay=(W-w)/2:H-h-90:shortest=1[vbase]"
     )
     inputs = ["-i", str(background_video), "-i", str(final_audio)]
     next_label = "vbase"
