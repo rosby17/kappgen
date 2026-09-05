@@ -52,22 +52,45 @@ _TEMPLATE_BODIES = {
     """,
 }
 
+DEFAULT_ACCENT_COLOR = "#00c2ff"
+DEFAULT_FONT_FAMILY = "DejaVu Sans"
+
+# {accent} is filled in per-render from the channel's branding (see
+# render_card_clip) — this is the one repeatable "charte graphique" knob
+# every card template shares, so a channel's cards always match its logo
+# instead of every channel defaulting to the same blue.
 _TEMPLATE_CSS = {
     "kicker_headline": """
-        #card{position:absolute;left:6%;top:70%;color:#fff;}
-        #kicker{color:#00c2ff;font-weight:800;font-size:34px;letter-spacing:2px;}
-        #headline{font-weight:800;font-size:58px;margin-top:12px;max-width:88%;}
+        #card{{position:absolute;left:6%;top:70%;color:#fff;}}
+        #kicker{{color:{accent};font-weight:800;font-size:34px;letter-spacing:2px;}}
+        #headline{{font-weight:800;font-size:58px;margin-top:12px;max-width:88%;}}
     """,
     "stat_bold": """
-        #card{position:absolute;left:0;top:8%;width:100%;text-align:center;color:#00c2ff;}
-        #stat{font-weight:900;font-size:80px;}
+        #card{{position:absolute;left:0;top:8%;width:100%;text-align:center;color:{accent};}}
+        #stat{{font-weight:900;font-size:80px;}}
     """,
     "lower_third": """
-        #card{position:absolute;left:0;top:80%;width:100%;color:#fff;}
-        #bar{position:absolute;inset:0;background:rgba(10,15,25,0.75);}
-        #lower{position:relative;padding:22px 5%;font-weight:800;font-size:40px;}
+        #card{{position:absolute;left:0;top:80%;width:100%;color:#fff;}}
+        #bar{{position:absolute;inset:0;background:rgba(10,15,25,0.75);}}
+        #lower{{position:relative;padding:22px 5%;font-weight:800;font-size:40px;}}
     """,
 }
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+
+
+def _safe_accent_color(accent_color: str | None) -> str:
+    # CSS gets built via .format() below — an unvalidated value here would
+    # be a CSS/HTML injection point into the rendered card.
+    if accent_color and _HEX_COLOR_RE.match(accent_color.strip()):
+        return accent_color.strip()
+    return DEFAULT_ACCENT_COLOR
+
+
+def _safe_font_family(font_family: str | None) -> str:
+    if font_family and re.match(r"^[A-Za-z0-9 '\-]{1,40}$", font_family.strip()):
+        return font_family.strip()
+    return DEFAULT_FONT_FAMILY
 
 
 def detect_beats(words: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -106,11 +129,11 @@ def select_card_templates(seed: str, count: int) -> List[str]:
     return picks
 
 
-def _build_composition_html(template: str, text: str, size: tuple) -> str:
+def _build_composition_html(template: str, text: str, size: tuple, accent_color: str, font_family: str) -> str:
     width, height = size
     safe_text = html.escape(text[:70])
     body = _TEMPLATE_BODIES[template].format(text=safe_text)
-    css = _TEMPLATE_CSS[template]
+    css = _TEMPLATE_CSS[template].format(accent=accent_color)
     return f"""<!doctype html>
 <html>
 <head>
@@ -118,7 +141,7 @@ def _build_composition_html(template: str, text: str, size: tuple) -> str:
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 <style>
   html,body{{margin:0;background:transparent;width:{width}px;height:{height}px;overflow:hidden;
-    font-family:'DejaVu Sans',Arial,sans-serif;}}
+    font-family:'{font_family}',Arial,sans-serif;}}
   {css}
 </style>
 </head>
@@ -141,11 +164,23 @@ def _build_composition_html(template: str, text: str, size: tuple) -> str:
 """
 
 
-def render_card_clip(template: str, text: str, size: tuple, output_path: Path) -> Path:
+def render_card_clip(
+    template: str,
+    text: str,
+    size: tuple,
+    output_path: Path,
+    accent_color: str | None = None,
+    font_family: str | None = None,
+) -> Path:
     project_dir = output_path.parent / f"_hf_project_{output_path.stem}"
     project_dir.mkdir(parents=True, exist_ok=True)
     try:
-        (project_dir / "index.html").write_text(_build_composition_html(template, text, size), encoding="utf-8")
+        html_source = _build_composition_html(
+            template, text, size,
+            _safe_accent_color(accent_color),
+            _safe_font_family(font_family),
+        )
+        (project_dir / "index.html").write_text(html_source, encoding="utf-8")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [

@@ -61,10 +61,14 @@ def _composite_broll_and_cards(
     db: Session,
     video_size: Tuple[int, int],
     output_path: Path,
+    branding: Dict[str, Any] | None = None,
 ) -> Path:
     triggers = [t for t in facecam_broll.detect_broll_triggers(words) if t.get("query")]
     beats = facecam_cards.detect_beats(words)
     templates = facecam_cards.select_card_templates(seed=str(output_path), count=len(beats))
+    branding = branding or {}
+    accent_color = branding.get("accent_color")
+    font_family = branding.get("font_family")
 
     overlays: List[Dict[str, Any]] = []
     for trig in triggers:
@@ -74,7 +78,7 @@ def _composite_broll_and_cards(
 
     for beat, template in zip(beats, templates):
         card_path = output_path.parent / f"card_{beat['time']:.2f}.mov"
-        facecam_cards.render_card_clip(template, beat["text"], video_size, card_path)
+        facecam_cards.render_card_clip(template, beat["text"], video_size, card_path, accent_color, font_family)
         overlays.append({"path": card_path, "start": beat["time"], "duration": facecam_cards.CARD_DURATION_SECONDS, "kind": "card"})
 
     if not overlays:
@@ -188,7 +192,7 @@ def run_facecam_pipeline(video_id: str, db: Session) -> None:
     db.commit()
     video_size = _probe_video_size(cut_path)
     composited_path = manifest_dir / "composited.mp4"
-    _composite_broll_and_cards(cut_path, cut_words, db, video_size, composited_path)
+    _composite_broll_and_cards(cut_path, cut_words, db, video_size, composited_path, channel.branding if channel else None)
 
     for ov_path in manifest_dir.glob("card_*.mov"):
         ov_path.unlink(missing_ok=True)
