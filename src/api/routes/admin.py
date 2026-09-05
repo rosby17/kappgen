@@ -374,6 +374,11 @@ def admin_list_videos(q: Optional[str] = None, status_filter: Optional[str] = No
         data["queue_position"] = queue_positions.get(v.id)
         data["queue_total"] = queue_total
         data["channel_name"] = v.channel.name if v.channel else None
+        # Which production pipeline this video actually went through — the
+        # admin video list otherwise gives no way to tell a faceless
+        # narration render apart from a facecam edit or a music-channel
+        # video at a glance.
+        data["channel_content_type"] = v.channel.content_type if v.channel else None
         data["youtube_connected"] = bool(v.channel and v.channel.youtube_refresh_token)
         data["youtube_channel_handle"] = v.channel.youtube_channel_handle if v.channel else None
         data["youtube_channel_id"] = v.channel.youtube_channel_id if v.channel else None
