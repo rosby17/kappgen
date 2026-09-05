@@ -718,7 +718,7 @@ def _download_filename(video: Video, suffix: str) -> str:
 
 
 @router.get("/{video_id}/download")
-def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get_db)):
+def download_video(video_id: str, quality: str = "hd", share: bool = False, db: Session = Depends(get_db)):
     # Intentionally unauthenticated: reached via a plain download link/window.open,
     # which can't carry a custom Authorization header. video_id is an opaque UUID.
     video = db.query(Video).filter(Video.id == video_id).first()
@@ -727,6 +727,13 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
 
     if quality not in {"hd", "sd", "4k"}:
         raise HTTPException(status_code=400, detail="Qualité invalide. Choisis HD, SD ou 4K.")
+
+    # share=1 : lien envoyé à un tiers (bouton "Partager", voir handleShareVideo
+    # côté frontend) — on veut que ça joue directement dans le navigateur au
+    # lieu de forcer un téléchargement, tout en restant sur api.kappgen.com
+    # plutôt que d'exposer l'URL brute du bucket B2/R2 (pas rassurant pour un
+    # client qui reçoit le lien).
+    disposition_type = "inline" if share else "attachment"
 
     # B2/R2 outputs are intentionally public and no longer exist on the
     # worker's local disk after finalization. Redirect instead of prefixing
@@ -744,7 +751,7 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
         return StreamingResponse(
             remote_stream(),
             media_type="video/mp4",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'{disposition_type}; filename="{filename}"'},
         )
 
     source_path = STORAGE_PATH / video.output_path if not is_remote else None
@@ -767,7 +774,7 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
                 if not source_path or not source_path.exists():
                     raise HTTPException(status_code=404, detail="Vidéo source introuvable pour l’export 4K.")
                 run_ffmpeg(["ffmpeg", "-y", "-i", str(source_path), "-vf", "scale=3840:2160:flags=lanczos", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", "-movflags", "+faststart", str(target)])
-        return FileResponse(target, media_type="video/mp4", filename=_download_filename(video, "4k"))
+        return FileResponse(target, media_type="video/mp4", filename=_download_filename(video, "4k"), content_disposition_type=disposition_type)
 
     source_path = source_path
     if not source_path.exists():
@@ -778,13 +785,13 @@ def download_video(video_id: str, quality: str = "hd", db: Session = Depends(get
         db.commit()
 
     if quality != "sd":
-        return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "hd"))
+        return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "hd"), content_disposition_type=disposition_type)
 
     # Normally already pre-generated right after the render finished (see
     # queue_runner.py) so this resolves instantly; only actually transcodes
     # here as a fallback if that background step hasn't completed yet.
     cached_path = ensure_sd_variant(source_path)
-    return FileResponse(cached_path, media_type="video/mp4", filename=_download_filename(video, "sd"))
+    return FileResponse(cached_path, media_type="video/mp4", filename=_download_filename(video, "sd"), content_disposition_type=disposition_type)
 
 
 @router.get("/{video_id}/thumbnail/download")
