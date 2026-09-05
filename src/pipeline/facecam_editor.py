@@ -15,8 +15,11 @@ from typing import Any, Dict, List, Tuple
 
 from sqlalchemy.orm import Session
 
+from datetime import datetime
+
 from src.config import STORAGE_PATH
 from src.db.models import Video, Channel
+from src.models.project import VideoStatus
 from src.pipeline import facecam_broll, facecam_cards, facecam_cuts, facecam_verify
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline.assembler import assemble_final_video
@@ -167,7 +170,16 @@ def run_facecam_pipeline(video_id: str, db: Session) -> None:
     (manifest_dir / "verify-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
 
     if not report["passed"]:
-        video.status = "needs_review"
+        # "needs_review" isn't a real VideoStatus (only queued/rendering/
+        # done/failed/cancelled exist) — every route that gates on status
+        # (download, retry, regenerate-thumbnail, ...) checks against those
+        # exact values, so a video left in an unrecognized status string was
+        # invisible to all of them: not shown as failed, not retryable,
+        # nothing. FAILED + a descriptive error_message reuses all of that
+        # existing UI instead of inventing a state nothing else understands.
+        video.status = VideoStatus.FAILED.value
+        video.finished_at = datetime.utcnow()
+        video.progress_stage = "Vérification échouée"
         video.error_message = "Vérification des coupes échouée : " + "; ".join(report["failures"])
         db.commit()
         return
@@ -184,7 +196,15 @@ def run_facecam_pipeline(video_id: str, db: Session) -> None:
     video.progress_stage = "final_mux"
     db.commit()
     final_audio = ensure_extracted_audio(composited_path)
-    output_path = STORAGE_PATH / "videos" / f"{video.id}.mp4"
+    # Same layout every other pipeline uses (channels/{channel_id}/videos/{id}/
+    # output.mp4) — not a flat storage/videos/{id}.mp4. Several routes derive
+    # the thumbnail path from output_path via `.with_name("thumbnail.jpg")`
+    # (see videos.py), which only works when each video has its own
+    # directory; a flat layout would have every facecam video sharing (and
+    # overwriting) a single storage/videos/thumbnail.jpg.
+    video_output_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    video_output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = video_output_dir / "output.mp4"
     assemble_final_video(
         clip_paths=[composited_path],
         audio_path=final_audio,
@@ -194,7 +214,32 @@ def run_facecam_pipeline(video_id: str, db: Session) -> None:
         subtitles_preburned=True,
     )
 
-    video.output_path = str(output_path.relative_to(STORAGE_PATH))
-    video.status = "completed"
     video.duration_seconds = edited_duration
+    video.status = VideoStatus.DONE.value
+    video.finished_at = datetime.utcnow()
+    video.progress_stage = "Vidéo prête"
+    video.progress_percent = 100
+    db.commit()
+
+    # Same post-processing every other pipeline gets: a frame-grab
+    # thumbnail (facecam has no reference-style moodboard/AI thumbnail
+    # concept, so this is the only thumbnail it ever gets), an SD download
+    # variant pregenerated while the file is fresh, and the B2 upload —
+    # which must run LAST since it deletes the local file (see the Sept
+    # 2026 queue_runner.py fix for why the two thumbnail/SD steps have to
+    # come first).
+    from src.pipeline.youtube_metadata import generate_thumbnail
+    from src.pipeline.transcode import try_ensure_sd_variant
+    from src.worker.queue_runner import _finalize_output_storage
+
+    thumbnail_destination = video_output_dir / "thumbnail.jpg"
+    try:
+        generate_thumbnail(output_path, thumbnail_destination, video.title or "Vidéo", None, video.id, strict=False)
+        video.thumbnail_error = None
+    except Exception as exc:
+        video.thumbnail_error = "La miniature n'a pas pu être générée."
+        logger.warning("Facecam thumbnail generation failed for video %s: %s", video.id, exc)
+
+    try_ensure_sd_variant(output_path)
+    _finalize_output_storage(db, video, output_path)
     db.commit()
