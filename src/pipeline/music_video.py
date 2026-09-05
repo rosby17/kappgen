@@ -350,7 +350,7 @@ def render_music_video(
     style_prompt: str,
     edit_mode: str,
     image_count: int,
-    target_duration_minutes: float,
+    target_duration_seconds: float,
     niche: str,
     output_dir: Path,
     progress_callback=None,
@@ -372,7 +372,7 @@ def render_music_video(
         if progress_callback:
             progress_callback(stage, percent)
 
-    target_duration_seconds = max(30.0, target_duration_minutes * 60.0)
+    target_duration_seconds = max(30.0, target_duration_seconds)
     audio_dir = output_dir / "source" / "audio"
 
     progress("Génération de la musique", 15)

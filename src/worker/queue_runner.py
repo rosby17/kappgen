@@ -1,5 +1,6 @@
 import shutil
 import json
+import random
 from concurrent.futures import ThreadPoolExecutor
 import signal
 import threading
@@ -349,7 +350,14 @@ def process_single_queued_video() -> bool:
             watermark_enabled = not user_has_purchased_credits(db, channel.user)
 
             music_config = channel.music_channel_config or {}
-            target_duration_minutes = float(music_config.get("target_duration_minutes") or 10)
+            configured_duration_seconds = float(
+                music_config.get("target_duration_seconds")
+                or float(music_config.get("target_duration_minutes") or 10) * 60.0
+            )
+            # The queued record owns the chosen duration. This lets every
+            # automatic render vary naturally while a retry keeps its exact
+            # original target instead of changing length part-way through.
+            target_duration_seconds = float(video.estimated_duration_seconds or configured_duration_seconds)
             raw_image_count = music_config.get("image_count")
             if raw_image_count in (None, "", "auto"):
                 # No fixed UI cap here (there used to be one, hardcoded to 0-3
@@ -358,14 +366,14 @@ def process_single_queued_video() -> bool:
                 # scale with the actual target duration: one distinct image
                 # roughly every 40s, so a fixed image never overstays its
                 # welcome. Mirrors the frontend's own 'auto' default exactly.
-                image_count = max(1, round(target_duration_minutes * 60 / 40))
+                image_count = max(1, round(target_duration_seconds / 40))
             else:
                 image_count = int(raw_image_count)
             output_mp4, tracks_generated = render_music_video(
                 style_prompt=music_config.get("style_prompt") or "",
                 edit_mode=music_config.get("edit_mode") or "loop",
                 image_count=image_count,
-                target_duration_minutes=target_duration_minutes,
+                target_duration_seconds=target_duration_seconds,
                 niche=channel.niche,
                 output_dir=video_dir,
                 progress_callback=update_progress,
@@ -1776,6 +1784,17 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     return video
 
 
+def _music_video_duration_seconds(music_config: dict) -> float:
+    """Choose a stable, slightly non-round target for one music render."""
+    configured_duration_seconds = float(
+        music_config.get("target_duration_seconds")
+        or float(music_config.get("target_duration_minutes") or 10) * 60.0
+    )
+    variation_seconds = min(15, max(3, round(configured_duration_seconds * 0.017)))
+    offsets = [offset for offset in range(-variation_seconds, variation_seconds + 1) if offset]
+    return max(30.0, configured_duration_seconds + random.choice(offsets))
+
+
 def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
     """Queues a new music video for a "music" content_type channel — no
     script/topic to write, everything needed already lives in
@@ -1812,7 +1831,10 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
         )
     ]
     title = pick_music_video_title(style_prompt, music_config.get("title_examples"), recent_titles)
-    target_duration_minutes = float(music_config.get("target_duration_minutes") or 10)
+    # Exact 10:00 / 20:00 outputs look mechanically generated. Keep the
+    # creator's selected duration as the centre, with a bounded natural
+    # variation (10:00 becomes e.g. 09:51 or 10:07).
+    target_duration_seconds = _music_video_duration_seconds(music_config)
     # Imported music has no generation cost. Izivoice needs the conservative
     # reserve because a compilation can contain several generated tracks.
     if music_source_mode == "ai_generate":
@@ -1828,7 +1850,7 @@ def generate_and_queue_music_video(db, channel: Channel) -> Optional[Video]:
         input_type="text",
         creation_source="automatic",
         status=VideoStatus.QUEUED.value,
-        estimated_duration_seconds=target_duration_minutes * 60.0,
+        estimated_duration_seconds=target_duration_seconds,
     )
     db.add(video)
     db.commit()
