@@ -65,28 +65,42 @@ def _poll_izivoice_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     raise TimeoutError(f"Izivoice music task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s")
 
 
-def _music_via_izivoice(client: httpx.Client, prompt: str, output_path: Path) -> Path:
+def _music_via_izivoice(
+    client: httpx.Client, prompt: str, output_path: Path,
+    lyrics: Optional[str] = None, title: Optional[str] = None,
+    tags: Optional[str] = None, vocal_gender: Optional[str] = None,
+) -> Path:
     """
-    Generates a background music track via Izivoice's music-generation endpoint.
+    Generates a music track via Izivoice's music-generation endpoint.
 
     POST /music now requires create_mode ("simple" or "custom") — a field it
     silently started rejecting requests without (400 "Invalid creation
     mode"), breaking this call entirely until this was updated. "simple"
-    mode takes gpt_description_prompt (not the old bare `prompt` field) and
-    make_instrumental — background music always instrumental, never
-    generated vocals competing with the narration. No documented duration
-    param either way — the API decides the length. Returns {success,
-    task_id}, polled via GET /tasks/{task_id} until status == "done", at
-    which point metadata.audio_url holds the track.
+    mode (default, no lyrics given) takes gpt_description_prompt and
+    make_instrumental=True — right for background music behind narration,
+    which must never compete with vocals. Passing `lyrics` switches to
+    "custom" mode (title/lyrics/tags/vocal_gender) for a real song with
+    vocals — the Vidéo Musicale product, where the content IS the song. No
+    documented duration param either way — the API decides the length.
+    Returns {success, task_id}, polled via GET /tasks/{task_id} until status
+    == "done", at which point metadata.audio_url holds the track.
     """
-    resp = client.post(
-        f"{IZIVOICE_BASE_URL}/music",
-        headers=_izivoice_headers(),
-        json={
+    if lyrics:
+        payload = {"create_mode": "custom", "title": title or "", "lyrics": lyrics}
+        if tags:
+            payload["tags"] = tags
+        if vocal_gender:
+            payload["vocal_gender"] = vocal_gender
+    else:
+        payload = {
             "create_mode": "simple",
             "gpt_description_prompt": prompt[:2000],
             "make_instrumental": True,
-        },
+        }
+    resp = client.post(
+        f"{IZIVOICE_BASE_URL}/music",
+        headers=_izivoice_headers(),
+        json=payload,
         timeout=30.0
     )
     resp.raise_for_status()
@@ -106,13 +120,20 @@ def _music_via_izivoice(client: httpx.Client, prompt: str, output_path: Path) ->
     return output_path
 
 
-def _music_via_ai33(client: httpx.Client, prompt: str, output_path: Path) -> Path:
+def _music_via_ai33(
+    client: httpx.Client, prompt: str, output_path: Path,
+    lyrics: Optional[str] = None, title: Optional[str] = None,
+    tags: Optional[str] = None, vocal_gender: Optional[str] = None,
+) -> Path:
     """Same shape as _music_via_izivoice, ai33.pro directly (see
     src/pipeline/ai33_provider.py) — bypasses Izivoice's own account/quota
     entirely rather than changing what's generated (Izivoice's own /music
     route is itself a thin passthrough to this same upstream endpoint)."""
     from src.pipeline import ai33_provider
-    task_id = ai33_provider.submit_music_generation(client, prompt, make_instrumental=True, api_key=AI33PRO_API_KEY)
+    task_id = ai33_provider.submit_music_generation(
+        client, prompt, make_instrumental=(not lyrics), api_key=AI33PRO_API_KEY,
+        lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender,
+    )
     task = ai33_provider.poll_task(task_id, client, AI33PRO_API_KEY)
     audio_url = (task.get("metadata") or {}).get("audio_url")
     if not audio_url:
@@ -125,13 +146,22 @@ def _music_via_ai33(client: httpx.Client, prompt: str, output_path: Path) -> Pat
     return output_path
 
 
-def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> Path:
+def generate_music_izivoice(
+    prompt: str, duration: float, output_path: Path,
+    lyrics: Optional[str] = None, title: Optional[str] = None,
+    tags: Optional[str] = None, vocal_gender: Optional[str] = None,
+) -> Path:
     """Public entrypoint (kept its historical name — every call site expects
     it) — tries the admin-ordered music providers (see
     _configured_music_providers()) in turn, falling through to the next one
     on failure. `duration` is unused by every provider so far (neither
     Izivoice nor ai33.pro accepts a target length; the API decides), kept in
-    the signature only for call-site compatibility."""
+    the signature only for call-site compatibility.
+
+    `lyrics` is None for every existing caller (narration background music,
+    always instrumental) — only music_video.py's Vidéo Musicale pipeline
+    passes real lyrics, to generate an actual song with vocals instead of an
+    instrumental bed."""
     providers = _configured_music_providers()
     if not providers:
         raise RuntimeError("No music provider configured (IZIVOICE_API_KEY / AI33PRO_API_KEY both missing).")
@@ -141,8 +171,8 @@ def generate_music_izivoice(prompt: str, duration: float, output_path: Path) -> 
         for provider in providers:
             try:
                 if provider == "ai33pro":
-                    return _music_via_ai33(client, prompt, output_path)
-                return _music_via_izivoice(client, prompt, output_path)
+                    return _music_via_ai33(client, prompt, output_path, lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender)
+                return _music_via_izivoice(client, prompt, output_path, lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender)
             except Exception as e:
                 last_error = e
                 logger.warning(f"{provider} music generation failed ({e}); trying next configured provider if any.")

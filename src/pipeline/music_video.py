@@ -54,7 +54,10 @@ def pick_music_video_title(style_prompt: str, title_examples: Optional[str], rec
     return f"{style_label.title()} — Session {len(recent_titles) + 1}"[:100]
 
 
-def _generate_audio_track(style_prompt: str, index: int, output_dir: Path, user_id: str | None = None, video_id: str | None = None) -> Path:
+def _generate_audio_track(
+    style_prompt: str, index: int, output_dir: Path, user_id: str | None = None, video_id: str | None = None,
+    lyrics: Optional[str] = None, title: Optional[str] = None, vocal_gender: Optional[str] = None,
+) -> Path:
     output_path = output_dir / f"track_{index}.mp3"
     if user_id:
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
@@ -69,7 +72,7 @@ def _generate_audio_track(style_prompt: str, index: int, output_dir: Path, user_
     last_exc = None
     for attempt in range(2):
         try:
-            return generate_music_izivoice(style_prompt, 180.0, output_path)
+            return generate_music_izivoice(style_prompt, 180.0, output_path, lyrics=lyrics, title=title, vocal_gender=vocal_gender)
         except Exception as e:
             last_exc = e
             logger.warning(f"AI music generation failed for track {index}, attempt {attempt + 1}/2 ({e}).")
@@ -91,9 +94,19 @@ def build_audio(
     video_id: str | None = None,
     music_source_mode: str = "ai_generate",
     own_tracks: Optional[List[str]] = None,
+    lyrics: Optional[str] = None,
+    title: Optional[str] = None,
+    vocal_gender: Optional[str] = None,
 ) -> Tuple[Path, int]:
     """Returns (final_audio_path, tracks_generated) — tracks_generated feeds
-    the single end-of-render credit charge (see MUSIC_VIDEO_CREDITS)."""
+    the single end-of-render credit charge (see MUSIC_VIDEO_CREDITS).
+
+    `lyrics` makes this an actual song with vocals instead of an instrumental
+    bed (see generate_music_izivoice). Only meaningful with edit_mode="loop"
+    (a single song, repeated) — "compilation" mode generates several
+    independent tracks back-to-back to fill a long duration, and reusing the
+    same fixed lyrics for each would produce the identical vocal take several
+    times in a row, so lyrics are only passed through for "loop" below."""
     output_dir.mkdir(parents=True, exist_ok=True)
     tracks_generated = 0
 
@@ -154,7 +167,7 @@ def build_audio(
         return final_audio, tracks_generated
 
     # "loop" (default): one track, repeated to fill the target duration.
-    track = _generate_audio_track(style_prompt, 1, output_dir, user_id=user_id, video_id=video_id)
+    track = _generate_audio_track(style_prompt, 1, output_dir, user_id=user_id, video_id=video_id, lyrics=lyrics, title=title, vocal_gender=vocal_gender)
     tracks_generated = 1
     final_audio = output_dir / "final_audio.mp3"
     run_ffmpeg([
@@ -317,7 +330,7 @@ def compose_final_video(
     filter_complex += (
         f"[1:a]showwaves=s={waveform_width}x160:mode=cline:colors=0xffffff:scale=sqrt,format=yuva420p,"
         f"colorchannelmixer=aa=0.55[wave];"
-        f"[{base_label}][wave]overlay=(W-w)/2:H-h-90:shortest=1[vbase]"
+        f"[{base_label}][wave]overlay=(W-w)/2:(H-h)/2:shortest=1[vbase]"
     )
     inputs = ["-i", str(background_video), "-i", str(final_audio)]
     next_label = "vbase"
@@ -364,10 +377,14 @@ def render_music_video(
     subtitle_style: Optional[dict] = None,
     subtitle_text: str = "",
     channel_id: str | None = None,
+    lyrics: Optional[str] = None,
+    title: Optional[str] = None,
+    vocal_gender: Optional[str] = None,
 ) -> Tuple[Path, int]:
     """Main entry point, called from the worker (see queue_runner.py). Returns
     (output_mp4, tracks_generated) — tracks_generated feeds the single
-    end-of-render credit charge."""
+    end-of-render credit charge. `lyrics` (from Channel.music_channel_config)
+    generates a real song with vocals instead of an instrumental bed."""
     def progress(stage: str, percent: int):
         if progress_callback:
             progress_callback(stage, percent)
@@ -380,6 +397,7 @@ def render_music_video(
         style_prompt, edit_mode, target_duration_seconds, audio_dir,
         user_id=user_id, video_id=video_id,
         music_source_mode=music_source_mode, own_tracks=own_tracks,
+        lyrics=lyrics, title=title, vocal_gender=vocal_gender,
     )
 
     progress("Génération des images", 45)
@@ -396,13 +414,15 @@ def render_music_video(
         # to my music", and there's no color-grading filter anywhere in this
         # pipeline that could otherwise explain a full-frame tint like that.
         prompt = f"{style_prompt}, in the visual context of {niche}, natural balanced colors, no heavy color tint or filter" if niche else f"{style_prompt}, natural balanced colors, no heavy color tint or filter"
-        # A music channel saved before Visuels/Sources existed (or one that
-        # never touched that step) has no image_style at all — default to
-        # exactly the old always-AI-generate behavior instead of
-        # resolve_enabled_image_sources' own general-purpose default
-        # ("library", meant for narration channels, which is empty here and
-        # would silently produce zero images for every such channel).
-        effective_style = image_style if (image_style and image_style.get("sources")) else {"sources": ["ai_generated"], "style_prompt": ""}
+        # A music channel has no Visuels/Sources wizard step of its own, so
+        # image_style is always empty here — defaulting to AI-generated ONLY
+        # meant a single failed/rate-limited generation left the whole video
+        # on one generic emergency image with nothing else to fall back to.
+        # Enabling library + community too lets fetch_or_generate_images mix
+        # in the channel's own uploaded images and the niche's shared pool
+        # exactly like the narration pipeline already does, instead of an
+        # all-or-nothing single source.
+        effective_style = image_style if (image_style and image_style.get("sources")) else {"sources": ["ai_generated", "library", "community"], "style_prompt": ""}
         try:
             image_paths = fetch_or_generate_images(
                 [prompt] * image_count, images_dir, effective_style,

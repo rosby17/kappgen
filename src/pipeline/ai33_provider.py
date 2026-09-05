@@ -210,24 +210,40 @@ def submit_music_generation(
     prompt: str,
     make_instrumental: bool = True,
     api_key: Optional[str] = None,
+    lyrics: Optional[str] = None,
+    title: Optional[str] = None,
+    tags: Optional[str] = None,
+    vocal_gender: Optional[str] = None,
 ) -> str:
     """POST /v1s/task/music-generation (JSON, not FormData — confirmed
     against Izivoice's own source, src/app/api/music/route.ts in the
     izivoice repo: that route is a thin passthrough straight to this same
-    ai33.pro path). "simple" create_mode only — the same mode
-    music.py's Izivoice path already uses; "custom" mode (title/lyrics/
-    tags/vocal_gender) is available upstream but unused here since
-    background music is always instrumental. Poll with poll_task(); a
-    "done" task's metadata.audio_url is the generated track, same shape
-    Izivoice's own wrapper returns."""
-    resp = _post_with_retry(
-        client, f"{AI33PRO_BASE_URL}/v1s/task/music-generation",
-        headers={**_headers(api_key), "Content-Type": "application/json"},
-        json={
+    ai33.pro path).
+
+    "simple" create_mode (the default) generates from a text description
+    only, always instrumental — right for background music behind
+    narration. Passing `lyrics` switches to "custom" mode instead (title/
+    lyrics/tags/vocal_gender, confirmed against the same izivoice route:
+    "custom" requires lyrics or tags) — a real song with vocals, for the
+    Vidéo Musicale product where the content IS the song. Poll with
+    poll_task(); a "done" task's metadata.audio_url is the generated track,
+    same shape Izivoice's own wrapper returns."""
+    if lyrics:
+        payload = {"create_mode": "custom", "title": title or "", "lyrics": lyrics}
+        if tags:
+            payload["tags"] = tags
+        if vocal_gender:
+            payload["vocal_gender"] = vocal_gender
+    else:
+        payload = {
             "create_mode": "simple",
             "gpt_description_prompt": prompt[:2000],
             "make_instrumental": make_instrumental,
-        },
+        }
+    resp = _post_with_retry(
+        client, f"{AI33PRO_BASE_URL}/v1s/task/music-generation",
+        headers={**_headers(api_key), "Content-Type": "application/json"},
+        json=payload,
         timeout=30.0,
     )
     resp.raise_for_status()

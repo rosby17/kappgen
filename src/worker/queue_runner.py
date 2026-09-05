@@ -388,6 +388,9 @@ def process_single_queued_video() -> bool:
                 subtitle_style=channel.subtitle_style,
                 subtitle_text=music_config.get("subtitle_text") or "",
                 channel_id=channel.id,
+                lyrics=music_config.get("lyrics") or None,
+                title=video.title,
+                vocal_gender=music_config.get("vocal_gender") or None,
             )
 
             try:
