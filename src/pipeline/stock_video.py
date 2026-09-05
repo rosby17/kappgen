@@ -201,6 +201,73 @@ def fetch_stock_photo(query: str) -> Optional[Path]:
     return None
 
 
+def fetch_stock_photos(query: str, count: int = 5) -> List[Path]:
+    """Same free Pexels search as fetch_stock_photo, but keeps every distinct
+    result it downloads (up to `count`) instead of just the first — that
+    single-result behavior meant repeated calls for the same query always
+    returned the exact same file forever, and the shared last-resort cache
+    (image_pool.py's get_image_pool, when nothing else is configured/
+    available) never grew past a literal handful of photos no matter how
+    many renders hit it. Each distinct photo is cached under its own
+    `{query_hash}_{pexels_id}.jpg`, so a niche's cache genuinely accumulates
+    real, on-topic variety over time instead of every render reusing
+    whatever happened to be cached first."""
+    if not PEXELS_API_KEY:
+        return []
+    query = re.sub(r"\s+", " ", (query or "")).strip()
+    if not query:
+        return []
+
+    key = _cache_key(query)
+    already_cached = sorted(PHOTO_CACHE_DIR.glob(f"{key}_*.jpg")) if PHOTO_CACHE_DIR.is_dir() else []
+    if len(already_cached) >= count:
+        return already_cached
+
+    try:
+        PHOTO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            resp = client.get(
+                PEXELS_PHOTO_SEARCH_URL,
+                headers={"Authorization": PEXELS_API_KEY},
+                params={"query": query, "orientation": "landscape", "per_page": max(count, 5)},
+            )
+            if resp.status_code == 429:
+                logger.warning("Pexels rate limit reached; using whatever stock photos are already cached.")
+                return already_cached
+            resp.raise_for_status()
+            photos = resp.json().get("photos") or []
+            fetched = list(already_cached)
+            for photo in photos:
+                if len(fetched) >= count:
+                    break
+                pexels_id = photo.get("id")
+                cached = PHOTO_CACHE_DIR / f"{key}_{pexels_id}.jpg"
+                if cached.exists() and cached.stat().st_size > 0:
+                    if cached not in fetched:
+                        fetched.append(cached)
+                    continue
+                link = (photo.get("src") or {}).get("large2x") or (photo.get("src") or {}).get("large")
+                if not link:
+                    continue
+                image = client.get(link)
+                image.raise_for_status()
+                if len(image.content) > MAX_PHOTO_BYTES:
+                    continue
+                cached.write_bytes(image.content)
+                (PHOTO_CACHE_DIR / f"{key}_{pexels_id}.json").write_text(json.dumps({
+                    "query": query,
+                    "pexels_id": pexels_id,
+                    "author": photo.get("photographer"),
+                    "author_url": photo.get("photographer_url"),
+                    "source_url": photo.get("url"),
+                }, ensure_ascii=False), encoding="utf-8")
+                fetched.append(cached)
+            return fetched
+    except Exception as exc:
+        logger.warning(f"Pexels photo search failed for '{query}' ({exc}); using whatever is already cached.")
+        return already_cached
+
+
 def fetch_stock_clips(queries: List[str]) -> Dict[int, Path]:
     """Resolves a clip per scene index, skipping scenes whose query returns
     nothing. Consecutive scenes never reuse the same file — repeating the same

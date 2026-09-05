@@ -114,6 +114,7 @@ def get_image_pool(
     require_custom_library: bool = False,
     additional_library_dirs: Optional[List[Path]] = None,
     additional_library_files: Optional[List[Path]] = None,
+    niche: Optional[str] = None,
 ) -> List[Path]:
     """
     Retrieves available images from (in priority order): the client-provided local
@@ -182,6 +183,21 @@ def get_image_pool(
         cached_photo_dir = ASSETS_PATH / "stock_photo_cache"
         if cached_photo_dir.is_dir():
             existing_images.extend(_filter_landscape(list(cached_photo_dir.glob("*.jpg"))))
+        # This used to just read whatever this shared, cross-channel cache
+        # already happened to contain — often a single leftover photo from
+        # an unrelated niche's earlier render, reused verbatim by every
+        # completely-unrelated video that ever hit this last resort (the
+        # reported "same night-street photo on 3 different channels" bug).
+        # Actively search Pexels by the actual niche now, growing a real
+        # per-niche cache over time (fetch_stock_photos keeps every distinct
+        # result, not just the first) instead of only ever reading whatever
+        # was already there.
+        if niche and len(existing_images) < required_count:
+            try:
+                from src.pipeline.stock_video import fetch_stock_photos
+                existing_images = list(dict.fromkeys(existing_images + fetch_stock_photos(niche, count=max(required_count, 5))))
+            except Exception as exc:
+                logger.warning(f"Pexels niche-photo top-up failed for '{niche}': {exc}")
         if not existing_images:
             raise ValueError(
                 "Aucun visuel réel disponible : ajoutez des images, activez une source IA gratuite "

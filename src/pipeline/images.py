@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import time
 import random
@@ -6,8 +7,31 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from PIL import Image
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS, AI33PRO_API_KEY
 from src.utils.logger import logger
+
+
+def _has_extreme_magenta_cast(image_bytes: bytes) -> bool:
+    """Detects the specific full-frame magenta/pink wash reported on
+    Hugging Face's free FLUX.1-schnell path (routed through nscale) — a
+    known artifact on some inference backends where the green channel comes
+    back badly under-decoded relative to red/blue, tinting an otherwise
+    normal photo/scene entirely pink regardless of what the prompt asked
+    for. A real magenta cast has both red AND blue means well above green's
+    across the whole frame; downsampling to a small thumbnail first keeps
+    this cheap enough to run on every generated image."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            small = img.convert("RGB").resize((64, 64))
+            pixels = list(small.getdata())
+        r = sum(p[0] for p in pixels) / len(pixels)
+        g = sum(p[1] for p in pixels) / len(pixels)
+        b = sum(p[2] for p in pixels) / len(pixels)
+        return g > 0 and r > g * 1.6 and b > g * 1.6
+    except Exception:
+        # Never let a validation bug block an otherwise-fine image.
+        return False
 
 # Image models often invent misspelled copy when a scene mentions a concept,
 # a book, a sign, a storefront, or a brand. Keep this constraint centralized
@@ -57,7 +81,12 @@ def _approved_community_library_files(niche: Optional[str]) -> List[Path]:
     from src.config import STORAGE_PATH
     db = SessionLocal()
     try:
-        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status == "approved").all()
+        # "pending" counts too, not just "approved" — a creator's own opt-in
+        # is trusted by default (moderation is reactive: an admin flags bad
+        # content after the fact, rather than every share sitting invisible
+        # until someone manually reviews it one folder at a time). Only
+        # "flagged" is actually excluded.
+        folders = db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.status != "flagged").all()
         channel_ids = [folder.channel_id for folder in folders]
         placements = {
             (row.channel_id, row.filename): row.niche
@@ -517,8 +546,16 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
             b64 = data[0].get("b64_json") if data else None
             if not b64:
                 raise ValueError(f"Hugging Face (nscale/FLUX.1-schnell) returned no image: {resp.json()}")
+            image_bytes = base64.b64decode(b64)
+            if _has_extreme_magenta_cast(image_bytes):
+                # Reported live: a full-frame pink/magenta wash on an
+                # otherwise normal generated scene — treat exactly like a
+                # provider failure (retry the next account, or fall through
+                # to the next configured source) rather than saving and
+                # billing "success" on a broken image.
+                raise ValueError("Hugging Face (nscale/FLUX.1-schnell) returned an image with an extreme magenta color cast — discarding.")
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(base64.b64decode(b64))
+            output_path.write_bytes(image_bytes)
             log_usage("huggingface_image", operation, 1, "images", 0.0, meta={"model": "black-forest-labs/FLUX.1-schnell (nscale, free tier)", "hf_account_id": account["id"]})
             _mark_provider_account(account["id"], "active")
             return output_path
@@ -533,7 +570,7 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
             raise
         except Exception as exc:
             last_exc = exc
-            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
+            logger.warning(f"Hugging Face account {account['id'] or '(env)'} generation rejected: {exc}")
             continue
     raise RuntimeError(f"All {len(accounts)} Hugging Face account(s) failed. Last error: {last_exc}")
 
@@ -699,6 +736,7 @@ def fetch_or_generate_images(
                     output_dir, 1,
                     custom_library_path=library_path if "library" in enabled else None,
                     additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
+                    niche=niche,
                 )
                 return (fallback[0] if fallback else None), False
 
@@ -778,6 +816,7 @@ def fetch_or_generate_images(
                 output_dir, pool_target,
                 custom_library_path=library_path if "library" in enabled else None,
                 additional_library_files=_approved_community_library_files(niche) if "community" in enabled else [],
+                niche=niche,
             )
             pool = iter(expand_randomly(distinct_pool, still_needed))
             for i, r in enumerate(results):
@@ -815,7 +854,7 @@ def fetch_or_generate_images(
         generation_count = min(len(prompts), unique_generation_count or len(prompts))
         originals = [p for p in fetch_google_images(prompts[:generation_count], user_id=user_id) if p]
         if not originals:
-            return get_image_pool(output_dir, len(prompts))
+            return get_image_pool(output_dir, len(prompts), niche=niche)
         sequence = expand_randomly(originals, len(prompts))
         logger.info(f"Google Image Search: found {len(originals)} real image(s), reused across {len(prompts)} scene(s).")
         return sequence
@@ -847,6 +886,7 @@ def fetch_or_generate_images(
             min(len(prompts), unique_generation_count),
             custom_library_path=library_path if "library" in enabled else None,
             additional_library_files=community_files,
+            niche=niche,
         )
         return expand_randomly(distinct_pool, len(prompts))
     return get_image_pool(
@@ -854,4 +894,5 @@ def fetch_or_generate_images(
         len(prompts),
         custom_library_path=library_path if "library" in enabled else None,
         additional_library_files=community_files,
+        niche=niche,
     )
