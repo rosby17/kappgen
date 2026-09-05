@@ -9,7 +9,18 @@ from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
-TASK_POLL_TIMEOUT_SECONDS = 90
+# A real Izivoice music generation commonly runs well past 90s (the same
+# reason the wizard's own preview endpoint had to move to an async job
+# pattern — see channels.py's /preview-ai-music). That constraint was about
+# Cloudflare's ~100s proxy timeout on an HTTP request; this poll runs
+# entirely inside the background render worker with no HTTP request behind
+# it, so there's no reason to cap it that low here too. A 90s timeout was
+# silently discarding the real track and falling back to
+# _generate_synthetic_fallback_track's plain 110Hz drone on almost every
+# music-channel render — "the montage finishes but it's just noise, no
+# actual music" was this fallback firing nearly every time, not a bug in
+# the render itself.
+TASK_POLL_TIMEOUT_SECONDS = 600
 
 
 def _izivoice_headers() -> Dict[str, str]:
