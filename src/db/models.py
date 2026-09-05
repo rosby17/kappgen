@@ -493,6 +493,7 @@ class Video(Base):
     # mutates it — every render re-derives from this same source to avoid
     # generational quality loss across re-edits.
     raw_asset_path = Column(String(512), nullable=True)
+    facecam_settings = Column(JSON, nullable=True)
     # Set alongside is_reassembly=True + status=QUEUED by the Studio editor's
     # scene endpoints; tells the worker which lightweight edit function to run
     # instead of the full pipeline. JSON: {"type": "image"|"subtitle_text"|"audio",

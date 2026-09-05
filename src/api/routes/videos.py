@@ -427,6 +427,7 @@ async def submit_facecam_video(
     title: Optional[str] = Form(None),
     raw_files: Optional[List[UploadFile]] = File(None),
     cloud_link: Optional[str] = Form(None),
+    editing_settings: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     _rl=Depends(_limit_submit),
@@ -439,6 +440,11 @@ async def submit_facecam_video(
     a single source before editing starts.
     """
     raw_files = [f for f in (raw_files or []) if f and f.filename]
+    from src.pipeline.facecam_project import FacecamSettings
+    try:
+        parsed_settings = FacecamSettings.model_validate_json(editing_settings).model_dump() if editing_settings else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Réglages de montage invalides.")
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -446,6 +452,8 @@ async def submit_facecam_video(
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if not channel.is_active:
         raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
+    if channel.content_type != "facecam":
+        raise HTTPException(status_code=422, detail="Choisis une chaîne Facecam pour ce montage.")
     if not raw_files and not cloud_link:
         raise HTTPException(status_code=400, detail="Fournis un ou plusieurs fichiers vidéo, ou un lien cloud (Drive/Dropbox).")
 
@@ -529,6 +537,7 @@ async def submit_facecam_video(
         channel_id=channel.id,
         title=(title.strip()[:100] if title and title.strip() else None) or clean_filename_title(fallback_name),
         input_type="facecam",
+        facecam_settings=parsed_settings,
         creation_source="facecam",
         raw_asset_path=str(dest_file.relative_to(STORAGE_PATH)),
         status=VideoStatus.QUEUED.value,

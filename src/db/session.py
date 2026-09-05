@@ -64,6 +64,7 @@ def init_db():
             "retention_until": "ALTER TABLE videos ADD COLUMN retention_until TIMESTAMP",
             "voice_id": "ALTER TABLE videos ADD COLUMN voice_id VARCHAR(255)",
             "raw_asset_path": "ALTER TABLE videos ADD COLUMN raw_asset_path VARCHAR(512)",
+            "facecam_settings": "ALTER TABLE videos ADD COLUMN facecam_settings JSON",
             "pending_edit": "ALTER TABLE videos ADD COLUMN pending_edit JSON",
             "edit_history": "ALTER TABLE videos ADD COLUMN edit_history JSON",
             "title": "ALTER TABLE videos ADD COLUMN title VARCHAR(255)",

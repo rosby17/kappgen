@@ -16,7 +16,7 @@ if str(BASE_DIR) not in sys.path:
 from src.config import STORAGE_PATH
 from src.db.session import init_db
 from src.utils.error_tracking import init_error_tracking
-from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin
+from src.api.routes import channels, videos, auth, folders, api_keys, billing, admin, facecam
 from src.utils.auth import get_current_admin
 
 init_error_tracking("api")
@@ -148,6 +148,7 @@ app.mount("/storage", StaticFiles(directory=str(STORAGE_PATH)), name="storage")
 app.include_router(auth.router)
 app.include_router(channels.router)
 app.include_router(videos.router)
+app.include_router(facecam.router)
 app.include_router(folders.router, include_in_schema=False)
 app.include_router(api_keys.router, include_in_schema=False)
 app.include_router(billing.router)

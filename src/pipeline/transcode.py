@@ -25,7 +25,7 @@ def ensure_sd_variant(source_path: Path) -> Path:
     temp_path = cached_path.with_name(f".{cached_path.stem}.part.mp4")
     cmd = [
         "ffmpeg", "-y", "-i", str(source_path),
-        "-vf", f"scale={SD_RESOLUTION}:flags=lanczos",
+        "-vf", f"scale={SD_RESOLUTION}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "copy", "-movflags", "+faststart",
         str(temp_path)

@@ -7,6 +7,7 @@ import uuid
 class VideoStatus(str, Enum):
     QUEUED = "queued"
     RENDERING = "rendering"
+    REVIEW = "review"
     DONE = "done"
     FAILED = "failed"
     # Set by the creator via POST /{video_id}/cancel while a video is still

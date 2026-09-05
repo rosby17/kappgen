@@ -202,13 +202,15 @@ def pick_best_takes_via_llm(
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         decisions = json.loads(match.group(0)) if match else []
     except Exception:
-        logger.exception("facecam editorial pick failed, defaulting to keeping the later take for every candidate")
-        decisions = [{"index": i, "keep": "later"} for i in range(len(retake_candidates))]
+        logger.exception("facecam editorial pick failed; preserving all takes")
+        return []
 
     deletes: List[Tuple[float, float]] = []
     decision_by_index = {d.get("index"): d.get("keep") for d in decisions if isinstance(d, dict)}
     for i, c in enumerate(retake_candidates):
-        keep = decision_by_index.get(i, "later")
+        keep = decision_by_index.get(i)
+        if keep not in ("earlier", "later"):
+            continue
         drop = c["earlier"] if keep == "later" else c["later"]
         deletes.append((drop["start"], drop["end"]))
 
