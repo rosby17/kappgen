@@ -381,21 +381,64 @@ async def submit_video_subject(
 ALLOWED_FACECAM_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 
 
+def _concat_facecam_rushes(parts: List[Path], dest: Path) -> None:
+    """Joins multiple raw rush files into one source video before the edit
+    pipeline runs. Creators rarely hand over one continuous take — a
+    recording session is usually split across several files (recorder
+    stopped/restarted, multiple angles exported separately, etc.), given
+    to us in the order they were actually recorded (the creator controls
+    that order client-side before submitting)."""
+    if len(parts) == 1:
+        shutil.move(str(parts[0]), str(dest))
+        return
+    concat_list = dest.with_suffix(".concat.txt")
+    concat_list.write_text("\n".join(f"file '{p.resolve()}'" for p in parts))
+    try:
+        run_ffmpeg(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(dest)],
+            timeout=300,
+        )
+    except Exception:
+        # Stream-copy concat only works when every rush shares the same
+        # codec/resolution/fps. Rushes from different recording sessions or
+        # apps often don't — re-encode instead, which tolerates mismatches.
+        inputs: List[str] = []
+        filter_inputs = []
+        for i, p in enumerate(parts):
+            inputs += ["-i", str(p)]
+            filter_inputs.append(f"[{i}:v:0][{i}:a:0]")
+        filter_complex = "".join(filter_inputs) + f"concat=n={len(parts)}:v=1:a=1[outv][outa]"
+        run_ffmpeg(
+            ["ffmpeg", "-y", *inputs, "-filter_complex", filter_complex,
+             "-map", "[outv]", "-map", "[outa]",
+             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac",
+             str(dest)],
+            timeout=900,
+        )
+    finally:
+        concat_list.unlink(missing_ok=True)
+        for p in parts:
+            p.unlink(missing_ok=True)
+
+
 @router.post("/facecam/upload")
 async def submit_facecam_video(
     channel_id: str = Form(...),
     title: Optional[str] = Form(None),
-    raw_file: Optional[UploadFile] = File(None),
+    raw_files: Optional[List[UploadFile]] = File(None),
     cloud_link: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     _rl=Depends(_limit_submit),
 ):
-    """Entry point for the Facecam product: upload a raw talking-head
-    recording (direct file, or a Drive/Dropbox share link downloaded
-    server-side) and queue it for facecam_editor.py's auto-edit pipeline
-    (silence/mistake cuts, verification, b-roll, motion-graphic cards).
+    """Entry point for the Facecam product: upload one or more raw
+    talking-head rush files (direct upload, or a Drive/Dropbox share link
+    downloaded server-side) and queue it for facecam_editor.py's auto-edit
+    pipeline (silence/mistake cuts, verification, b-roll, motion-graphic
+    cards). Multiple rush files are concatenated, in the order given, into
+    a single source before editing starts.
     """
+    raw_files = [f for f in (raw_files or []) if f and f.filename]
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -403,8 +446,8 @@ async def submit_facecam_video(
         raise HTTPException(status_code=403, detail="Accès refusé.")
     if not channel.is_active:
         raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
-    if not raw_file and not cloud_link:
-        raise HTTPException(status_code=400, detail="Fournis un fichier vidéo ou un lien cloud (Drive/Dropbox).")
+    if not raw_files and not cloud_link:
+        raise HTTPException(status_code=400, detail="Fournis un ou plusieurs fichiers vidéo, ou un lien cloud (Drive/Dropbox).")
 
     can_render, reason = user_can_render(db, current_user)
     if not can_render:
@@ -413,17 +456,30 @@ async def submit_facecam_video(
     uploads_dir = STORAGE_PATH / "uploads" / "facecam"
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
-    if raw_file:
-        if not raw_file.filename:
-            raise HTTPException(status_code=400, detail="Fichier vidéo invalide.")
-        ext = Path(raw_file.filename).suffix.lower() or ".mp4"
-        if ext not in ALLOWED_FACECAM_VIDEO_EXTENSIONS:
-            raise HTTPException(status_code=400, detail=f"Format non supporté ({ext}). Utilise MP4, MOV, MKV ou WEBM.")
-        dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
-        contents = await raw_file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Le fichier vidéo est vide.")
-        dest_file.write_bytes(contents)
+    if raw_files:
+        part_paths: List[Path] = []
+        try:
+            for rf in raw_files:
+                ext = Path(rf.filename).suffix.lower() or ".mp4"
+                if ext not in ALLOWED_FACECAM_VIDEO_EXTENSIONS:
+                    raise HTTPException(status_code=400, detail=f"Format non supporté ({ext}). Utilise MP4, MOV, MKV ou WEBM.")
+                part_path = uploads_dir / f"part_{uuid.uuid4()}{ext}"
+                contents = await rf.read()
+                if not contents:
+                    raise HTTPException(status_code=400, detail=f"Le fichier « {rf.filename} » est vide.")
+                part_path.write_bytes(contents)
+                part_paths.append(part_path)
+            first_ext = part_paths[0].suffix
+            dest_file = uploads_dir / f"upload_{uuid.uuid4()}{first_ext if len(part_paths) == 1 else '.mp4'}"
+            _concat_facecam_rushes(part_paths, dest_file)
+        except HTTPException:
+            for p in part_paths:
+                p.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            for p in part_paths:
+                p.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Impossible d'assembler les fichiers envoyés : {exc}")
     else:
         # v1: a pasted share link, not a full per-provider OAuth folder sync
         # (a much bigger integration, deferred until the need is confirmed).
@@ -464,9 +520,14 @@ async def submit_facecam_video(
             detail=f"Cette vidéo dure {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min.",
         )
 
+    # dest_file.name is a random upload_<uuid>.ext on disk, not what the
+    # client actually named their file — fall back to the first rush's
+    # filename (or the cloud link's basename) so an untitled upload still
+    # gets a real name.
+    fallback_name = raw_files[0].filename if raw_files else dest_file.name
     video = Video(
         channel_id=channel.id,
-        title=(title.strip()[:100] if title and title.strip() else None) or clean_filename_title(dest_file.name),
+        title=(title.strip()[:100] if title and title.strip() else None) or clean_filename_title(fallback_name),
         input_type="facecam",
         creation_source="facecam",
         raw_asset_path=str(dest_file.relative_to(STORAGE_PATH)),
