@@ -646,7 +646,7 @@ def generate_thumbnail_image(
     client: httpx.Client,
     reference_image_paths: Optional[List[Path]] = None,
     provider_order: Optional[List[str]] = None,
-) -> Path:
+) -> tuple:
     """Generate a thumbnail via GPT Image 2 — ai33.pro direct by default
     (bypasses Izivoice's own account/quota entirely, same reasoning already
     applied to voiceover TTS/STT — see ai33_provider.py), with Izivoice and
@@ -655,7 +655,12 @@ def generate_thumbnail_image(
     honors an admin-configured provider_order (see thumbnail_provider_order(),
     app_settings.py) instead of hardcoding a single provider — the admin
     settings UI already offered fal as a choice here, it just never actually
-    took effect until this was wired up."""
+    took effect until this was wired up.
+
+    Returns (path, provider_name) — the caller needs to know WHICH provider
+    actually produced the image, not just that one did: a manual regeneration
+    counts toward MAX_THUMBNAIL_REGENERATIONS (videos.py) only when a paid
+    provider was the one that succeeded, never Hugging Face."""
     order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface", "ai33pro")] or ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
@@ -667,7 +672,8 @@ def generate_thumbnail_image(
     last_exc: Optional[Exception] = None
     for name in order:
         try:
-            return funcs[name]()
+            result = funcs[name]()
+            return result, name
         except Exception as exc:
             logger.warning(f"{labels.get(name, name)} thumbnail generation failed, trying next provider: {exc}")
             last_exc = exc

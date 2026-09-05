@@ -959,7 +959,7 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
         try:
             video.progress_stage = "Génération de la miniature"
             db.commit()
-            thumbnail_path, _ = youtube_metadata.generate_thumbnail(
+            thumbnail_path, _, _ = youtube_metadata.generate_thumbnail(
                 output_mp4, existing_thumbnail, meta.get("thumbnail_text") or meta["title"], channel=channel, video_id=video.id
             )
         except Exception as e:

@@ -493,12 +493,12 @@ def build_thumbnail_background_prompt(text: str, niche: str, thumbnail_style: di
     )
 
 
-def _generate_ai_thumbnail_background(text: str, channel, destination: Path, video_id: Optional[str] = None) -> Path:
+def _generate_ai_thumbnail_background(text: str, channel, destination: Path, video_id: Optional[str] = None) -> tuple:
     """Generates the thumbnail's background image — via fal.ai's gpt-image-2
     (falling back to Izivoice if fal.ai fails or its credits run out) —
     instead of just cropping a frame out of the finished video, for a
     purpose-made, eye-catching background that actually represents the
-    video's subject."""
+    video's subject. Returns (path, provider_name)."""
     from src.pipeline.images import generate_thumbnail_image
     import httpx
 
@@ -570,25 +570,33 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # thumbnail — the one image viewers judge the video by — so it's worth waiting
     # longer for it rather than falling back to a plain video-frame grab.
     with httpx.Client(timeout=120.0) as client:
-        generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths, provider_order=provider_order)
-    return ai_path
+        _, provider_used = generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths, provider_order=provider_order)
+    return ai_path, provider_used
 
 
-def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None, strict: bool = False) -> tuple[Path, bool]:
+def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None, strict: bool = False) -> tuple:
     """strict=True (channels with a configured reference style only — see
     queue_runner.py) skips the frame-grab/solid-color fallbacks entirely on
     an AI failure and just raises instead: publishing a generic, unstyled
     placeholder was worse than a clear "couldn't make one, try again" state
     to the creator. Non-strict callers (manual regen, the preview endpoint)
-    keep the old best-effort behavior."""
+    keep the old best-effort behavior.
+
+    Returns (path, ai_used, provider_used) — provider_used is None on a
+    frame-grab fallback, otherwise the name of whichever provider actually
+    produced the image (e.g. "huggingface", "ai33pro"). Callers that only
+    care whether AI was used at all (vs. a plain frame grab) can keep
+    ignoring the third value; the manual-regeneration cap in videos.py needs
+    it to tell a free Hugging Face success apart from a paid one."""
     text = clean_thumbnail_headline(text)
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame_path = destination.with_suffix(".frame.jpg")
     image = None
     ai_success = False
+    ai_provider_used = None
     if channel is not None:
         try:
-            ai_path = _generate_ai_thumbnail_background(text, channel, destination, video_id=video_id)
+            ai_path, ai_provider_used = _generate_ai_thumbnail_background(text, channel, destination, video_id=video_id)
             image = Image.open(ai_path).convert("RGB")
             ai_success = True
         except Exception as exc:
@@ -702,7 +710,7 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
         result = image.convert("RGB")
         result.save(destination, "JPEG", quality=92, optimize=True)
         destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
-        return destination, True
+        return destination, True, ai_provider_used
 
     y = top
     for index, line in enumerate(lines):
@@ -729,4 +737,4 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     result.save(destination, "JPEG", quality=90, optimize=True)
     frame_path.unlink(missing_ok=True)
     destination.with_suffix(".ai.jpg").unlink(missing_ok=True)
-    return destination, False
+    return destination, False, None

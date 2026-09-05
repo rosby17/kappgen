@@ -1278,14 +1278,19 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         # clearly, not silently swap one mediocre image for another.
         thumbnail_style = channel.thumbnail_style or {}
         strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
-        _, ai_used = generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
+        _, ai_used, ai_provider_used = generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
         succeeded = True
-        # Only a genuine paid-provider success counts toward
+        # Only a genuine PAID-provider success counts toward
         # MAX_THUMBNAIL_REGENERATIONS — a channel with no reference style
         # configured (strict=False) falling back to a plain video-frame grab
-        # is a free, unlimited operation, not a "regeneration" in the sense
-        # the cap exists to bound.
-        if ai_used and previous_thumbnail_bytes is not None:
+        # is free and unlimited, and so is a Hugging Face success: it's the
+        # same free tier the per-scene body images already use without any
+        # cap, so a run of ai33.pro/Izivoice/fal outages silently falling
+        # through to Hugging Face for every attempt must not burn through a
+        # limit that only exists to bound real spend.
+        from src.utils.app_settings import THUMBNAIL_FREE_PROVIDERS
+        paid_ai_used = ai_used and ai_provider_used not in THUMBNAIL_FREE_PROVIDERS
+        if paid_ai_used and previous_thumbnail_bytes is not None:
             history_dir = current.parent / "thumbnail_history"
             history_dir.mkdir(parents=True, exist_ok=True)
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
