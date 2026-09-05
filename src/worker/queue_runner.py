@@ -1,6 +1,7 @@
 import shutil
 import json
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor
 import signal
 import threading
@@ -591,8 +592,23 @@ def process_single_queued_video() -> bool:
         # the full `title` there instead produced garbled, overlong thumbnail
         # text (a whole opening sentence crammed onto the image).
         try:
-            meta = youtube_metadata.generate_metadata(video, channel, reuse_existing=True)
-            if not video.title:
+            # `if not video.title` alone left two real classes of ugly title
+            # stuck forever, since both leave title non-empty from the moment
+            # the row is created: the automatic-video placeholder ("<channel>
+            # — nouvelle vidéo", set at creation before the topic is even
+            # picked — see generate_and_queue_auto_video's own on_title
+            # callback, which normally replaces it early but not on every
+            # path), and an audio upload's filename-derived fallback when the
+            # filename itself was a raw upload id ("upload_07a27e10-5f0d-...")
+            # rather than anything a creator actually typed. Both get folded
+            # into the same "needs a real title" check as an empty one,
+            # rather than only ever helping a video that started with no
+            # title at all.
+            title_is_placeholder = not video.title or video.title.strip().endswith("— nouvelle vidéo") or bool(
+                re.search(r"[0-9a-f]{8}[\s-][0-9a-f]{4}[\s-][0-9a-f]{4}[\s-][0-9a-f]{4}[\s-][0-9a-f]{12}", video.title, re.IGNORECASE)
+            )
+            meta = youtube_metadata.generate_metadata(video, channel, reuse_existing=not title_is_placeholder)
+            if title_is_placeholder:
                 video.title = meta["title"]
             if not video.youtube_description:
                 video.youtube_description = meta["description"]
