@@ -303,13 +303,20 @@ def admin_costs(days: int = 30, admin: User = Depends(get_current_admin), db: Se
     top_videos = []
     if top_video_ids:
         videos = {v.id: v for v in db.query(Video).filter(Video.id.in_(top_video_ids)).all()}
+        from src.api.routes.videos import _video_cost_transactions
         for vid in top_video_ids:
             v = videos.get(vid)
             owner = v.channel.user if (v and v.channel) else None
             top_videos.append({
                 "video_id": vid,
                 "title": v.title if v else None,
+                # cost_usd is KappGen's own real spend on the external APIs
+                # (this endpoint's whole point); total_credits is the separate
+                # figure the CLIENT was actually billed in KappGen credits for
+                # this video — same computation the main admin videos list
+                # uses, so the two lists agree with each other.
                 "cost_usd": round(by_video[vid], 4),
+                "total_credits": (-sum(t.amount for t in _video_cost_transactions(db, v, owner.id)) if (v and owner) else 0),
                 # Which channel/creator this cost is actually attributable to —
                 # a raw list of titles and dollar amounts gave no way to tell
                 # who generated it or reach that video's own credit breakdown
