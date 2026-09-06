@@ -305,7 +305,18 @@ def admin_costs(days: int = 30, admin: User = Depends(get_current_admin), db: Se
         videos = {v.id: v for v in db.query(Video).filter(Video.id.in_(top_video_ids)).all()}
         for vid in top_video_ids:
             v = videos.get(vid)
-            top_videos.append({"video_id": vid, "title": v.title if v else None, "cost_usd": round(by_video[vid], 4)})
+            owner = v.channel.user if (v and v.channel) else None
+            top_videos.append({
+                "video_id": vid,
+                "title": v.title if v else None,
+                "cost_usd": round(by_video[vid], 4),
+                # Which channel/creator this cost is actually attributable to —
+                # a raw list of titles and dollar amounts gave no way to tell
+                # who generated it or reach that video's own credit breakdown
+                # without hunting for it in the separate videos list.
+                "channel_name": v.channel.name if (v and v.channel) else None,
+                "owner_email": owner.email if owner else None,
+            })
 
     return {
         "days": days,
