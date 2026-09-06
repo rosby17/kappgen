@@ -336,37 +336,90 @@ def admin_costs(days: int = 30, admin: User = Depends(get_current_admin), db: Se
 
 
 @router.get("/activity")
-def admin_activity(days: int = 28, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Daily new-users / new-videos series for the dashboard chart, plus a
-    couple of "right now" numbers — mirrors the shape of iziVoice's admin
-    overview (daily line + a live sidebar) without needing a time-series DB."""
-    days = max(1, min(days, 90))
-    today = datetime.utcnow().date()
-    start = today - timedelta(days=days - 1)
-
-    users = db.query(User).filter(User.created_at >= datetime(start.year, start.month, start.day)).all()
-    videos = db.query(Video).filter(Video.created_at >= datetime(start.year, start.month, start.day)).all()
-
-    by_day = {}
-    for i in range(days):
-        d = start + timedelta(days=i)
-        by_day[d.isoformat()] = {"date": d.isoformat(), "new_users": 0, "new_videos": 0}
-    for u in users:
-        key = u.created_at.date().isoformat()
-        if key in by_day:
-            by_day[key]["new_users"] += 1
-    for v in videos:
-        key = v.created_at.date().isoformat()
-        if key in by_day:
-            by_day[key]["new_videos"] += 1
-
+def admin_activity(
+    days: int = 28,
+    hours: Optional[int] = None,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """New-users / new-videos / revenue series for the dashboard chart, plus
+    a couple of "right now" numbers and a period-over-period comparison
+    (current window vs the immediately preceding window of the same length)
+    so the overview can show real growth deltas, not just a raw count.
+    `hours` (e.g. 24) buckets by hour for the short "last 24h" view; omit it
+    for the day-bucketed 7/28/90-day views."""
     now = datetime.utcnow()
+    if hours:
+        hours = max(1, min(hours, 168))
+        start = now - timedelta(hours=hours)
+        bucket_span = timedelta(hours=1)
+        n_buckets = hours
+        granularity = "hour"
+
+        def bucket_key(dt: datetime) -> str:
+            return dt.replace(minute=0, second=0, microsecond=0).isoformat()
+
+        def bucket_start(i: int) -> datetime:
+            return (start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1) + bucket_span * i)
+    else:
+        days = max(1, min(days, 90))
+        today = now.date()
+        start_date = today - timedelta(days=days - 1)
+        start = datetime(start_date.year, start_date.month, start_date.day)
+        bucket_span = timedelta(days=1)
+        n_buckets = days
+        granularity = "day"
+
+        def bucket_key(dt: datetime) -> str:
+            return dt.date().isoformat()
+
+        def bucket_start(i: int) -> datetime:
+            return start + bucket_span * i
+
+    period_length = now - start
+    prev_start = start - period_length
+
+    users = db.query(User).filter(User.created_at >= start).all()
+    videos = db.query(Video).filter(Video.created_at >= start).all()
+    orders = db.query(Order).filter(Order.status == "success", Order.created_at >= start).all()
+
+    by_bucket = {}
+    for i in range(n_buckets):
+        b = bucket_start(i)
+        by_bucket[bucket_key(b)] = {"date": b.isoformat(), "new_users": 0, "new_videos": 0, "revenue_fcfa": 0}
+    for u in users:
+        key = bucket_key(u.created_at)
+        if key in by_bucket:
+            by_bucket[key]["new_users"] += 1
+    for v in videos:
+        key = bucket_key(v.created_at)
+        if key in by_bucket:
+            by_bucket[key]["new_videos"] += 1
+    for o in orders:
+        key = bucket_key(o.created_at)
+        if key in by_bucket:
+            by_bucket[key]["revenue_fcfa"] += o.amount_fcfa
+
+    prev_users = db.query(User).filter(User.created_at >= prev_start, User.created_at < start).count()
+    prev_videos = db.query(Video).filter(Video.created_at >= prev_start, Video.created_at < start).count()
+    prev_revenue = sum(
+        r[0] for r in db.query(Order.amount_fcfa).filter(
+            Order.status == "success", Order.created_at >= prev_start, Order.created_at < start
+        ).all()
+    )
+
     videos_48h = db.query(Video).filter(Video.created_at >= now - timedelta(hours=48)).count()
 
     return {
-        "series": list(by_day.values()),
+        "series": list(by_bucket.values()),
+        "granularity": granularity,
         "users_total": db.query(User).count(),
         "videos_last_48h": videos_48h,
+        "period": {
+            "users": len(users), "users_prev": prev_users,
+            "videos": len(videos), "videos_prev": prev_videos,
+            "revenue_fcfa": sum(o.amount_fcfa for o in orders), "revenue_fcfa_prev": prev_revenue,
+        },
     }
 
 
