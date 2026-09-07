@@ -68,7 +68,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         salt_hex, key_hex = parts[0], parts[1]
         salt = bytes.fromhex(salt_hex)
         key = hashlib.pbkdf2_hmac('sha256', plain_password.encode('utf-8'), salt, 100000)
-        return key.hex() == key_hex
+        # Audit INT-04: a plain `==` on the derived hash is not constant-time —
+        # a network timing side-channel in theory (hard to exploit in
+        # practice, but free to close). secrets.compare_digest is already the
+        # pattern used elsewhere in this codebase (billing.py's TaraPay
+        # webhook check).
+        return secrets.compare_digest(key.hex(), key_hex)
     except Exception:
         return False
 
