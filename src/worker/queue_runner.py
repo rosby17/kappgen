@@ -260,12 +260,21 @@ def process_single_queued_video() -> bool:
             the parallel job starts before the video is rendered, so it has
             no real frame to grab either). The caller re-attempts a proper
             thumbnail once the real output.mp4 exists — see the ai_used check
-            right after this is awaited below."""
+            right after this is awaited below.
+
+            generate_thumbnail actually returns a 3-tuple (path, ai_used,
+            provider_used) — unpacking only 2 values here raised a ValueError
+            on every single call, INCLUDING ones where the paid AI generation
+            had already fully succeeded and billed. That was silently caught
+            by the except below and reported as ai_used=False regardless, so
+            the "retry once for real" fallback further down always fired too
+            — billing thumbnail generation twice on every video that had it
+            enabled, not just on retries."""
             if thumbnail_future is None:
                 thumbnail_executor.shutdown(wait=False, cancel_futures=True)
                 return None, False
             try:
-                result, ai_used = thumbnail_future.result()
+                result, ai_used, _provider_used = thumbnail_future.result()
                 logger.info("Parallel thumbnail ready for video %s (ai_used=%s)", video.id, ai_used)
                 return result, ai_used
             except Exception as exc:
