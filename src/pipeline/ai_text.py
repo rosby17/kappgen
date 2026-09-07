@@ -452,15 +452,19 @@ def generate_text(
     order = [pid for pid in ordered_ids("text") if pid in providers]
     if preferred_provider in order:
         order = [preferred_provider] + [pid for pid in order if pid != preferred_provider]
-    if enable_web_search and "anthropic" in order:
+    if enable_web_search and order and order[0] != "anthropic" and "anthropic" in order:
         # Web search only works through Anthropic's server-side tool (see the
-        # docstring) — every other provider silently ignores it. The admin's
-        # general priority order (e.g. Gemini/Groq first, both free) has no
-        # idea this call needs it, so left alone it would run the "search the
-        # web for trends" instruction on a provider that can't search the
-        # web, quietly no-opping the whole feature. Force Anthropic first
-        # for this one call only, regardless of where it normally ranks.
-        order = ["anthropic"] + [pid for pid in order if pid != "anthropic"]
+        # docstring) — every other provider silently ignores it. Anthropic
+        # used to be force-jumped to the front of the chain whenever this
+        # flag was set, regardless of the admin's own ranking — which meant
+        # a real Anthropic call happened on every web-search-driven topic
+        # pick even after the admin deliberately ranked Kie/fal above it to
+        # get off Claude entirely. Now the admin's order is the single
+        # source of truth: web search only actually runs when Anthropic is
+        # already first; otherwise this call just proceeds down the normal
+        # chain without live trends data, same as any other provider
+        # silently ignoring the flag.
+        logger.info(f"[ai_text] web search requested but Anthropic isn't first in the admin's order (operation={operation!r}) — proceeding without live trends data.")
     last_exc = None
     for name in order:
         # A 429 means "you're going too fast", not "this provider is dead" —
