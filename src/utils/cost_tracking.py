@@ -78,6 +78,14 @@ PRICING = {
         # mix of models used ever becomes cost-significant.
         "per_image": 0.02,
     },
+    "kie_image": {
+        # kie.ai's published rate for gpt-image-2-text-to-image at 1K
+        # resolution (the default thumbnails use) as of writing: $0.03/image,
+        # ~86% below OpenAI's official per-image rate. Re-check
+        # https://kie.ai/pricing if the thumbnail pipeline ever requests
+        # 2K/4K — those are priced higher ($0.05 / $0.08).
+        "per_image": 0.03,
+    },
 }
 
 
@@ -115,6 +123,10 @@ def estimate_izivoice_stt_cost(seconds: float) -> float:
 
 def estimate_image_cost(image_count: int) -> float:
     return image_count * PRICING["fal_image"]["per_image"]
+
+
+def estimate_kie_image_cost(image_count: int) -> float:
+    return image_count * PRICING["kie_image"]["per_image"]
 
 
 def log_usage(

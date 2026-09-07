@@ -40,7 +40,7 @@ def set_paid_apis_disabled(disabled: bool) -> None:
 # account hit its own quota/auth issues. Scene images keep their own
 # independent source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
-THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro", "huggingface"]
+THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro", "kie", "huggingface"]
 THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 # The only genuinely free option here — same FLUX.1-schnell free tier the
 # scene-image generator already defaults to. Forced into the order (even if

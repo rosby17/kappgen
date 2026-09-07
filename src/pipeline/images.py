@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from PIL import Image
-from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS, AI33PRO_API_KEY
+from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FAL_API_KEY, HUGGINGFACE_API_KEYS, IMAGE_UPLOAD_EXTENSIONS, AI33PRO_API_KEY, KIE_API_KEY, KIE_BASE_URL
 from src.utils.logger import logger
 
 
@@ -51,7 +51,7 @@ def text_free_image_prompt(prompt: str) -> str:
         return (prompt or "").replace("[[ALLOW_TEXT]]", "").strip()[:4000]
     suffix = f", {TEXT_FREE_IMAGE_RULE}"
     return f"{(prompt or '').strip()[:4000 - len(suffix)]}{suffix}"
-from src.utils.cost_tracking import log_usage, estimate_image_cost
+from src.utils.cost_tracking import log_usage, estimate_image_cost, estimate_kie_image_cost
 from src.pipeline.image_pool import get_image_pool
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
@@ -495,6 +495,67 @@ def _generate_with_ai33pro_image(prompt: str, output_path: Path, client: httpx.C
     return output_path
 
 
+def _generate_with_kie_image(prompt: str, output_path: Path, client: httpx.Client, api_key: Optional[str] = None) -> Path:
+    """Generates a thumbnail via kie.ai's gpt-image-2-text-to-image — same
+    upstream model as ai33.pro/Izivoice/fal.ai, but on kie.ai's own account
+    and at a much lower per-image rate (~$0.03 vs OpenAI's official
+    ~$0.22 at 1K, see PRICING["kie_image"]). A genuinely separate account
+    from ai33.pro/Izivoice (which share one upstream quota), so this one
+    keeps working when that quota is exhausted — see AI33PRO_API_KEY's own
+    docstring in config.py for why "izivoice" and "ai33pro" are NOT two
+    independent fallbacks today.
+
+    kie.ai's Market API is async (unlike fal.ai's direct-response call): a
+    createTask call returns a taskId, then recordInfo is polled until the
+    task leaves the waiting/queuing/generating states.
+    """
+    api_key = api_key or KIE_API_KEY
+    if not api_key:
+        raise RuntimeError("KIE_API_KEY is not configured on the server.")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    create_resp = client.post(
+        f"{KIE_BASE_URL}/api/v1/jobs/createTask",
+        headers=headers,
+        json={
+            "model": "gpt-image-2-text-to-image",
+            "input": {"prompt": text_free_image_prompt(prompt), "aspect_ratio": "16:9", "resolution": "1K"},
+        },
+        timeout=60.0,
+    )
+    create_resp.raise_for_status()
+    create_data = create_resp.json() or {}
+    if create_data.get("code") != 200:
+        raise RuntimeError(f"kie.ai image task creation failed: {create_data}")
+    task_id = (create_data.get("data") or {}).get("taskId")
+    if not task_id:
+        raise RuntimeError(f"kie.ai image task creation returned no taskId: {create_data}")
+
+    deadline = time.monotonic() + TASK_POLL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(TASK_POLL_INTERVAL_SECONDS)
+        poll_resp = client.get(
+            f"{KIE_BASE_URL}/api/v1/jobs/recordInfo", headers=headers, params={"taskId": task_id}, timeout=30.0,
+        )
+        poll_resp.raise_for_status()
+        poll_data = (poll_resp.json() or {}).get("data") or {}
+        state = poll_data.get("state")
+        if state == "success":
+            result = json.loads(poll_data.get("resultJson") or "{}")
+            result_urls = result.get("resultUrls") or []
+            if not result_urls:
+                raise RuntimeError(f"kie.ai image task {task_id} succeeded with no resultUrls: {poll_data}")
+            img_resp = client.get(result_urls[0], timeout=60.0)
+            img_resp.raise_for_status()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(img_resp.content)
+            log_usage("kie_image", "thumbnail", 1, "images", estimate_kie_image_cost(1), meta={"model": "gpt-image-2-text-to-image", "task_id": task_id})
+            return output_path
+        if state == "fail":
+            raise RuntimeError(f"kie.ai image task {task_id} failed: {poll_data.get('failMsg')}")
+    raise TimeoutError(f"kie.ai image task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s.")
+
+
 def _provider_accounts_from_db(provider: str, env_fallback_keys: Optional[List[str]] = None) -> List[Any]:
     """Admin-managed key pool for one image-generation provider
     (src/api/routes/admin.py's image-provider-keys routes) — "huggingface",
@@ -661,14 +722,18 @@ def generate_thumbnail_image(
     actually produced the image, not just that one did: a manual regeneration
     counts toward MAX_THUMBNAIL_REGENERATIONS (videos.py) only when a paid
     provider was the one that succeeded, never Hugging Face."""
-    order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface", "ai33pro")] or ["izivoice"]
+    order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface", "ai33pro", "kie")] or ["izivoice"]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),
         "izivoice": lambda: _generate_with_key_pool("izivoice", IZIVOICE_API_KEY, lambda key: generate_ai_image(prompt, output_path, client, reference_image_paths=reference_image_paths, api_key=key)),
         "ai33pro": lambda: _generate_with_key_pool("ai33pro", AI33PRO_API_KEY, lambda key: _generate_with_ai33pro_image(prompt, output_path, client, reference_image_paths=reference_image_paths, api_key=key)),
+        # kie.ai has no reference-image conditioning on this endpoint
+        # (text-to-image only) — reference_image_paths is silently ignored
+        # here rather than erroring, same as huggingface above.
+        "kie": lambda: _generate_with_key_pool("kie", KIE_API_KEY, lambda key: _generate_with_kie_image(prompt, output_path, client, api_key=key)),
     }
-    labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice", "ai33pro": "ai33.pro (direct)"}
+    labels = {"huggingface": "Hugging Face (FLUX.1-schnell)", "fal": "fal.ai (gpt-image-2)", "izivoice": "Izivoice", "ai33pro": "ai33.pro (direct)", "kie": "Kie.ai (gpt-image-2)"}
     last_exc: Optional[Exception] = None
     for name in order:
         try:

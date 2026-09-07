@@ -1483,18 +1483,20 @@ def set_paid_apis_kill_switch(payload: PaidApisKillSwitchPayload, admin: User = 
 
 # --- Global image-generation provider switches ------------------------------
 # Thumbnails use GPT Image 2 either via ai33.pro direct, Izivoice's wrapper
-# around the same model, or fal.ai's own hosted copy — this remains separate
-# from provider choices for scene images and AI text. Must stay in sync with
-# THUMBNAIL_PROVIDERS_ALL (app_settings.py), which the actual reader
-# (thumbnail_provider_order()) filters against.
-THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "huggingface"]
+# around the same model, fal.ai's own hosted copy, or kie.ai's reseller
+# proxy (a genuinely separate account/quota from ai33.pro+Izivoice, which
+# share one upstream) — this remains separate from provider choices for
+# scene images and AI text. Must stay in sync with THUMBNAIL_PROVIDERS_ALL
+# (app_settings.py), which the actual reader (thumbnail_provider_order())
+# filters against.
+THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "kie", "huggingface"]
 
 
 @router.get("/settings/thumbnail-provider-mode")
 def get_thumbnail_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import thumbnail_provider_order
-    from src.config import IZIVOICE_API_KEY
-    configured = {"izivoice": bool(IZIVOICE_API_KEY)}
+    from src.config import IZIVOICE_API_KEY, KIE_API_KEY
+    configured = {"izivoice": bool(IZIVOICE_API_KEY), "kie": bool(KIE_API_KEY)}
     order = thumbnail_provider_order()
     return {"order": order, "available": THUMBNAIL_IMAGE_PROVIDERS, "configured": configured}
 
