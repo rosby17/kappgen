@@ -77,6 +77,10 @@ def settings_for(video, channel):
             defaults["accent_color"] = color
     if branding.get("font_family") in FacecamSettings.model_fields["font_family"].annotation.__args__:
         defaults["font_family"] = branding["font_family"]
+    if branding.get("facecam_default_style") in FacecamSettings.model_fields["editing_style"].annotation.__args__:
+        defaults["editing_style"] = branding["facecam_default_style"]
+    if branding.get("facecam_default_format") in FacecamSettings.model_fields["format_template"].annotation.__args__:
+        defaults["format_template"] = branding["facecam_default_format"]
     defaults.update(video.facecam_settings or {})
     return FacecamSettings(**defaults).model_dump()
 

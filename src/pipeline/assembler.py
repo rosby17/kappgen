@@ -241,8 +241,13 @@ def assemble_final_video(
         video_filters.append("hue=s=0,eq=contrast=1.25:brightness=-0.02")
     elif color_mode == "sepia":
         video_filters.append("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131:0")
-    elif color_mode == "vibrant":
-        video_filters.append("eq=saturation=1.5:contrast=1.1")
+    # "vibrant" removed outright (explicit creator request) — its
+    # saturation=1.5:contrast=1.1 combo clipped the shadows of a typically
+    # dark/warm AI-generated image (candlelight, moody lighting) hard enough
+    # to expose a magenta/violet color cast that was never in the source
+    # image. Any channel with color_grade still saved as "vibrant" from
+    # before now just falls through this chain with no color grade applied
+    # (same as "none") — never re-introduce this option.
     elif color_mode == "faded":
         video_filters.append("eq=contrast=0.82:brightness=0.05:saturation=0.85")
     elif color_mode == "cinematic":
