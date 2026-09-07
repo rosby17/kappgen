@@ -92,6 +92,8 @@ def init_db():
             "thumbnail_updated_at": "ALTER TABLE videos ADD COLUMN thumbnail_updated_at TIMESTAMP",
             "thumbnail_error": "ALTER TABLE videos ADD COLUMN thumbnail_error TEXT",
             "admin_priority": "ALTER TABLE videos ADD COLUMN admin_priority INTEGER DEFAULT 0 NOT NULL",
+            "priority_paid_at": "ALTER TABLE videos ADD COLUMN priority_paid_at TIMESTAMP",
+            "priority_credits_paid": "ALTER TABLE videos ADD COLUMN priority_credits_paid INTEGER",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():

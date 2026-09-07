@@ -26,7 +26,7 @@ from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluat
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail, generate_contextual_thumbnail_headline
 from src.utils.logger import logger
 from src.utils.auth import get_current_user
-from src.utils.billing import user_can_render, estimate_video_cost_credits, FOUR_K_EXPORT_CREDITS, debit_izivoice_usage_by_user_id
+from src.utils.billing import user_can_render, estimate_video_cost_credits, FOUR_K_EXPORT_CREDITS, debit_izivoice_usage_by_user_id, debit_credits, priority_render_quote
 from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -834,6 +834,41 @@ def _get_owned_video(db: Session, video_id: str, current_user: User) -> Video:
 @router.get("/{video_id}")
 def get_video_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return _get_owned_video(db, video_id, current_user).to_dict()
+
+
+@router.get("/{video_id}/priority-quote")
+def get_video_priority_quote(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Live price to jump this video to the front of the render queue —
+    recomputed from current queue depth on every call, never cached."""
+    video = _get_owned_video(db, video_id, current_user)
+    quote = priority_render_quote(db)
+    quote["already_prioritized"] = bool(video.priority_paid_at)
+    quote["eligible"] = video.status == "queued" and not video.priority_paid_at
+    return quote
+
+
+@router.post("/{video_id}/priority")
+def purchase_video_priority(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Debits the live priority price and jumps this video to the front of
+    the render queue (reuses the same admin_priority ordering mechanism as
+    an admin manual bump). The price is re-quoted at the moment of purchase
+    — never trust a client-supplied price — so it always reflects the
+    queue depth right now, not whatever was shown when the button rendered."""
+    video = _get_owned_video(db, video_id, current_user)
+    if video.status != "queued":
+        raise HTTPException(status_code=409, detail="Cette vidéo n'est plus en attente de rendu.")
+    if video.priority_paid_at:
+        raise HTTPException(status_code=409, detail="Cette vidéo est déjà prioritaire.")
+    quote = priority_render_quote(db)
+    price = quote["price_credits"]
+    if not debit_credits(db, current_user, price, f"Priorité de rendu (file de {quote['queued_count']} vidéos)", video_id=video.id):
+        raise HTTPException(status_code=402, detail="Crédits insuffisants pour prioriser ce rendu.")
+    video.admin_priority = max(video.admin_priority or 0, 1)
+    video.priority_paid_at = datetime.utcnow()
+    video.priority_credits_paid = price
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
 
 
 def _video_cost_transactions(db: Session, video: Video, user_id: str):

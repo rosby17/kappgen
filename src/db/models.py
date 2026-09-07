@@ -482,6 +482,14 @@ class Video(Base):
     # wins over a lower one, so bumping several videos still orders them by
     # when each was prioritized (see admin_set_video_priority).
     admin_priority = Column(Integer, nullable=False, default=0)
+    # Creator-paid priority render (see billing.py's priority_render_quote /
+    # purchase_video_priority). Reuses the admin_priority ordering mechanism
+    # above — buying priority sets admin_priority=1 exactly like the admin's
+    # manual bump — these two fields exist only for billing/UI traceability
+    # (what was actually paid, and when) and never feed queue ordering
+    # directly.
+    priority_paid_at = Column(DateTime, nullable=True)
+    priority_credits_paid = Column(Integer, nullable=True)
     progress_stage = Column(String(255), nullable=True)
     progress_percent = Column(Integer, nullable=False, default=0)
     is_reassembly = Column(Boolean, nullable=False, default=False)
@@ -649,6 +657,8 @@ class Video(Base):
             "downloaded_at": self.downloaded_at.isoformat() if self.downloaded_at else None,
             "can_undo": bool(self.edit_history),
             "admin_priority": self.admin_priority,
+            "priority_paid_at": self.priority_paid_at.isoformat() if self.priority_paid_at else None,
+            "priority_credits_paid": self.priority_credits_paid,
         }
 
 

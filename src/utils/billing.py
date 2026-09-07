@@ -592,6 +592,31 @@ def credit_user(db: Session, user: User, amount: int, valid_days: int, descripti
     return pot
 
 
+# Paid render-priority ("passer devant la file") — dynamic pricing modeled
+# as a soft continuous auction: the more videos are already queued, the more
+# expensive jumping the line gets (convex curve, not linear, so it genuinely
+# discourages piling on once the queue is congested); the emptier the queue,
+# the closer to the floor price. See _get_owned_video/purchase_video_priority
+# in videos.py for the endpoints that use this.
+PRIORITY_RENDER_BASE_CREDITS = 5_000
+PRIORITY_RENDER_CONGESTION_THRESHOLD = 5  # queue depth where price starts climbing hard
+PRIORITY_RENDER_EXPONENT = 1.75
+PRIORITY_RENDER_MAX_CREDITS = 50_000
+
+
+def priority_render_quote(db: Session) -> dict:
+    """Live price to jump a queued video to the front of the render queue,
+    based on current queue depth. Recomputed on every call — never cached —
+    so it always reflects the queue at the moment of purchase."""
+    from src.db.models import Video
+    queued_count = db.query(Video).filter(Video.status == "queued").count()
+    raw_price = PRIORITY_RENDER_BASE_CREDITS * (
+        (1 + queued_count / PRIORITY_RENDER_CONGESTION_THRESHOLD) ** PRIORITY_RENDER_EXPONENT
+    )
+    price = min(PRIORITY_RENDER_MAX_CREDITS, max(PRIORITY_RENDER_BASE_CREDITS, round(raw_price)))
+    return {"queued_count": queued_count, "price_credits": price}
+
+
 def debit_credits(db: Session, user: User, amount: int, description: str, video_id: Optional[str] = None) -> bool:
     """FIFO-deducts `amount` credits from the soonest-expiring pots first (so
     a creator's promo credits get used before they'd expire unused). Returns
