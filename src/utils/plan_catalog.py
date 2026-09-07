@@ -9,11 +9,19 @@ from sqlalchemy.orm import Session
 from src.db.models import Plan
 
 
+# max_channels/max_cloned_voices: None means unlimited. A progressive-paywall
+# pass (2026-09-07) — the real scarcity levers across tiers are channel count
+# and cloned-voice count, both crescendo with price. Deliberately NOT
+# touching max_video_duration_seconds or the ai_*_enabled flags here: video
+# length tiering was already configured correctly (admin-set, left alone),
+# and script/image/transcription generation stay available on every tier —
+# they're already billed per task via credits, so gating them by plan on top
+# would just double-charge the same usage instead of differentiating tiers.
 PLAN_CATALOG = (
-    {"name": "Starter", "price_fcfa": 3_500, "credits": 100_000},
-    {"name": "Creator", "price_fcfa": 7_000, "credits": 200_000},
-    {"name": "Standard", "price_fcfa": 12_500, "credits": 400_000},
-    {"name": "Pro", "price_fcfa": 55_000, "credits": 2_000_000},
+    {"name": "Starter", "price_fcfa": 3_500, "credits": 100_000, "max_channels": 2, "max_cloned_voices": 1},
+    {"name": "Creator", "price_fcfa": 7_000, "credits": 200_000, "max_channels": 5, "max_cloned_voices": 2},
+    {"name": "Standard", "price_fcfa": 12_500, "credits": 400_000, "max_channels": 10, "max_cloned_voices": 5},
+    {"name": "Pro", "price_fcfa": 55_000, "credits": 2_000_000, "max_channels": None, "max_cloned_voices": None},
 )
 
 
@@ -34,6 +42,8 @@ def ensure_sales_catalog(db: Session) -> list[Plan]:
         plan.price_fcfa = spec["price_fcfa"]
         plan.duration_days = 30
         plan.credits = spec["credits"]
+        plan.max_channels = spec["max_channels"]
+        plan.max_cloned_voices = spec["max_cloned_voices"]
         plan.is_active = True
         plans.append(plan)
     for stale in db.query(Plan).filter(Plan.name.notin_(catalog_names), Plan.is_active.is_(True)).all():

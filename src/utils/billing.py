@@ -240,32 +240,52 @@ def _user_relevant_plans(db: Session, user: User) -> list:
 
 def _feature_enabled(db: Session, user: User, attr: str) -> bool:
     """True if ANY plan the user has access through grants this specific
-    feature (attr is one of Plan's ai_*_enabled column names) — independent
-    of whether they have spare credits sitting in their balance; a plain
-    balance isn't proof they paid for that feature specifically. A
-    subscription with no plan attached (admin-granted, plan_id nullable) is
-    treated as permissive, same as never having purchased anything."""
-    if user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0:
-        return True
+    feature (attr is one of Plan's ai_*_enabled column names). A subscription
+    with no plan attached (admin-granted, plan_id nullable) is treated as
+    permissive, same as never having purchased anything.
+
+    A tier gate bug lived here: this used to return True unconditionally for
+    *anyone* with a positive credit balance, before ever checking which plan
+    they actually bought — every paid tier (including the cheapest, feature-
+    poor Starter pack) silently unlocked every premium feature the pricing
+    page shows as Standard/Pro-only, for as long as any credits were left.
+    That's now only a fallback for legacy purchases with no plan actually
+    linked (see _user_relevant_plans) — a real plan match is always checked
+    first and, when found, is authoritative over the raw balance."""
     sub = get_active_subscription(db, user)
     if sub and not sub.plan:
         return True
     plans = _user_relevant_plans(db, user)
-    if not plans:
-        return True
-    return any(getattr(p, attr) for p in plans)
+    if plans:
+        return any(getattr(p, attr) for p in plans)
+    if not user_has_purchased_credits(db, user):
+        return True  # never purchased anything — running on welcome credits, kept permissive as a trial experience
+    # Purchased credits exist but couldn't be matched to any Plan row (a
+    # legacy pre-tier purchase) — fall back to the balance as the only
+    # signal available, same as user_has_active_subscription's own
+    # backward-compatibility fallback above.
+    return get_credit_balance(db, user) > 0
 
 
 def user_ai_transcription_enabled(db: Session, user: User) -> bool:
-    return _feature_enabled(db, user, "ai_transcription_enabled")
+    # Deliberately ungated on every tier (2026-09-07 pricing pass) — real
+    # transcription usage is already billed per task via credits, so a
+    # plan-level block on top would just double-charge the same usage
+    # instead of differentiating tiers. The Plan.ai_transcription_enabled
+    # column and the underlying _feature_enabled gate both still exist —
+    # only this call site stopped enforcing them — in case that decision
+    # ever needs to be reversed for a specific tier.
+    return True
 
 
 def user_ai_images_enabled(db: Session, user: User) -> bool:
-    return _feature_enabled(db, user, "ai_images_enabled")
+    # Same reasoning as user_ai_transcription_enabled above.
+    return True
 
 
 def user_ai_script_enabled(db: Session, user: User) -> bool:
-    return _feature_enabled(db, user, "ai_script_enabled")
+    # Same reasoning as user_ai_transcription_enabled above.
+    return True
 
 
 def user_autopublish_enabled(db: Session, user: User) -> bool:
@@ -275,36 +295,57 @@ def user_autopublish_enabled(db: Session, user: User) -> bool:
 def user_max_channels(db: Session, user: User) -> Optional[int]:
     """None means unlimited. Best-of across every plan the user has access
     through (the highest cap they've ever paid for wins) — a user who
-    upgraded shouldn't be capped by a smaller pack bought earlier."""
-    if user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0:
-        return None
+    upgraded shouldn't be capped by a smaller pack bought earlier.
+
+    Same tier-gate bug fixed here as _feature_enabled above: a positive
+    credit balance used to mean unlimited channels regardless of which plan
+    was actually purchased, silently erasing the Starter/Creator channel
+    caps the pricing page promises. A matched plan is authoritative now;
+    the balance is only a fallback for legacy purchases with no plan link."""
     sub = get_active_subscription(db, user)
     if sub and not sub.plan:
         return None
     plans = _user_relevant_plans(db, user)
-    if not plans:
-        return None
-    caps = [p.max_channels for p in plans]
-    if any(c is None for c in caps):
-        return None
-    return max(caps)
+    if plans:
+        caps = [p.max_channels for p in plans]
+        return None if any(c is None for c in caps) else max(caps)
+    if not user_has_purchased_credits(db, user):
+        return None  # never purchased anything — welcome-credit trial, kept unrestricted
+    return None if get_credit_balance(db, user) > 0 else 0
 
 
 def user_max_video_duration_seconds(db: Session, user: User) -> Optional[int]:
-    """Same best-of-across-plans shape as user_max_channels, for the
-    per-tier video-length cap shown on the pricing cards."""
-    if user_has_purchased_credits(db, user) and get_credit_balance(db, user) > 0:
-        return None
+    """Same best-of-across-plans shape, and the same tier-gate fix, as
+    user_max_channels above — for the per-tier video-length cap shown on
+    the pricing cards."""
     sub = get_active_subscription(db, user)
     if sub and not sub.plan:
         return None
     plans = _user_relevant_plans(db, user)
-    if not plans:
+    if plans:
+        caps = [p.max_video_duration_seconds for p in plans]
+        return None if any(c is None for c in caps) else max(caps)
+    if not user_has_purchased_credits(db, user):
+        return None  # never purchased anything — welcome-credit trial, kept unrestricted
+    return None if get_credit_balance(db, user) > 0 else 0
+
+
+def user_max_cloned_voices(db: Session, user: User) -> Optional[int]:
+    """None means unlimited. Same best-of-across-plans shape as
+    user_max_channels — the newest per-tier scarcity lever (2026-09-07
+    pricing pass), enforced at the voice-clone submission endpoint
+    (channels.py's clone_channel_voice) against the creator's count of
+    already-successful clones (VoiceCloneJob.status == 'done')."""
+    sub = get_active_subscription(db, user)
+    if sub and not sub.plan:
         return None
-    caps = [p.max_video_duration_seconds for p in plans]
-    if any(c is None for c in caps):
-        return None
-    return max(caps)
+    plans = _user_relevant_plans(db, user)
+    if plans:
+        caps = [p.max_cloned_voices for p in plans]
+        return None if any(c is None for c in caps) else max(caps)
+    if not user_has_purchased_credits(db, user):
+        return None  # never purchased anything — welcome-credit trial, kept unrestricted
+    return None if get_credit_balance(db, user) > 0 else 0
 
 
 def user_video_quota_status(db: Session, user: User) -> tuple[Optional[int], int]:

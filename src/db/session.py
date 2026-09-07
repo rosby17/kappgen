@@ -286,6 +286,7 @@ def init_db():
             "monthly_credit_grant": "ALTER TABLE plans ADD COLUMN monthly_credit_grant INTEGER",
             "max_channels": "ALTER TABLE plans ADD COLUMN max_channels INTEGER",
             "max_video_duration_seconds": "ALTER TABLE plans ADD COLUMN max_video_duration_seconds INTEGER",
+            "max_cloned_voices": "ALTER TABLE plans ADD COLUMN max_cloned_voices INTEGER",
         }
         with engine.begin() as conn:
             for col_name, ddl in plan_migrations.items():

@@ -324,6 +324,16 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), gender: st
     if not api_key:
         raise HTTPException(status_code=503, detail="Izivoice n'est pas configuré.")
 
+    from src.utils.billing import user_max_cloned_voices
+    voice_cap = user_max_cloned_voices(db, current_user)
+    if voice_cap is not None:
+        existing_clones = db.query(VoiceCloneJob).filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.status == "done").count()
+        if existing_clones >= voice_cap:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Ton offre est limitée à {voice_cap} voix clonée{'s' if voice_cap > 1 else ''}. Passe à un palier supérieur pour en cloner davantage.",
+            )
+
     job_id = uuid.uuid4().hex
     CLONE_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     audio_rel_path = f"voice_clone_uploads/{job_id}{Path(audio.filename or '').suffix or '.bin'}"

@@ -695,6 +695,14 @@ class Plan(Base):
     # Plan caps shown on the pricing cards — null means unlimited on both.
     max_channels = Column(Integer, nullable=True)
     max_video_duration_seconds = Column(Integer, nullable=True)
+    # Same null-means-unlimited shape — how many successful voice clones
+    # (VoiceCloneJob.status == "done") this plan allows, in total, not per
+    # cycle. Script/image/transcription generation stay ungated across every
+    # tier deliberately — they're already billed per task via credits, so a
+    # plan-level gate on top would just double-charge the same usage instead
+    # of being a real differentiator; channels, video length and cloned
+    # voices are the actual per-tier scarcity levers.
+    max_cloned_voices = Column(Integer, nullable=True)
 
     def to_dict(self):
         return {
@@ -712,6 +720,7 @@ class Plan(Base):
             "monthly_credit_grant": self.monthly_credit_grant,
             "max_channels": self.max_channels,
             "max_video_duration_seconds": self.max_video_duration_seconds,
+            "max_cloned_voices": self.max_cloned_voices,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
