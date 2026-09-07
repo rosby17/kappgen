@@ -159,6 +159,38 @@ def clean_filename_title(filename: str) -> str:
     clean = re.sub(r'[-_]+', ' ', stem).strip()
     return clean if clean else "Audio préenregistré"
 
+
+def _fill_early_text_video_metadata(video_id: str) -> None:
+    """Background counterpart of the early-title generation submit_video_subject
+    used to do inline (see the comment at its call site for why that moved
+    here) — same generate_metadata() call, same cached title/description/
+    thumbnail_text fields (generate_metadata's reuse_existing path picks
+    these up later, no second LLM call), just off the request's critical
+    path. Runs in its own DB session since the request's session is long
+    closed by the time this fires. Best-effort: queue_runner still fills in
+    a title from the same source if this thread hasn't finished (or failed)
+    by the time the worker picks the video up — this is a UX nicety for the
+    "sitting in the queue" window, never a hard dependency."""
+    from src.db.session import SessionLocal
+    db = SessionLocal()
+    try:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if not video or video.title:
+            return
+        channel = video.channel
+        try:
+            stub = SimpleNamespace(script_text=video.script_text or "", duration_seconds=None, id=None)
+            meta = generate_metadata(stub, channel)
+            video.title = meta["title"]
+            video.youtube_description = meta["description"]
+            video.thumbnail_text = meta["thumbnail_text"]
+            db.commit()
+        except Exception as exc:
+            logger.warning(f"Could not generate an early title for text video {video_id} on channel {channel.id if channel else '?'}: {exc}")
+    finally:
+        db.close()
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def submit_video_subject(
     channel_id: str = Form(...),
@@ -351,27 +383,24 @@ async def submit_video_subject(
         # showing its own raw script_text as a fallback (queue_runner only
         # overwrites video.title once the worker actually picks the job up,
         # and even then only if it's still falsy — so a video that waits any
-        # length of time in the queue had nothing better to show). The full
-        # script is already known here, so there's no reason to wait: generate
-        # the real title (and description/thumbnail_text, cached for reuse by
-        # generate_metadata's reuse_existing path later — no second LLM call)
-        # right now, before the row is even created.
-        quick_title, quick_description, quick_thumbnail_text = explicit_title, None, None
-        if not explicit_title:
-            try:
-                stub = SimpleNamespace(script_text=script_text.strip(), duration_seconds=None, id=None)
-                meta = generate_metadata(stub, channel)
-                quick_title = meta["title"]
-                quick_description = meta["description"]
-                quick_thumbnail_text = meta["thumbnail_text"]
-            except Exception as exc:
-                logger.warning(f"Could not generate an early title for a new text video on channel {channel.id}: {exc}")
-
+        # length of time in the queue had nothing better to show).
+        #
+        # This used to call generate_metadata() synchronously right here,
+        # before the row was even created — a real LLM call (the full
+        # ai_text.py provider fallback chain, with up to 60s of rate-limit
+        # backoff on a single provider before it even falls through to the
+        # next) sitting directly on this request's critical path. Any
+        # provider hiccup meant this endpoint could legitimately take longer
+        # than the frontend's 90s submit timeout, surfacing as "La connexion
+        # au serveur a expiré" on every retry — a request timeout, not an
+        # actual network problem, and not something retrying the same way
+        # ever fixed. Fired in the background instead: the response comes
+        # back immediately with the row created (title still empty), and the
+        # title/description/thumbnail_text fill in a few seconds later —
+        # still well before the video reaches the front of the render queue.
         video = Video(
             channel_id=channel.id,
-            title=quick_title,
-            youtube_description=quick_description,
-            thumbnail_text=quick_thumbnail_text,
+            title=explicit_title,
             script_text=script_text.strip(),
             input_type="text",
             creation_source="script",
@@ -398,6 +427,9 @@ async def submit_video_subject(
         db.add(video)
         db.commit()
         db.refresh(video)
+
+        if not explicit_title:
+            threading.Thread(target=_fill_early_text_video_metadata, args=(video.id,), daemon=True).start()
 
         return [video.to_dict()]
 
