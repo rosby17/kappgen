@@ -388,7 +388,7 @@ def grant_subscription_cycle_credits(db: Session, subscription: Subscription) ->
 # counter — a short/cheap video and a 1h AI-generated one used to cost the
 # exact same "1 free video" regardless of real spend. Existing users already
 # on the old quota keep it untouched; this only applies going forward.
-WELCOME_CREDIT_AMOUNT = 10_000
+WELCOME_CREDIT_AMOUNT = 20_000  # 10k proved too small to actually finish one video (2026-09-07)
 # Never expires — same "effectively forever" convention as the paid
 # "lifetime" pack cycle elsewhere in this file (expires_at is NOT NULL, so
 # "never" still needs a real date). A welcome bonus that quietly evaporated
