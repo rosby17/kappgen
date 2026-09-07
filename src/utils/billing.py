@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from math import ceil
 from typing import Optional
 from sqlalchemy.orm import Session
-from src.db.models import User, Subscription, CreditPot, CreditTransaction, Order, Plan, AppSetting
+from src.db.models import User, Subscription, CreditPot, CreditTransaction, Order, Plan, AppSetting, Video
 
 # Izivoice-billed calls (voice, images, transcription, music) are metered at
 # cost (x1) rather than marked up — the operator owns Izivoice too, so that
@@ -501,15 +501,27 @@ def estimate_video_cost_credits(
     if transcribe_audio and estimated_duration_seconds:
         total += estimated_duration_seconds * IZIVOICE_STT_CREDITS_PER_SEC
 
-    source = image_style.get("source", "library")
-    if source in ("ai_generated", "hybrid"):
-        # Mirrors fetch_or_generate_images' own budget: only the opening
-        # window's images are ever actually generated, the rest of a long
-        # video reuses that pool — so cost caps out instead of scaling
-        # linearly with total scene count.
-        generation_count = scene_count if scene_count is not None else max(1, round(estimated_duration_seconds / 6))
-        if source == "hybrid":
-            generation_count = (generation_count + 1) // 2
+    from src.pipeline.images import resolve_enabled_image_sources
+    if "ai_generated" in resolve_enabled_image_sources(image_style):
+        # Mirrors orchestrator.py's own real generation budget exactly (see
+        # ai_unique_scene_count there) — was previously always
+        # duration/6 uncapped by the creator's own max_unique_images, which
+        # could estimate 10x+ over the real cost for any channel that had
+        # deliberately set a low "Nombre précis" image count to control
+        # spend. That overestimate then rejected well-funded creators
+        # (real balance far above what the render would actually cost) with
+        # a false "solde insuffisant" — confirmed in production against a
+        # user sitting on a full, unexpired 20 000-credit welcome grant.
+        max_unique = image_style.get("max_unique_images")
+        if scene_count is not None:
+            generation_count = scene_count
+        elif max_unique:
+            generation_count = min(int(max_unique), max(1, round(estimated_duration_seconds / 6)))
+        else:
+            # No explicit cap: only the opening ~10-minute window is ever
+            # actually generated, the rest of a long video reuses that pool.
+            ai_window_seconds = 10 * 60
+            generation_count = max(1, round(min(estimated_duration_seconds, ai_window_seconds) / 6))
         total += min(generation_count, 100) * IZIVOICE_IMAGE_CREDITS_MAX
 
     if music_preference.get("enabled") and music_preference.get("mode") == "ai_generate":
@@ -626,6 +638,13 @@ def debit_credits(db: Session, user: User, amount: int, description: str, video_
     sites deep in the pipeline don't have a Video object in hand."""
     if amount <= 0:
         return True
+    # An admin-triggered retry (quality check, not the creator's own request
+    # — see admin_retry_video) is on KappGen, not the creator: every debit
+    # tagged with that video_id is silently waived instead of charged.
+    if video_id:
+        video = db.query(Video).filter(Video.id == video_id).first()
+        if video and video.admin_free_retry:
+            return True
     pots = db.query(CreditPot).filter(
         CreditPot.user_id == user.id,
         CreditPot.amount > 0,

@@ -59,6 +59,7 @@ def init_db():
             "audio_rights_confirmed": "ALTER TABLE videos ADD COLUMN audio_rights_confirmed BOOLEAN DEFAULT FALSE NOT NULL",
             "audio_source_type": "ALTER TABLE videos ADD COLUMN audio_source_type VARCHAR(32)",
             "storage_backend": "ALTER TABLE videos ADD COLUMN storage_backend VARCHAR(10) DEFAULT 'local' NOT NULL",
+            "admin_free_retry": "ALTER TABLE videos ADD COLUMN admin_free_retry BOOLEAN DEFAULT FALSE NOT NULL",
             "output_size_bytes": "ALTER TABLE videos ADD COLUMN output_size_bytes INTEGER",
             "extended_retention": "ALTER TABLE videos ADD COLUMN extended_retention BOOLEAN DEFAULT FALSE NOT NULL",
             "retention_until": "ALTER TABLE videos ADD COLUMN retention_until TIMESTAMP",

@@ -455,6 +455,12 @@ class Video(Base):
     # passes full URLs through unchanged, so nothing else needs to know which
     # backend a given video landed on.
     storage_backend = Column(String(10), nullable=False, default="local")
+    # Set when an admin re-renders a video from the admin dashboard (quality
+    # check, not the creator's own request) — every debit_credits() call
+    # tagged with this video_id is waived while this is true, so a
+    # QA-motivated admin retry never charges the creator again for KappGen's
+    # own judgment call. See debit_credits in utils/billing.py.
+    admin_free_retry = Column(Boolean, nullable=False, default=False)
     output_size_bytes = Column(Integer, nullable=True)  # output.mp4 size — feeds current_b2_usage_bytes()
     # Opt-in per-video: skip the default retention purge entirely and prefer
     # uploading to R2 instead of local disk (see _finalize_output_storage /

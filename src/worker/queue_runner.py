@@ -1643,7 +1643,14 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     can_render, reason = user_can_render(db, owner, estimated_cost)
     if not can_render:
         logger.info(f"Daily automation: channel {channel.id} ('{channel.name}') skipped — {reason}")
-        _record_automation_failure(db, channel, message=CREDIT_INSUFFICIENT_MESSAGE)
+        # `reason` (from user_can_render) already carries the real numbers —
+        # "environ X crédits nécessaires, Y disponibles" — the generic
+        # CREDIT_INSUFFICIENT_MESSAGE constant was showing creators a
+        # balance-exhausted message with no figures at all, including on
+        # channels whose real balance was nowhere close to exhausted (see
+        # the estimate_video_cost_credits fix this same session — it was
+        # the estimate that was wrong, not the balance).
+        _record_automation_failure(db, channel, message=reason or CREDIT_INSUFFICIENT_MESSAGE)
         return None
     try:
         validate_channel_visual_source(channel, db)

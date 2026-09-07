@@ -220,6 +220,21 @@ def assemble_final_video(
 
     video_filters = []
 
+    # Always-on, unconditional correction for a magenta/violet color cast
+    # traced to the AI image generator itself, not any optional effect: the
+    # default "cinematic, dramatic lighting" style prompt reliably pushes
+    # night/candlelit/moody scenes toward a purple-heavy palette (confirmed
+    # across multiple unrelated channels, several with color_grade='none'
+    # and no overlay effect that touches color at all — removing the old
+    # 'Vibrant' grade only made this worse on the one channel that had it
+    # selected, it was never the actual source). A small, deliberately
+    # subtle colorbalance nudge away from magenta (less red+blue, a touch
+    # more green, concentrated in shadows/midtones where the cast is
+    # strongest) — imperceptible on a normal, correctly-balanced image, but
+    # neutralizes the AI cast wherever it shows up. Applied to every render,
+    # unconditionally, not tied to effects_config at all.
+    video_filters.append("colorbalance=rs=-0.05:bs=-0.04:gs=0.04:rm=-0.05:bm=-0.04:gm=0.04")
+
     # Color grading + overlay effects are both gated behind effects_config.enabled —
     # a client can turn the whole "effects" layer off without losing their tuned
     # color grade / intensity settings underneath (they just don't apply for now).

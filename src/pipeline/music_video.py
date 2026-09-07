@@ -320,9 +320,14 @@ def compose_final_video(
     static title/lyrics text from the Sous-titres step."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     has_watermark = watermark_enabled and WATERMARK_PATH.exists()
+    # Same always-on magenta-cast correction as the narration pipeline's
+    # assembler.py — the AI background image generator's own bias, not tied
+    # to any effects_config setting, so it applies here unconditionally too.
+    correction_filter = "colorbalance=rs=-0.05:bs=-0.04:gs=0.04:rm=-0.05:bm=-0.04:gm=0.04"
     effects_filter = _effects_video_filter(effects_config)
-    base_label = "0:v" if not effects_filter else "vfx"
-    filter_complex = f"[0:v]{effects_filter}[vfx];" if effects_filter else ""
+    combined_filter = f"{correction_filter},{effects_filter}" if effects_filter else correction_filter
+    base_label = "vfx"
+    filter_complex = f"[0:v]{combined_filter}[vfx];"
     # A full-width, saturated cyan waveform read as an ugly bar slapped across
     # the whole frame — a slim, soft, centered strip (roughly half the frame
     # width) reads as an actual design element instead of a debug overlay.

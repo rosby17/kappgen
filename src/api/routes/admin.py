@@ -553,8 +553,12 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
 
 @router.post("/videos/{video_id}/retry")
 def admin_retry_video(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Retry a creator's failed video while enforcing that creator's billing."""
-    from src.utils.billing import user_can_render, estimate_video_cost_credits
+    """Retry a creator's failed video — free for the creator. This is KappGen
+    QA-initiated (an admin judged the render worth redoing, e.g. quality
+    issues after the 'lost output file' bug), never the creator's own
+    request, so every credit this re-render would normally cost is waived
+    (see admin_free_retry on Video / debit_credits in utils/billing.py) —
+    no balance check either, since nothing is actually being charged."""
     from src.models.project import VideoStatus
 
     video = db.query(Video).filter(Video.id == video_id).first()
@@ -567,17 +571,7 @@ def admin_retry_video(video_id: str, admin: User = Depends(get_current_admin), d
     if not channel or not owner:
         raise HTTPException(status_code=409, detail="La vidéo n'a plus de chaîne ou de propriétaire valide.")
 
-    estimated_cost = estimate_video_cost_credits(
-        script_char_count=len((video.script_text or "").strip()) if video.input_type == "text" else 0,
-        estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0,
-        transcribe_audio=bool(video.transcribe_audio),
-        image_style=channel.image_style,
-        music_preference=channel.music_preference,
-    )
-    can_render, reason = user_can_render(db, owner, estimated_cost)
-    if not can_render:
-        raise HTTPException(status_code=402, detail=f"Impossible de relancer pour {owner.email} : {reason}")
-
+    video.admin_free_retry = True
     video.error_message = None
     video.finished_at = None
     video.progress_percent = 0
