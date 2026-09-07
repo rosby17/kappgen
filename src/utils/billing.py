@@ -434,6 +434,46 @@ def migrate_legacy_accounts_to_welcome_credits(db: Session) -> int:
     return len(users)
 
 
+def topup_welcome_credits_to_20000(db: Session) -> int:
+    """One-time, idempotent: existing accounts that already received the old
+    10,000-credit welcome grant get +10,000 more (never a flat reset to
+    20,000 — whatever they already spent/earned since stays untouched)."""
+    migration_key = "welcome_credits_10k_to_20k_topup_v1"
+    if db.bind and db.bind.dialect.name == "postgresql":
+        from sqlalchemy import text
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": migration_key})
+    if db.query(AppSetting).filter(AppSetting.key == migration_key).first():
+        return 0
+
+    already_topped_up = db.query(CreditTransaction.user_id).filter(
+        CreditTransaction.transaction_type == "welcome_bonus_topup"
+    )
+    already_granted = db.query(CreditTransaction.user_id).filter(
+        CreditTransaction.transaction_type == "welcome_bonus"
+    )
+    user_ids = [
+        row[0] for row in db.query(User.id)
+        .filter(User.id.in_(already_granted))
+        .filter(~User.id.in_(already_topped_up))
+        .all()
+    ]
+    topup_amount = 10_000
+    for user_id in user_ids:
+        db.add(CreditPot(
+            user_id=user_id, amount=topup_amount,
+            original_amount=topup_amount,
+            expires_at=datetime.utcnow() + timedelta(days=WELCOME_CREDIT_VALID_DAYS),
+        ))
+        db.add(CreditTransaction(
+            user_id=user_id, amount=topup_amount,
+            transaction_type="welcome_bonus_topup",
+            description="Complément crédits de bienvenue (10 000 → 20 000)",
+        ))
+    db.add(AppSetting(key=migration_key, value="complete"))
+    db.commit()
+    return len(user_ids)
+
+
 def estimate_video_cost_credits(
     script_char_count: int = 0,
     estimated_duration_seconds: float = 0.0,

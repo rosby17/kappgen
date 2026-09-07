@@ -324,9 +324,12 @@ def init_db():
     # retired and every pre-existing creator receives the same 10,000-credit
     # welcome pot as a newly registered creator. Purchased/admin credits are
     # separate pots and remain untouched.
-    from src.utils.billing import migrate_legacy_accounts_to_welcome_credits
+    from src.utils.billing import migrate_legacy_accounts_to_welcome_credits, topup_welcome_credits_to_20000
     db = SessionLocal()
     try:
         migrate_legacy_accounts_to_welcome_credits(db)
+        # One-time: welcome grant raised 10,000 -> 20,000 (2026-09-07); top up
+        # everyone who already got the old 10,000 with +10,000 more.
+        topup_welcome_credits_to_20000(db)
     finally:
         db.close()
