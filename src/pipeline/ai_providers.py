@@ -22,6 +22,11 @@ from src import config
 #   "vision" — images + prompt in, text out (style references, moodboards)
 PROVIDERS = [
     {"id": "anthropic", "label": "Anthropic (Claude)", "key": "ANTHROPIC_API_KEY", "capabilities": {"text", "vision"}},
+    # Claude via the kie.ai reseller proxy — a cheaper, lower-guarantee,
+    # text-only alternative to calling Anthropic directly. See
+    # src/pipeline/ai_text.py's _kie_complete for why it's text-only (no
+    # vision/tool-use parity with the real Anthropic API).
+    {"id": "kie",       "label": "Claude via Kie.ai",  "key": "KIE_API_KEY",       "capabilities": {"text"}},
     {"id": "deepseek",  "label": "DeepSeek",           "key": "DEEPSEEK_API_KEY",  "capabilities": {"text"}},
     {"id": "fal",       "label": "fal.ai",             "key": "FAL_API_KEY",       "capabilities": {"text", "vision"}},
     {"id": "openai",    "label": "OpenAI",             "key": "OPENAI_API_KEY",    "capabilities": {"text", "vision"}},

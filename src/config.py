@@ -179,6 +179,16 @@ GOOGLE_CSE_CX = os.getenv("GOOGLE_CSE_CX", "")
 # through the rest automatically if the chosen one fails).
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# Kie.ai — third-party reseller of Claude (and other) models at a
+# discounted per-token rate, called through its own proxy endpoint
+# (/claude/v1/messages), NOT the official Anthropic API. Deliberately
+# pinned to an older Claude generation by default (4.6) rather than
+# whatever kie.ai's newest listing is, per the admin's own choice — see
+# src/pipeline/ai_text.py's _kie_complete. Same admin-ranked fallback
+# chain as DeepSeek/Groq: optional, and never the only text provider.
+KIE_API_KEY = os.getenv("KIE_API_KEY", "")
+KIE_BASE_URL = os.getenv("KIE_BASE_URL", "https://api.kie.ai")
+KIE_CLAUDE_MODEL = os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-4-6")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()] or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])

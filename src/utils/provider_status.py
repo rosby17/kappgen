@@ -28,6 +28,7 @@ from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY,
     IZIVOICE_API_KEY, IZIVOICE_BASE_URL,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY,
+    KIE_API_KEY, KIE_BASE_URL, KIE_CLAUDE_MODEL,
 )
 
 PROBE_TIMEOUT = 15.0
@@ -112,6 +113,31 @@ def _check_groq():
         return {"configured": True, "status": "error", "detail": f"Groq injoignable : {exc}"}
 
 
+def _check_kie():
+    if not KIE_API_KEY:
+        return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
+    try:
+        # No free ping endpoint on kie.ai's Claude proxy — a minimal 1-token
+        # completion is the cheapest real signal, same trade-off as the
+        # DeepSeek/Groq probes above.
+        resp = httpx.post(
+            f"{KIE_BASE_URL}/claude/v1/messages",
+            headers={"Authorization": f"Bearer {KIE_API_KEY}", "Content-Type": "application/json"},
+            json={"model": KIE_CLAUDE_MODEL, "messages": [{"role": "user", "content": "hi"}], "stream": False, "max_tokens": 1},
+            timeout=PROBE_TIMEOUT,
+        )
+        if resp.status_code in (402, 429):
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits kie.ai insuffisants."}
+        if resp.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+        resp.raise_for_status()
+        return {"configured": True, "status": "ok", "detail": f"Clé valide. Modèle configuré : {KIE_CLAUDE_MODEL} (reseller kie.ai, pas l'API Anthropic officielle)."}
+    except httpx.HTTPStatusError as exc:
+        return {"configured": True, "status": "error", "detail": f"Erreur kie.ai ({exc.response.status_code}) — service injoignable ou en panne."}
+    except Exception as exc:
+        return {"configured": True, "status": "error", "detail": f"kie.ai injoignable : {exc}"}
+
+
 def _check_fal():
     if not FAL_API_KEY:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
@@ -136,6 +162,7 @@ def _check_izivoice():
 def check_all_providers() -> list:
     checks = [
         ("anthropic", "Anthropic (Claude)", _check_anthropic),
+        ("kie", "Claude via Kie.ai", _check_kie),
         ("openai", "OpenAI", _check_openai),
         ("deepseek", "DeepSeek", _check_deepseek),
         ("groq", "Groq (gratuit)", _check_groq),

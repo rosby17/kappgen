@@ -13,9 +13,10 @@ from typing import Optional
 from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY, GEMINI_API_KEY, GEMINI_API_KEYS,
+    KIE_API_KEY, KIE_BASE_URL, KIE_CLAUDE_MODEL,
 )
 from src.utils.logger import logger
-from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, PRICING
+from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, estimate_kie_claude_cost, PRICING
 
 # OpenRouter's own ":free" model catalog changes over time; this one has
 # stayed reliably available and free as of writing. Swap it if OpenRouter
@@ -84,6 +85,51 @@ def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dic
     if text_blocks:
         return text_blocks[-1].strip(), cost_usd
     raise RuntimeError("Anthropic text generation returned no text content.")
+
+
+def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    """Claude through kie.ai's reseller proxy — a cheaper, admin-opt-in
+    alternative to calling Anthropic directly (see src/pipeline/ai_providers.py).
+    This is NOT the Anthropic API: kie.ai exposes its own wrapper
+    (POST /claude/v1/messages) with a much smaller surface — no `system`
+    prompt, no extended-thinking effort controls, no prompt caching,
+    max_tokens capped low by default. Deliberately pinned to
+    KIE_CLAUDE_MODEL (defaults to the older claude-sonnet-4-6, not
+    whatever kie.ai lists as newest) since that's the admin's own choice
+    of which Claude generation to route here.
+    """
+    if not KIE_API_KEY:
+        raise RuntimeError("KIE_API_KEY is not configured on the server.")
+    resp = httpx.post(
+        f"{KIE_BASE_URL}/claude/v1/messages",
+        headers={"Authorization": f"Bearer {KIE_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": KIE_CLAUDE_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "max_tokens": max_tokens,
+        },
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text_blocks = [block.get("text", "") for block in (data.get("content") or []) if block.get("type") == "text"]
+    text = "\n".join(t for t in text_blocks if t).strip()
+    if not text:
+        raise RuntimeError("Kie.ai (Claude) text generation returned no text content.")
+    usage = data.get("usage") or {}
+    in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+    # kie.ai reports its own credits_consumed too, but the per-token
+    # estimate keeps this provider comparable to every other row on the
+    # admin "Coûts" page (all of which are token-based).
+    cost_usd = estimate_kie_claude_cost(in_tok, out_tok)
+    log_usage(
+        "kie_claude", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+        cost_usd,
+        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+        meta={"model": KIE_CLAUDE_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "credits_consumed": data.get("credits_consumed")},
+    )
+    return text, cost_usd
 
 
 def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
@@ -395,6 +441,7 @@ def generate_text(
     usage_ctx = {"operation": operation, "user_id": user_id, "channel_id": channel_id, "video_id": video_id}
     providers = {
         "anthropic": lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search),
+        "kie": lambda: _kie_complete(prompt, max_tokens, usage_ctx),
         "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx),
         "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
         "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),

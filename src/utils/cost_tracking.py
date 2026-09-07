@@ -50,6 +50,15 @@ PRICING = {
         "input_per_token": 0.0,
         "output_per_token": 0.0,
     },
+    "kie_claude": {
+        # kie.ai's published rate for claude-sonnet-4-6 (their reseller
+        # proxy, not Anthropic direct) as of writing: ~28.3%/28.5% of
+        # Anthropic's own $3/$15 Sonnet 4.6 rate. Re-check
+        # https://kie.ai/claude-sonnet-4-6 if KIE_CLAUDE_MODEL changes —
+        # this rate is per-model, not a flat kie.ai-wide discount.
+        "input_per_token": 0.850 / 1_000_000,
+        "output_per_token": 4.275 / 1_000_000,
+    },
     "fal_text": {
         # fal.ai's OpenRouter passthrough doesn't report token usage back to
         # us, so this is a flat per-request estimate rather than per-token.
@@ -83,6 +92,11 @@ def estimate_anthropic_cost(input_tokens: int, output_tokens: int, web_search_us
 
 def estimate_openai_cost(input_tokens: int, output_tokens: int) -> float:
     p = PRICING["openai"]
+    return input_tokens * p["input_per_token"] + output_tokens * p["output_per_token"]
+
+
+def estimate_kie_claude_cost(input_tokens: int, output_tokens: int) -> float:
+    p = PRICING["kie_claude"]
     return input_tokens * p["input_per_token"] + output_tokens * p["output_per_token"]
 
 
