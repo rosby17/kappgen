@@ -553,29 +553,50 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
 
 @router.post("/videos/{video_id}/retry")
 def admin_retry_video(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Retry a creator's failed video — free for the creator. This is KappGen
-    QA-initiated (an admin judged the render worth redoing, e.g. quality
-    issues after the 'lost output file' bug), never the creator's own
-    request, so every credit this re-render would normally cost is waived
-    (see admin_free_retry on Video / debit_credits in utils/billing.py) —
-    no balance check either, since nothing is actually being charged."""
+    """Retry a creator's video — free for the creator. This is KappGen
+    QA-initiated (an admin judged the render worth redoing — a failed video,
+    or a finished one with a quality issue like the magenta color cast),
+    never the creator's own request, so every credit this re-render would
+    normally cost is waived (see admin_free_retry on Video / debit_credits
+    in utils/billing.py) — no balance check either, since nothing is
+    actually being charged.
+
+    A DONE video is retried as a pure reassembly: the script, voiceover,
+    images and scene clips already on disk (video_dir/source/) are reused
+    as-is, only the final montage step (assembler.py) re-runs — cheaper,
+    faster, and exactly right for a rendering-only issue like a color
+    filter, not a content problem. A FAILED video goes through the normal
+    full pipeline instead, since it may never have finished generating its
+    source assets in the first place."""
     from src.models.project import VideoStatus
 
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    if video.status != VideoStatus.FAILED.value:
-        raise HTTPException(status_code=409, detail="Seules les vidéos en échec peuvent être relancées.")
+    if video.status not in (VideoStatus.FAILED.value, VideoStatus.DONE.value):
+        raise HTTPException(status_code=409, detail="Seules les vidéos terminées ou en échec peuvent être relancées.")
     channel = video.channel
     owner = channel.user if channel else None
     if not channel or not owner:
         raise HTTPException(status_code=409, detail="La vidéo n'a plus de chaîne ou de propriétaire valide.")
 
+    was_done = video.status == VideoStatus.DONE.value
     video.admin_free_retry = True
     video.error_message = None
     video.finished_at = None
     video.progress_percent = 0
-    if not (video.script_text or "").strip() and channel.automation_mode == "auto" and channel.content_type != "music":
+    if was_done:
+        # Reassembly-only — see reassemble_video_output in queue_runner.py.
+        # Requires the video's own source/ directory (voiceover, images,
+        # scene clips) to still exist on disk; if it was purged (extended
+        # retention window elapsed, or the video predates edit support)
+        # the reassembly branch itself raises a clear FileNotFoundError
+        # rather than silently falling back to a full regenerate.
+        video.is_reassembly = True
+        video.status = VideoStatus.QUEUED.value
+        video.progress_stage = "En attente du remontage"
+        db.commit()
+    elif not (video.script_text or "").strip() and channel.automation_mode == "auto" and channel.content_type != "music":
         from threading import Thread
         from src.worker.queue_runner import retry_auto_video_script_background
         video.status = VideoStatus.RENDERING.value

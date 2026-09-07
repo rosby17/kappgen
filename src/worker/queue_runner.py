@@ -1831,7 +1831,16 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     can_render_after_script, post_script_reason = user_can_render(db, owner, remaining_render_cost)
     if not actual_script_cost or not can_render_after_script:
         video.status = VideoStatus.FAILED.value
-        video.error_message = post_script_reason or CREDIT_INSUFFICIENT_MESSAGE
+        # Two different failures were sharing one generic message: the
+        # script-generation debit itself failing (actual_script_cost False)
+        # is a distinct case from the remaining-render-cost check (which
+        # already carries real numbers via post_script_reason) — surface
+        # whichever one actually happened instead of defaulting to a vague
+        # "solde épuisé" that doesn't say why.
+        if not actual_script_cost:
+            video.error_message = "Débit du coût de génération du script impossible — vérifie le solde de crédits."
+        else:
+            video.error_message = post_script_reason or CREDIT_INSUFFICIENT_MESSAGE
         video.progress_stage = "Échec"
         video.progress_percent = 0
         db.commit()
