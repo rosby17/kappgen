@@ -78,6 +78,12 @@ PRICING = {
         # mix of models used ever becomes cost-significant.
         "per_image": 0.02,
     },
+    "kie_music": {
+        # kie.ai's published flat rate for Suno v5.5 generation as of
+        # writing: $0.002/request — no per-token/per-character billing.
+        # Re-check https://kie.ai/pricing if this ever changes.
+        "flat_per_request": 0.002,
+    },
     "kie_image": {
         # kie.ai's published rate for gpt-image-2-text-to-image at 1K
         # resolution (the default thumbnails use) as of writing: $0.03/image,
@@ -127,6 +133,10 @@ def estimate_image_cost(image_count: int) -> float:
 
 def estimate_kie_image_cost(image_count: int) -> float:
     return image_count * PRICING["kie_image"]["per_image"]
+
+
+def estimate_kie_music_cost(track_count: int = 1) -> float:
+    return track_count * PRICING["kie_music"]["flat_per_request"]
 
 
 def log_usage(

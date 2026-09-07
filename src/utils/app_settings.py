@@ -169,7 +169,7 @@ def set_voiceover_provider_order(order: List[str]) -> None:
 # passthrough to this same ai33.pro endpoint, so routing there directly
 # bypasses Izivoice's account/quota the same way voice and thumbnails do.
 MUSIC_PROVIDER_ORDER_KEY = "music_provider_order"
-MUSIC_PROVIDERS_ALL = ["izivoice", "ai33pro"]
+MUSIC_PROVIDERS_ALL = ["izivoice", "ai33pro", "kie"]
 MUSIC_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 

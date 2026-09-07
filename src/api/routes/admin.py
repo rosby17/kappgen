@@ -1557,15 +1557,16 @@ def set_voiceover_provider_mode(payload: VoiceoverProviderOrderPayload, admin: U
 # --- Background music provider switch -----------------------------------
 # Same order-picker structure again. Izivoice's own /music route is itself a
 # thin passthrough to this same ai33.pro endpoint (v1s/task/music-generation)
-# — see src/pipeline/music.py.
-MUSIC_PROVIDERS = ["izivoice", "ai33pro"]
+# — see src/pipeline/music.py. "kie" (Suno v5.5 via kie.ai) is the only one
+# of the three on a genuinely separate account/quota.
+MUSIC_PROVIDERS = ["izivoice", "ai33pro", "kie"]
 
 
 @router.get("/settings/music-provider-mode")
 def get_music_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import music_provider_order
-    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY
-    configured = {"izivoice": bool(IZIVOICE_API_KEY), "ai33pro": bool(AI33PRO_API_KEY)}
+    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY
+    configured = {"izivoice": bool(IZIVOICE_API_KEY), "ai33pro": bool(AI33PRO_API_KEY), "kie": bool(KIE_API_KEY)}
     order = music_provider_order()
     return {"order": order, "available": MUSIC_PROVIDERS, "configured": configured}
 

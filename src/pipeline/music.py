@@ -4,9 +4,10 @@ import time
 import httpx
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from src.config import ASSETS_PATH, STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, AI33PRO_API_KEY
+from src.config import ASSETS_PATH, STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, AI33PRO_API_KEY, KIE_API_KEY, KIE_BASE_URL
 from src.utils.logger import logger
 from src.utils.ffmpeg_runner import run_ffmpeg
+from src.utils.cost_tracking import log_usage, estimate_kie_music_cost
 
 
 def _configured_music_providers() -> List[str]:
@@ -15,9 +16,11 @@ def _configured_music_providers() -> List[str]:
     _configured_providers(). "ai33pro" is ai33.pro directly
     (src/pipeline/ai33_provider.py): Izivoice's own /music route is itself a
     thin passthrough to that same upstream endpoint, so this bypasses
-    Izivoice's account/quota entirely rather than changing what's generated."""
+    Izivoice's account/quota entirely rather than changing what's generated.
+    "kie" (kie.ai's Suno v5.5 reseller) is the only genuinely independent
+    account of the three — izivoice/ai33pro share one upstream quota."""
     from src.utils.app_settings import music_provider_order
-    keys = {"izivoice": IZIVOICE_API_KEY, "ai33pro": AI33PRO_API_KEY}
+    keys = {"izivoice": IZIVOICE_API_KEY, "ai33pro": AI33PRO_API_KEY, "kie": KIE_API_KEY}
     providers = [p for p in music_provider_order() if keys.get(p)]
     return providers or (["izivoice"] if IZIVOICE_API_KEY else [])
 
@@ -146,6 +149,77 @@ def _music_via_ai33(
     return output_path
 
 
+def _music_via_kie(
+    client: httpx.Client, prompt: str, output_path: Path,
+    lyrics: Optional[str] = None, title: Optional[str] = None,
+    tags: Optional[str] = None, vocal_gender: Optional[str] = None,
+) -> Path:
+    """Generates a track via kie.ai's Suno v5.5 reseller endpoint — a
+    genuinely separate account/quota from izivoice/ai33pro (which share
+    one upstream). Async create+poll, same shape as the other two
+    providers here. V4_5 is used rather than V5_5: cheaper/faster and
+    plenty for background instrumental beds; only the Vidéo Musicale
+    product (real lyrics) benefits from the newer model, not worth the
+    extra latency for narration background music.
+
+    kie.ai's create call has a `callBackUrl` field marked required in
+    their docs, but polling record-info works without ever receiving a
+    real callback — a placeholder URL is passed since nothing needs to
+    reach it.
+    """
+    api_key = KIE_API_KEY
+    if not api_key:
+        raise RuntimeError("KIE_API_KEY is not configured on the server.")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    if lyrics:
+        payload = {
+            "customMode": True, "instrumental": False, "model": "V4_5",
+            "prompt": lyrics[:5000], "style": (tags or "")[:1000] or "pop",
+            "title": (title or "Untitled")[:80],
+            "callBackUrl": "https://kappgen.com/webhooks/kie-noop",
+        }
+        if vocal_gender in ("m", "f"):
+            payload["vocalGender"] = vocal_gender
+    else:
+        payload = {
+            "customMode": False, "instrumental": True, "model": "V4_5",
+            "prompt": prompt[:3000],
+            "callBackUrl": "https://kappgen.com/webhooks/kie-noop",
+        }
+
+    create_resp = client.post(f"{KIE_BASE_URL}/api/v1/generate", headers=headers, json=payload, timeout=30.0)
+    create_resp.raise_for_status()
+    create_data = create_resp.json() or {}
+    if create_data.get("code") != 200:
+        raise RuntimeError(f"kie.ai music task creation failed: {create_data}")
+    task_id = (create_data.get("data") or {}).get("taskId")
+    if not task_id:
+        raise RuntimeError(f"kie.ai music task creation returned no taskId: {create_data}")
+
+    elapsed = 0.0
+    while elapsed < TASK_POLL_TIMEOUT_SECONDS:
+        time.sleep(TASK_POLL_INTERVAL_SECONDS)
+        elapsed += TASK_POLL_INTERVAL_SECONDS
+        poll_resp = client.get(f"{KIE_BASE_URL}/api/v1/generate/record-info", headers=headers, params={"taskId": task_id}, timeout=30.0)
+        poll_resp.raise_for_status()
+        poll_data = (poll_resp.json() or {}).get("data") or {}
+        status = poll_data.get("status")
+        if status == "SUCCESS":
+            suno_data = ((poll_data.get("response") or {}).get("sunoData")) or []
+            if not suno_data or not suno_data[0].get("audio_url"):
+                raise ValueError(f"kie.ai music task {task_id} succeeded with no audio_url: {poll_data}")
+            audio_resp = client.get(suno_data[0]["audio_url"], timeout=60.0)
+            audio_resp.raise_for_status()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(audio_resp.content)
+            log_usage("kie_music", "music", 1, "tracks", estimate_kie_music_cost(1), meta={"model": "V4_5", "task_id": task_id})
+            return output_path
+        if status in ("CREATE_TASK_FAILED", "GENERATE_AUDIO_FAILED", "CALLBACK_EXCEPTION", "SENSITIVE_WORD_ERROR"):
+            raise RuntimeError(f"kie.ai music task {task_id} failed ({status}).")
+    raise TimeoutError(f"kie.ai music task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s.")
+
+
 def generate_music_izivoice(
     prompt: str, duration: float, output_path: Path,
     lyrics: Optional[str] = None, title: Optional[str] = None,
@@ -172,6 +246,8 @@ def generate_music_izivoice(
             try:
                 if provider == "ai33pro":
                     return _music_via_ai33(client, prompt, output_path, lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender)
+                if provider == "kie":
+                    return _music_via_kie(client, prompt, output_path, lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender)
                 return _music_via_izivoice(client, prompt, output_path, lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender)
             except Exception as e:
                 last_error = e
