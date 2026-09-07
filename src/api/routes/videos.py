@@ -5,6 +5,7 @@ import shutil
 import threading
 import httpx
 import tempfile
+from urllib.parse import urlparse, urljoin
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -516,6 +517,15 @@ async def submit_facecam_video(
         # (a much bigger integration, deferred until the need is confirmed).
         # Drive/Dropbox share links both redirect to the real file when a
         # direct-download query param is added, which httpx follows.
+        #
+        # Audit INT-03 (SSRF): this used to fetch `direct_link` with no host
+        # check at all — any authenticated user could set cloud_link to an
+        # internal address (cloud metadata endpoint, another service on this
+        # VPS's private network, localhost) and have the server fetch it on
+        # their behalf, with the response bytes saved to disk. Only Drive and
+        # Dropbox are actually supported here, so both the initial URL and
+        # every redirect hop it follows are now checked against that
+        # allow-list before any request is made.
         link = cloud_link.strip()
         direct_link = link
         if "drive.google.com" in link:
@@ -524,14 +534,52 @@ async def submit_facecam_video(
                 direct_link = f"https://drive.google.com/uc?export=download&id={match.group(1)}"
         elif "dropbox.com" in link:
             direct_link = link.replace("?dl=0", "?dl=1")
+
+        def _assert_allowed_cloud_host(url: str) -> None:
+            parsed = urlparse(url)
+            if parsed.scheme != "https":
+                raise ValueError("Le lien doit être en https.")
+            host = (parsed.hostname or "").lower()
+            allowed_hosts = {"drive.google.com", "docs.google.com", "dropbox.com", "www.dropbox.com", "dl.dropboxusercontent.com"}
+            if host not in allowed_hosts:
+                raise ValueError(f"Lien cloud non supporté ({host or 'hôte invalide'}) — utilise un lien Google Drive ou Dropbox.")
+
+        try:
+            _assert_allowed_cloud_host(direct_link)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
         dest_file = uploads_dir / f"upload_{uuid.uuid4()}.mp4"
         try:
-            with httpx.Client(timeout=120.0, follow_redirects=True) as client:
-                with client.stream("GET", direct_link) as resp:
-                    resp.raise_for_status()
-                    with open(dest_file, "wb") as f:
-                        for chunk in resp.iter_bytes():
-                            f.write(chunk)
+            # follow_redirects is deliberately off: each hop is validated
+            # against the same host allow-list before being followed, so a
+            # Drive/Dropbox link can't be used to redirect the fetch to an
+            # arbitrary internal address.
+            with httpx.Client(timeout=120.0, follow_redirects=False) as client:
+                current_url = direct_link
+                for _ in range(5):
+                    with client.stream("GET", current_url) as resp:
+                        if resp.is_redirect:
+                            next_url = resp.headers.get("location")
+                            if not next_url:
+                                raise HTTPException(status_code=400, detail="Redirection invalide sur le lien cloud.")
+                            next_url = urljoin(current_url, next_url)
+                            _assert_allowed_cloud_host(next_url)
+                            current_url = next_url
+                            continue
+                        resp.raise_for_status()
+                        with open(dest_file, "wb") as f:
+                            for chunk in resp.iter_bytes():
+                                f.write(chunk)
+                        break
+                else:
+                    raise HTTPException(status_code=400, detail="Trop de redirections sur le lien cloud.")
+        except HTTPException:
+            dest_file.unlink(missing_ok=True)
+            raise
+        except ValueError as exc:
+            dest_file.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:
             dest_file.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Téléchargement du lien cloud impossible : {exc}")
@@ -771,12 +819,21 @@ def download_video(video_id: str, quality: str = "hd", share: bool = False, db: 
 
     source_path = STORAGE_PATH / video.output_path if not is_remote else None
     if quality == "4k":
-        if not video.channel or not video.channel.user_id:
-            raise HTTPException(status_code=409, detail="Impossible de facturer cet export 4K.")
-        if not debit_izivoice_usage_by_user_id(video.channel.user_id, FOUR_K_EXPORT_CREDITS, "video_4k_export", video_id=video.id):
-            raise HTTPException(status_code=402, detail=f"Crédits insuffisants pour l’export 4K ({FOUR_K_EXPORT_CREDITS:,} crédits).")
+        # Audit INT-01: this used to debit FOUR_K_EXPORT_CREDITS on every
+        # single request for this route, unconditionally — including every
+        # repeat hit against an already-rendered output-4k.mp4, which does
+        # zero rendering work. Combined with this route being intentionally
+        # unauthenticated (video_id is a capability URL, needed for a plain
+        # window.open download link), a leaked/shared 4K link let anyone
+        # replay the request forever and drain the channel owner's credits
+        # for nothing. Billing must only ever happen on the branch that
+        # actually runs ffmpeg — never on a cache hit.
         target = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output-4k.mp4"
         if not target.exists():
+            if not video.channel or not video.channel.user_id:
+                raise HTTPException(status_code=409, detail="Impossible de facturer cet export 4K.")
+            if not debit_izivoice_usage_by_user_id(video.channel.user_id, FOUR_K_EXPORT_CREDITS, "video_4k_export", video_id=video.id):
+                raise HTTPException(status_code=402, detail=f"Crédits insuffisants pour l’export 4K ({FOUR_K_EXPORT_CREDITS:,} crédits).")
             target.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="kappgen-4k-") as tmp:
                 if is_remote:
