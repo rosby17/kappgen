@@ -151,6 +151,10 @@ def process_single_queued_video() -> bool:
             # channel would otherwise trap it in "queued" forever exactly
             # like the music case above.
             Video.input_type == "facecam",
+            # Recap videos: same latent bug as facecam/music above — the
+            # summary script only exists after run_recap_pipeline transcribes
+            # and summarizes the source, not at submission time.
+            Video.input_type == "recap",
             and_(Video.script_text.is_not(None), Video.script_text != ""),
         )
         video = (
@@ -188,6 +192,15 @@ def process_single_queued_video() -> bool:
         if video.input_type == "facecam":
             from src.pipeline.facecam_editor import run_facecam_pipeline
             run_facecam_pipeline(video.id, db)
+            return True
+
+        # Recap videos (uploaded episode/movie or a downloaded YouTube link,
+        # summarized + narrated over spaced-out still captures of the source
+        # — see recap_editor.py's own docstring) follow the same "completely
+        # separate shape, branch out early" pattern as facecam above.
+        if video.input_type == "recap":
+            from src.pipeline.recap_editor import run_recap_pipeline
+            run_recap_pipeline(video.id, db)
             return True
 
         video_dir = STORAGE_PATH / "channels" / str(channel.id) / "videos" / str(video.id)

@@ -652,6 +652,100 @@ async def submit_facecam_video(
     return video.to_dict()
 
 
+ALLOWED_RECAP_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
+
+@router.post("/recap/upload")
+async def submit_recap_video(
+    channel_id: str = Form(...),
+    title: Optional[str] = Form(None),
+    raw_file: Optional[UploadFile] = File(None),
+    youtube_url: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    _rl=Depends(_limit_submit),
+):
+    """Entry point for the Recap product: a direct video upload, or a
+    YouTube link downloaded server-side (yt-dlp — see recap_ingest.py's
+    docstring for the ToS caveat that comes with that option), queued for
+    recap_editor.py's summarize-and-narrate-over-stills pipeline.
+    """
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+    if not channel.is_active:
+        raise HTTPException(status_code=409, detail="Cette chaîne est désactivée. Réactive-la pour générer de nouvelles vidéos.")
+    if channel.content_type != "recap":
+        raise HTTPException(status_code=422, detail="Choisis une chaîne Recap pour ce montage.")
+    if not raw_file and not youtube_url:
+        raise HTTPException(status_code=400, detail="Fournis un fichier vidéo ou un lien YouTube.")
+
+    can_render, reason = user_can_render(db, current_user)
+    if not can_render:
+        raise HTTPException(status_code=402, detail=reason)
+
+    uploads_dir = STORAGE_PATH / "uploads" / "recap"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    if raw_file and raw_file.filename:
+        ext = Path(raw_file.filename).suffix.lower() or ".mp4"
+        if ext not in ALLOWED_RECAP_VIDEO_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"Format non supporté ({ext}). Utilise MP4, MOV, MKV ou WEBM.")
+        dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
+        contents = await raw_file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Le fichier vidéo est vide.")
+        dest_file.write_bytes(contents)
+        fallback_name = raw_file.filename
+    else:
+        # youtube_url — a real yt-dlp download, not a generic fetch: no
+        # arbitrary-host SSRF surface the way cloud_link had (INT-03) since
+        # yt-dlp only ever talks to youtube.com/googlevideo.com itself, but
+        # still a real outbound request the server makes on the creator's
+        # behalf, and against YouTube's own ToS — see recap_ingest.py.
+        parsed = urlparse(youtube_url.strip())
+        if parsed.hostname not in {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com"}:
+            raise HTTPException(status_code=400, detail="Lien invalide — utilise un lien youtube.com ou youtu.be.")
+        dest_file = uploads_dir / f"upload_{uuid.uuid4()}.mp4"
+        try:
+            from src.pipeline.recap_ingest import download_youtube_source
+            download_youtube_source(youtube_url.strip(), dest_file)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            dest_file.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"Téléchargement YouTube impossible : {exc}")
+        fallback_name = dest_file.name
+
+    try:
+        estimated_duration = get_audio_duration(dest_file)
+    except Exception:
+        estimated_duration = None
+
+    if estimated_duration and estimated_duration > MAX_VIDEO_DURATION_SECONDS:
+        dest_file.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cette vidéo dure {estimated_duration/60:.0f} min — la durée maximale est de {MAX_VIDEO_DURATION_SECONDS//60} min.",
+        )
+
+    video = Video(
+        channel_id=channel.id,
+        title=(title.strip()[:100] if title and title.strip() else None) or clean_filename_title(fallback_name),
+        input_type="recap",
+        creation_source="recap",
+        raw_asset_path=str(dest_file.relative_to(STORAGE_PATH)),
+        status=VideoStatus.QUEUED.value,
+        estimated_duration_seconds=estimated_duration,
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+    return video.to_dict()
+
+
 @router.get("")
 def list_all_videos(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     videos = (
