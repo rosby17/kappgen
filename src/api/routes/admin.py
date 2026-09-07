@@ -561,11 +561,14 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
     # While a video is still queued/rendering, most per-feature debits (voix,
     # images, transcription...) haven't happened yet — they're charged as
     # each step actually completes — so total_credits above reads as a
-    # misleading "0 crédits" even though the video is far from free. Surface
-    # the same upfront estimate the wizard/orchestrator itself uses to gate
-    # generation, so the admin panel always shows a real expected cost
-    # instead of zero.
-    if video.status in (VideoStatus.QUEUED.value, VideoStatus.RENDERING.value):
+    # misleading "0 crédits" even though the video is far from free. Also
+    # shown for a FAILED video (typically an insufficient-credit rejection —
+    # see format_insufficient_credits_message) so an admin investigating
+    # "why did this fail" sees the exact same itemized cost the creator's own
+    # error message named, instead of a bare "solde épuisé" with no numbers
+    # to check it against. Surfaces the same upfront estimate the wizard/
+    # orchestrator itself uses to gate generation.
+    if video.status in (VideoStatus.QUEUED.value, VideoStatus.RENDERING.value, VideoStatus.FAILED.value):
         data["estimated_credits"] = estimate_video_cost_breakdown(
             script_char_count=len(video.script_text or ""),
             estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0.0,
@@ -573,7 +576,26 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
             image_style=channel.image_style if channel else None,
             music_preference=channel.music_preference if channel else None,
         )
+        if owner:
+            data["owner_credit_balance"] = get_credit_balance(db, owner)
     return data
+
+
+@router.get("/videos/{video_id}/input-audio")
+def admin_video_input_audio(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Serves a client-submitted audio_input_path file for the admin detail
+    panel's player. Unlike output_path (pushed to remote storage and playable
+    from a bare public URL via getVideoUrl), an uploaded input audio stays a
+    local absolute filesystem path — there was never a route serving it, so
+    the player's src pointed nowhere and clicking play silently did nothing."""
+    from fastapi.responses import FileResponse
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video or not video.audio_input_path:
+        raise HTTPException(status_code=404, detail="No input audio for this video")
+    path = Path(video.audio_input_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Input audio file no longer on disk")
+    return FileResponse(path, media_type="audio/mpeg")
 
 
 @router.post("/videos/{video_id}/retry")
