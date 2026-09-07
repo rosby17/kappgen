@@ -722,6 +722,42 @@ class NicheSuggestRequest(BaseModel):
     description: str = ""
 
 
+class CostEstimateRequest(BaseModel):
+    script_structure: Optional[dict] = None
+    image_style: Optional[dict] = None
+    music_preference: Optional[dict] = None
+    transcribe_audio_default: bool = True
+
+
+@router.post("/estimate-cost")
+def estimate_channel_cost(payload: CostEstimateRequest, current_user: User = Depends(get_current_user)):
+    """Itemized per-video credit estimate (écriture, voix off, images IA,
+    transcription, musique) from a channel's own config — used by the
+    wizard's automation step to show real tariffs before a creator turns on
+    'auto' generation, instead of only finding out days later via a failed
+    video's error message. Works from raw config, not a saved channel, so
+    it's usable mid-setup for a channel that doesn't exist yet."""
+    from src.pipeline.script_writer import DEFAULT_SCRIPT_STRUCTURE
+    from src.utils.billing import estimate_script_generation_cost, estimate_video_cost_breakdown
+
+    structure = payload.script_structure or DEFAULT_SCRIPT_STRUCTURE
+    parts = structure.get("parts") or DEFAULT_SCRIPT_STRUCTURE["parts"]
+    planned_words = sum(max(0, int(p.get("word_count", 0) or 0)) for p in parts)
+    planned_duration = max(3.0, planned_words / 2.5)
+    script_cost = estimate_script_generation_cost(planned_words, max(1, len(parts)))["credits"]
+    breakdown = estimate_video_cost_breakdown(
+        script_char_count=max(1, planned_words * 6),
+        estimated_duration_seconds=planned_duration,
+        transcribe_audio=payload.transcribe_audio_default,
+        image_style=payload.image_style,
+        music_preference=payload.music_preference,
+    )
+    breakdown["script"] = script_cost
+    breakdown["total"] += script_cost
+    breakdown["planned_words"] = planned_words
+    return breakdown
+
+
 @router.post("/suggest-niche")
 def suggest_niche_endpoint(payload: NicheSuggestRequest, db: Session = Depends(get_db)):
     """Manual counterpart to the automatic YouTube-connect suggestion — lets the

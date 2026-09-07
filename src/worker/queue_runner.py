@@ -1625,8 +1625,10 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     from src.pipeline.script_writer import generate_daily_script
     from src.utils.billing import (
         user_can_render,
+        get_credit_balance,
         estimate_script_generation_cost,
-        estimate_video_cost_credits,
+        estimate_video_cost_breakdown,
+        format_insufficient_credits_message,
         debit_script_generation_cost,
     )
     from src.pipeline.script_writer import DEFAULT_SCRIPT_STRUCTURE
@@ -1641,25 +1643,25 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
     planned_words = sum(max(0, int(part.get("word_count", 0) or 0)) for part in parts)
     planned_parts = max(1, len(parts))
     planned_duration = max(3.0, planned_words / 2.5)
-    estimated_cost = estimate_script_generation_cost(planned_words, planned_parts)["credits"]
-    estimated_cost += estimate_video_cost_credits(
+    script_cost = estimate_script_generation_cost(planned_words, planned_parts)["credits"]
+    video_breakdown = estimate_video_cost_breakdown(
         script_char_count=max(1, planned_words * 6),
         estimated_duration_seconds=planned_duration,
         transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
         image_style=channel.image_style,
         music_preference=channel.music_preference,
     )
+    estimated_cost = script_cost + video_breakdown["total"]
     can_render, reason = user_can_render(db, owner, estimated_cost)
     if not can_render:
         logger.info(f"Daily automation: channel {channel.id} ('{channel.name}') skipped — {reason}")
-        # `reason` (from user_can_render) already carries the real numbers —
-        # "environ X crédits nécessaires, Y disponibles" — the generic
-        # CREDIT_INSUFFICIENT_MESSAGE constant was showing creators a
-        # balance-exhausted message with no figures at all, including on
-        # channels whose real balance was nowhere close to exhausted (see
-        # the estimate_video_cost_credits fix this same session — it was
-        # the estimate that was wrong, not the balance).
-        _record_automation_failure(db, channel, message=reason or CREDIT_INSUFFICIENT_MESSAGE)
+        # Itemized (écriture / voix off / images / transcription / musique)
+        # instead of one opaque total — a flat "solde insuffisant" never
+        # said WHAT was expensive, which reads as a false rejection when the
+        # balance is genuinely substantial but AI image generation alone
+        # (up to ~100 images at ~1000 credits each) dwarfs it.
+        message = format_insufficient_credits_message(video_breakdown, get_credit_balance(db, owner), script_cost=script_cost)
+        _record_automation_failure(db, channel, message=message)
         return None
     try:
         validate_channel_visual_source(channel, db)
@@ -1829,27 +1831,28 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         db.commit()
         return None
 
+    from src.utils.billing import estimate_video_cost_breakdown, format_insufficient_credits_message, get_credit_balance
     actual_script_cost = debit_script_generation_cost(db, owner, result.get("generation_cost_usd") or 0.0, video_id=video.id)
-    remaining_render_cost = estimate_video_cost_credits(
+    remaining_breakdown = estimate_video_cost_breakdown(
         script_char_count=len(result["script_text"]),
         estimated_duration_seconds=estimated_duration,
         transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
         image_style=channel.image_style,
         music_preference=channel.music_preference,
     )
-    can_render_after_script, post_script_reason = user_can_render(db, owner, remaining_render_cost)
+    can_render_after_script, _ = user_can_render(db, owner, remaining_breakdown["total"])
     if not actual_script_cost or not can_render_after_script:
         video.status = VideoStatus.FAILED.value
         # Two different failures were sharing one generic message: the
         # script-generation debit itself failing (actual_script_cost False)
-        # is a distinct case from the remaining-render-cost check (which
-        # already carries real numbers via post_script_reason) — surface
-        # whichever one actually happened instead of defaulting to a vague
+        # is a distinct case from the remaining-render-cost check, which now
+        # gets the same itemized (voix off / images / transcription /
+        # musique) message as the pre-check above instead of a vague
         # "solde épuisé" that doesn't say why.
         if not actual_script_cost:
             video.error_message = "Débit du coût de génération du script impossible — vérifie le solde de crédits."
         else:
-            video.error_message = post_script_reason or CREDIT_INSUFFICIENT_MESSAGE
+            video.error_message = format_insufficient_credits_message(remaining_breakdown, get_credit_balance(db, owner))
         video.progress_stage = "Échec"
         video.progress_percent = 0
         db.commit()

@@ -474,33 +474,27 @@ def topup_welcome_credits_to_20000(db: Session) -> int:
     return len(user_ids)
 
 
-def estimate_video_cost_credits(
+def estimate_video_cost_breakdown(
     script_char_count: int = 0,
     estimated_duration_seconds: float = 0.0,
     transcribe_audio: bool = False,
     image_style: Optional[dict] = None,
     music_preference: Optional[dict] = None,
     scene_count: Optional[int] = None,
-) -> int:
-    """Rough upfront credit cost of one video, from the same per-unit rates
-    debit_izivoice_usage/_by_user_id charge as the pipeline actually runs —
-    used to reject a render before it starts instead of letting it burn
-    partial credit and fail mid-way once the balance runs out. Deliberately
-    conservative (rounds generously) since under-estimating just means a
-    render that was truly affordable gets blocked, which is a much smaller
-    problem than one that starts and can't finish."""
+) -> dict:
+    """Same estimate as estimate_video_cost_credits, itemized by feature —
+    lets a "solde insuffisant" message actually say what's expensive (voix,
+    images, transcription...) instead of one opaque total, and lets the
+    wizard show real tariffs before a creator ever launches a generation.
+    Keys: voiceover, transcription, images (+ images_count), music, total —
+    each already in credits, rounded individually so they sum to `total`."""
     image_style = image_style or {}
     music_preference = music_preference or {}
-    total = 0.0
+    voiceover = script_char_count * IZIVOICE_TTS_CREDITS_PER_CHAR if script_char_count else 0.0
+    transcription = estimated_duration_seconds * IZIVOICE_STT_CREDITS_PER_SEC if (transcribe_audio and estimated_duration_seconds) else 0.0
 
-    # Voiceover (TTS) always runs for a text-input video; for an audio upload
-    # it's skipped (the creator supplied their own recording) but STT may run
-    # instead, priced per second of that recording.
-    if script_char_count:
-        total += script_char_count * IZIVOICE_TTS_CREDITS_PER_CHAR
-    if transcribe_audio and estimated_duration_seconds:
-        total += estimated_duration_seconds * IZIVOICE_STT_CREDITS_PER_SEC
-
+    images = 0.0
+    images_count = 0
     from src.pipeline.images import resolve_enabled_image_sources
     if "ai_generated" in resolve_enabled_image_sources(image_style):
         # Mirrors orchestrator.py's own real generation budget exactly (see
@@ -522,12 +516,77 @@ def estimate_video_cost_credits(
             # actually generated, the rest of a long video reuses that pool.
             ai_window_seconds = 10 * 60
             generation_count = max(1, round(min(estimated_duration_seconds, ai_window_seconds) / 6))
-        total += min(generation_count, 100) * IZIVOICE_IMAGE_CREDITS_MAX
+        images_count = min(generation_count, 100)
+        images = images_count * IZIVOICE_IMAGE_CREDITS_MAX
 
-    if music_preference.get("enabled") and music_preference.get("mode") == "ai_generate":
-        total += IZIVOICE_MUSIC_CREDITS
+    music = IZIVOICE_MUSIC_CREDITS if (music_preference.get("enabled") and music_preference.get("mode") == "ai_generate") else 0.0
 
-    return ceil(max(total, 0) * CREDIT_MARKUP_MULTIPLIER)
+    def credits(x: float) -> int:
+        return ceil(max(x, 0) * CREDIT_MARKUP_MULTIPLIER)
+
+    parts = {
+        "voiceover": credits(voiceover),
+        "transcription": credits(transcription),
+        "images": credits(images),
+        "images_count": images_count,
+        "music": credits(music),
+    }
+    parts["total"] = parts["voiceover"] + parts["transcription"] + parts["images"] + parts["music"]
+    return parts
+
+
+def estimate_video_cost_credits(
+    script_char_count: int = 0,
+    estimated_duration_seconds: float = 0.0,
+    transcribe_audio: bool = False,
+    image_style: Optional[dict] = None,
+    music_preference: Optional[dict] = None,
+    scene_count: Optional[int] = None,
+) -> int:
+    """Rough upfront credit cost of one video, from the same per-unit rates
+    debit_izivoice_usage/_by_user_id charge as the pipeline actually runs —
+    used to reject a render before it starts instead of letting it burn
+    partial credit and fail mid-way once the balance runs out. Deliberately
+    conservative (rounds generously) since under-estimating just means a
+    render that was truly affordable gets blocked, which is a much smaller
+    problem than one that starts and can't finish. See
+    estimate_video_cost_breakdown for the itemized version."""
+    return estimate_video_cost_breakdown(
+        script_char_count=script_char_count,
+        estimated_duration_seconds=estimated_duration_seconds,
+        transcribe_audio=transcribe_audio,
+        image_style=image_style,
+        music_preference=music_preference,
+        scene_count=scene_count,
+    )["total"]
+
+
+def format_insufficient_credits_message(breakdown: dict, balance: int, script_cost: int = 0) -> str:
+    """Turns an estimate_video_cost_breakdown() result into the itemized,
+    per-feature message a creator actually needs to understand a rejection
+    — "solde insuffisant" alone never said what was expensive. Only lists
+    the features that actually cost something for this video. script_cost
+    (Claude script-writing itself, a separate estimate — see
+    estimate_script_generation_cost) is optional since not every caller has
+    a script to write (a manual/audio-upload submission already has one)."""
+    lines = []
+    if script_cost:
+        lines.append(f"écriture du script : {script_cost:,} crédits".replace(",", " "))
+    if breakdown["voiceover"]:
+        lines.append(f"voix off : {breakdown['voiceover']:,} crédits".replace(",", " "))
+    if breakdown["transcription"]:
+        lines.append(f"transcription : {breakdown['transcription']:,} crédits".replace(",", " "))
+    if breakdown["images"]:
+        lines.append(f"{breakdown['images_count']} image(s) IA : {breakdown['images']:,} crédits".replace(",", " "))
+    if breakdown["music"]:
+        lines.append(f"musique IA : {breakdown['music']:,} crédits".replace(",", " "))
+    detail = ", ".join(lines) if lines else "aucun détail disponible"
+    total = f"{breakdown['total'] + script_cost:,}".replace(",", " ")
+    bal = f"{balance:,}".replace(",", " ")
+    return (
+        f"Solde de crédits insuffisant pour cette vidéo : {detail} — soit {total} crédits au total, "
+        f"contre {bal} disponibles. Recharge des crédits, ou réduis le nombre d'images IA/la durée pour ce contenu."
+    )
 
 
 def user_has_purchased_credits(db: Session, user: User) -> bool:
