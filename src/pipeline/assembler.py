@@ -222,18 +222,18 @@ def assemble_final_video(
 
     # Always-on, unconditional correction for a magenta/violet color cast
     # traced to the AI image generator itself, not any optional effect: the
-    # default "cinematic, dramatic lighting" style prompt reliably pushes
-    # night/candlelit/moody scenes toward a purple-heavy palette (confirmed
-    # across multiple unrelated channels, several with color_grade='none'
-    # and no overlay effect that touches color at all — removing the old
-    # 'Vibrant' grade only made this worse on the one channel that had it
-    # selected, it was never the actual source). A small, deliberately
-    # subtle colorbalance nudge away from magenta (less red+blue, a touch
-    # more green, concentrated in shadows/midtones where the cast is
-    # strongest) — imperceptible on a normal, correctly-balanced image, but
-    # neutralizes the AI cast wherever it shows up. Applied to every render,
-    # unconditionally, not tied to effects_config at all.
-    video_filters.append("colorbalance=rs=-0.05:bs=-0.04:gs=0.04:rm=-0.05:bm=-0.04:gm=0.04")
+    # NOTE: an earlier version of this function added an unconditional small
+    # colorbalance nudge here, on the theory that the AI image generator's
+    # own style prompt biased scenes toward magenta. That was wrong — the
+    # cast kept recurring on channels using entirely real, uploaded photo
+    # libraries (no AI generation involved at all), including neutral,
+    # correctly-colored source photos. The actual cause was downstream, in
+    # the particle-overlay blend (see _apply_effects_step below: screen-mode
+    # blend was running on raw YUV chroma planes instead of RGB) — fixed
+    # there. The nudge is removed rather than left in place blind: it was
+    # compensating for a bug that no longer exists, and would otherwise push
+    # every render (including ones with no particle effects at all, which
+    # never had a cast) slightly toward green for no reason.
 
     # Color grading + overlay effects are both gated behind effects_config.enabled —
     # a client can turn the whole "effects" layer off without losing their tuned
@@ -561,6 +561,25 @@ def assemble_final_video(
             base_label = "v_eff"
         # Layered, slightly offset particle fields create a natural sense of
         # depth instead of a single, obvious stock texture over the frame.
+        #
+        # blend=all_mode=screen was being applied straight to yuv420p input —
+        # ffmpeg's blend filter runs its per-pixel formula on whatever planes
+        # the input actually has, so "screen" ran on the U/V chroma planes
+        # too, not just luma. Chroma is a colour-difference signal centred on
+        # 128, not a 0-255 light intensity — screening it produces a large,
+        # content-independent chroma shift that reads as a magenta/purple
+        # wash over the whole frame, regardless of the source image's real
+        # colours (confirmed: a neutral warm-toned photo screen-blended with
+        # dust.mp4 through 3 stacked layers came out fully magenta; the same
+        # blend done in RGB looked identical to the original). Converting to
+        # an RGB pixel format before every blend, then back to yuv420p once
+        # after the last particle layer, makes "screen" operate on true RGB
+        # channels as the filter's own semantics assume — this was the real
+        # root cause behind the recurring magenta-cast reports, not any AI
+        # image generation bias.
+        if particle_layers:
+            filter_parts.append(f"[{base_label}]format=gbrp[{base_label}_rgb]")
+            base_label = f"{base_label}_rgb"
         for i, layer in enumerate(particle_layers):
             idx = particles_base_index + i
             scaled_label = f"part{i}"
@@ -597,7 +616,7 @@ def assemble_final_video(
             else:
                 framing = "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black"
             filter_parts.append(
-                f"[{idx}:v]setpts=PTS/{speed_factor:.3f}{direction_filter},"
+                f"[{idx}:v]format=gbrp,setpts=PTS/{speed_factor:.3f}{direction_filter},"
                 f"scale={scaled_w}:{scaled_h},{framing},gblur=sigma={particle_softness * 0.018:.2f}[{scaled_label}]"
             )
             out_label = f"v_part{i}"
@@ -606,6 +625,12 @@ def assemble_final_video(
             layer_opacity = layer_intensity / (1 if layer["copies"] == 1 else layer["copies"] ** 0.68)
             filter_parts.append(f"[{base_label}][{scaled_label}]blend=all_mode=screen:all_opacity={layer_opacity:.3f}[{out_label}]")
             base_label = out_label
+        if particle_layers:
+            # Back to yuv420p for every downstream step (subtitles/overlays/
+            # final encode all expect it) — only the blend chain itself
+            # needed RGB.
+            filter_parts.append(f"[{base_label}]format=yuv420p[{base_label}_yuv]")
+            base_label = f"{base_label}_yuv"
 
     def _apply_subtitles_step():
         nonlocal base_label

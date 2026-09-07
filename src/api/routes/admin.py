@@ -569,13 +569,43 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
     # to check it against. Surfaces the same upfront estimate the wizard/
     # orchestrator itself uses to gate generation.
     if video.status in (VideoStatus.QUEUED.value, VideoStatus.RENDERING.value, VideoStatus.FAILED.value):
-        data["estimated_credits"] = estimate_video_cost_breakdown(
-            script_char_count=len(video.script_text or ""),
-            estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0.0,
-            transcribe_audio=bool(video.transcribe_audio),
-            image_style=channel.image_style if channel else None,
-            music_preference=channel.music_preference if channel else None,
-        )
+        if (video.script_text or "").strip():
+            # A real script already existed — this failed (or is still
+            # running) purely on rendering (voix/images/etc), so its actual
+            # length/duration are known and used as-is; no script-writing
+            # cost left to estimate, it already happened (or was free/N-A).
+            data["estimated_credits"] = estimate_video_cost_breakdown(
+                script_char_count=len(video.script_text or ""),
+                estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0.0,
+                transcribe_audio=bool(video.transcribe_audio),
+                image_style=channel.image_style if channel else None,
+                music_preference=channel.music_preference if channel else None,
+            )
+        elif channel and video.status == VideoStatus.FAILED.value:
+            # No script at all — this is an "auto" mode video that failed
+            # before Claude ever wrote one (typically rejected for
+            # insufficient credits at the gate in generate_and_queue_auto_video
+            # itself). Nothing here to measure the length of, so estimate
+            # from the channel's own planned script_structure — the exact
+            # same numbers that gate's own check used — instead of showing a
+            # false "0 crédits requis" that contradicts the failure reason.
+            from src.pipeline.script_writer import DEFAULT_SCRIPT_STRUCTURE
+            from src.utils.billing import estimate_script_generation_cost
+            structure = channel.script_structure or DEFAULT_SCRIPT_STRUCTURE
+            parts = structure.get("parts") or DEFAULT_SCRIPT_STRUCTURE["parts"]
+            planned_words = sum(max(0, int(part.get("word_count", 0) or 0)) for part in parts)
+            planned_duration = max(3.0, planned_words / 2.5)
+            script_cost = estimate_script_generation_cost(planned_words, max(1, len(parts)))["credits"]
+            breakdown = estimate_video_cost_breakdown(
+                script_char_count=max(1, planned_words * 6),
+                estimated_duration_seconds=planned_duration,
+                transcribe_audio=channel.transcribe_audio_default if channel.transcribe_audio_default is not None else True,
+                image_style=channel.image_style,
+                music_preference=channel.music_preference,
+            )
+            breakdown["script"] = script_cost
+            breakdown["total"] += script_cost
+            data["estimated_credits"] = breakdown
         if owner:
             data["owner_credit_balance"] = get_credit_balance(db, owner)
     return data

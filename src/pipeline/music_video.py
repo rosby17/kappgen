@@ -320,14 +320,17 @@ def compose_final_video(
     static title/lyrics text from the Sous-titres step."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     has_watermark = watermark_enabled and WATERMARK_PATH.exists()
-    # Same always-on magenta-cast correction as the narration pipeline's
-    # assembler.py — the AI background image generator's own bias, not tied
-    # to any effects_config setting, so it applies here unconditionally too.
-    correction_filter = "colorbalance=rs=-0.05:bs=-0.04:gs=0.04:rm=-0.05:bm=-0.04:gm=0.04"
+    # NOTE: this used to also apply an unconditional colorbalance nudge here
+    # to counter a suspected "AI image generator magenta bias" — removed.
+    # The actual magenta-cast bug (confirmed via assembler.py) was
+    # blend=all_mode=screen running on raw YUV chroma instead of RGB in the
+    # particle-overlay compositor; this pipeline's own compositing here uses
+    # a plain alpha `overlay` for the waveform, which was never affected, so
+    # the nudge was blindly correcting a bug that was never actually present
+    # in this file.
     effects_filter = _effects_video_filter(effects_config)
-    combined_filter = f"{correction_filter},{effects_filter}" if effects_filter else correction_filter
     base_label = "vfx"
-    filter_complex = f"[0:v]{combined_filter}[vfx];"
+    filter_complex = f"[0:v]{effects_filter}[vfx];" if effects_filter else "[0:v]copy[vfx];"
     # A full-width, saturated cyan waveform read as an ugly bar slapped across
     # the whole frame — a slim, soft, centered strip (roughly half the frame
     # width) reads as an actual design element instead of a debug overlay.
