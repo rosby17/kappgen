@@ -22,6 +22,15 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     is_admin = Column(Boolean, nullable=False, default=False)
+    # Private beta gate: "pending" (just signed up, waiting on the admin),
+    # "approved" (full access), "rejected" (signed up but denied — kept as
+    # its own state rather than deleting the row, so a rejection is visible/
+    # reversible from the admin queue instead of the account just vanishing).
+    # New signups default to "pending"; existing rows are grandfathered to
+    # "approved" at migration time (see session.py's init_db), same pattern
+    # already used for email_verified.
+    beta_status = Column(String(20), nullable=False, default="pending")
+    beta_status_updated_at = Column(DateTime, nullable=True)
     email_verified = Column(Boolean, nullable=False, default=False)
     email_verify_token = Column(String(64), nullable=True)
     email_verify_sent_at = Column(DateTime, nullable=True)
@@ -50,6 +59,7 @@ class User(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "channel_count": len(self.channels) if self.channels else 0,
             "is_admin": self.is_admin,
+            "beta_status": self.beta_status,
             "email_verified": self.email_verified,
             "free_video_quota_granted": self.free_video_quota_granted,
             "free_videos_used": self.free_videos_used,

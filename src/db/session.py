@@ -115,8 +115,11 @@ def init_db():
             "email_verified": "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT FALSE NOT NULL",
             "email_verify_token": "ALTER TABLE users ADD COLUMN email_verify_token VARCHAR(64)",
             "email_verify_sent_at": "ALTER TABLE users ADD COLUMN email_verify_sent_at TIMESTAMP",
+            "beta_status": "ALTER TABLE users ADD COLUMN beta_status VARCHAR(20) DEFAULT 'pending' NOT NULL",
+            "beta_status_updated_at": "ALTER TABLE users ADD COLUMN beta_status_updated_at TIMESTAMP",
         }
         is_new_verified_column = "email_verified" not in existing_user_columns
+        is_new_beta_column = "beta_status" not in existing_user_columns
         with engine.begin() as conn:
             for col_name, ddl in migrations.items():
                 if col_name not in existing_user_columns:
@@ -128,6 +131,13 @@ def init_db():
                 # lock existing users out of checkout the moment this ships.
                 logger.info("Grandfathering existing users as email_verified.")
                 conn.execute(text("UPDATE users SET email_verified = TRUE"))
+            if is_new_beta_column:
+                # Same reasoning: the private-beta gate is new, not
+                # retroactive — every account that already existed (including
+                # every current tester) keeps working exactly as before.
+                # Only signups from this point on start "pending".
+                logger.info("Grandfathering existing users as beta_status='approved'.")
+                conn.execute(text("UPDATE users SET beta_status = 'approved'"))
 
     if "channels" in inspector.get_table_names():
         existing_channel_columns = {col["name"] for col in inspector.get_columns("channels")}
