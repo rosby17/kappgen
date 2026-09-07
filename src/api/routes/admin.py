@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
 from src.utils.auth import get_current_admin
-from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits
+from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits, estimate_video_cost_breakdown
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -517,7 +517,8 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
     """Full technical recap for one video — preview, voice/script/subtitles/
     music actually used, and an itemized credit cost breakdown — for the
     admin dashboard's video detail popup."""
-    from src.api.routes.videos import _video_cost_transactions
+    from src.api.routes.videos import _video_cost_transactions, grouped_video_cost_items
+    from src.models.project import VideoStatus
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -525,7 +526,15 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
     owner = channel.user if channel else None
 
     transactions = _video_cost_transactions(db, video, owner.id) if owner else []
-    cost_items = [{"description": t.description, "credits": -t.amount, "created_at": t.created_at.isoformat() if t.created_at else None} for t in transactions]
+    # Same grouping the creator sees on their own cost recap (one row per
+    # category — "Image & vidéos d'illustration × 8" — instead of 8 separate
+    # 100-credit stock_media ledger rows): an admin investigating a video's
+    # cost wants the readable breakdown, not the raw transaction dump.
+    # The client recap always lists every category (even at 0 crédits) so its
+    # pricing reads as consistent video to video; the admin panel only cares
+    # about what this video actually cost, so zero-value categories are
+    # dropped here instead of padding the list with rows that never fired.
+    cost_items = [item for item in grouped_video_cost_items(video, transactions) if item["credits"] > 0] if owner else []
 
     data = video.to_dict()
     data["display_title"] = _admin_video_title(video)
@@ -548,6 +557,22 @@ def admin_video_detail(video_id: str, admin: User = Depends(get_current_admin), 
     data["image_style"] = channel.image_style if channel else None
     data["total_credits"] = sum(item["credits"] for item in cost_items)
     data["cost_items"] = cost_items
+
+    # While a video is still queued/rendering, most per-feature debits (voix,
+    # images, transcription...) haven't happened yet — they're charged as
+    # each step actually completes — so total_credits above reads as a
+    # misleading "0 crédits" even though the video is far from free. Surface
+    # the same upfront estimate the wizard/orchestrator itself uses to gate
+    # generation, so the admin panel always shows a real expected cost
+    # instead of zero.
+    if video.status in (VideoStatus.QUEUED.value, VideoStatus.RENDERING.value):
+        data["estimated_credits"] = estimate_video_cost_breakdown(
+            script_char_count=len(video.script_text or ""),
+            estimated_duration_seconds=video.estimated_duration_seconds or video.duration_seconds or 0.0,
+            transcribe_audio=bool(video.transcribe_audio),
+            image_style=channel.image_style if channel else None,
+            music_preference=channel.music_preference if channel else None,
+        )
     return data
 
 

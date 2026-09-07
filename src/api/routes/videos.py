@@ -933,18 +933,13 @@ def _client_cost_label(description: str) -> str:
     return description or "Autre"
 
 
-@router.get("/{video_id}/cost-recap")
-def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Itemized "what did this video cost" breakdown, shown right after a render finishes.
-
-    Grouped by label rather than one row per CreditTransaction: a long video
-    can bill 50+ individual 100-credit Pexels assets, each its own debit row
-    for the admin ledger's sake — surfaced to the creator as-is, that was 50+
-    near-identical lines for what is conceptually one cost ("stock footage").
-    Order-preserving (first-seen position) so the recap still roughly reads
-    top-to-bottom in the order costs were actually incurred during the render."""
-    video = _get_owned_video(db, video_id, current_user)
-    transactions = _video_cost_transactions(db, video, current_user.id)
+def grouped_video_cost_items(video: Video, transactions) -> List[Dict[str, Any]]:
+    """Same "what did this video cost" grouping used by the creator-facing
+    cost recap, reused as-is by the admin video detail panel — one row per
+    cost *category* (e.g. "Image & vidéos d'illustration × 8") instead of a
+    separate line per individual CreditTransaction. An admin investigating a
+    video's cost wants the same clear breakdown a creator sees, not the raw
+    ledger with 8 near-identical 100-credit stock_media rows."""
     grouped: Dict[str, Dict[str, Any]] = {}
     for t in transactions:
         label = _client_cost_label(t.description)
@@ -965,13 +960,28 @@ def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current
     for label in grouped:
         if label not in all_labels and label not in excluded_labels:
             all_labels.append(label)
-    items = [
+    return [
         {
             **(entry := grouped.get(label, {"description": label, "credits": 0, "count": 0})),
             "description": f'{entry["description"]} × {entry["count"]}' if entry["count"] > 1 else entry["description"],
         }
         for label in all_labels
     ]
+
+
+@router.get("/{video_id}/cost-recap")
+def get_video_cost_recap(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Itemized "what did this video cost" breakdown, shown right after a render finishes.
+
+    Grouped by label rather than one row per CreditTransaction: a long video
+    can bill 50+ individual 100-credit Pexels assets, each its own debit row
+    for the admin ledger's sake — surfaced to the creator as-is, that was 50+
+    near-identical lines for what is conceptually one cost ("stock footage").
+    Order-preserving (first-seen position) so the recap still roughly reads
+    top-to-bottom in the order costs were actually incurred during the render."""
+    video = _get_owned_video(db, video_id, current_user)
+    transactions = _video_cost_transactions(db, video, current_user.id)
+    items = grouped_video_cost_items(video, transactions)
     return {"video_id": video.id, "total_credits": sum(item["credits"] for item in items), "items": items}
 
 def _content_disposition_header(disposition_type: str, filename: str) -> str:

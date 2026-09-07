@@ -359,6 +359,13 @@ def compose_final_video(
         "-c:v", "libx264", "-preset", "medium", "-crf", "22", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
+        # Without this, the moov atom lands at the end of the file — a
+        # browser/mobile player then has to wait on the whole download (or a
+        # slow-network stall) before it even has the index to keep playing
+        # smoothly, which reads exactly like "plays a couple seconds then
+        # blocks". assembler.py's narration pipeline already sets this; this
+        # music-video pipeline never did.
+        "-movflags", "+faststart",
         str(output_path),
     ])
     return output_path
