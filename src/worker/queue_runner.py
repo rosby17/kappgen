@@ -333,8 +333,7 @@ def process_single_queued_video() -> bool:
             # commit history, Sept 2026 B2 migration).
             try_ensure_sd_variant(output_mp4)
             await_parallel_thumbnail()
-            _finalize_output_storage(db, video, output_mp4)
-            db.commit()
+            _finalize_output_storage_or_fail(db, video, output_mp4)
             return True
 
         # Music Video channels (content_type == "music") skip the entire
@@ -428,10 +427,7 @@ def process_single_queued_video() -> bool:
             # Before _finalize_output_storage — see the reassembly branch
             # above for why the order matters.
             await_parallel_thumbnail()
-            _finalize_output_storage(db, video, output_mp4)
-            db.commit()
-
-            if channel.youtube_refresh_token:
+            if _finalize_output_storage_or_fail(db, video, output_mp4) and channel.youtube_refresh_token:
                 if channel.publish_mode in ("auto", "scheduled"):
                     video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
                     # Green compliance can publish without intervention.
@@ -669,8 +665,7 @@ def process_single_queued_video() -> bool:
         # — uploading to B2 and deleting the local copy any earlier left both
         # of those failing with "No such file or directory" against a file
         # that had already been moved (Sept 2026 B2 migration regression).
-        _finalize_output_storage(db, video, output_mp4)
-        db.commit()
+        output_finalized = _finalize_output_storage_or_fail(db, video, output_mp4)
 
         # A Trust Score is part of the finished video, not something the
         # creator has to remember to request. Run this final, post-render
@@ -698,7 +693,7 @@ def process_single_queued_video() -> bool:
         # creator's own choice (channel.publish_mode), independent of whether
         # the *script* was auto-generated. A failure here never fails the
         # render — the video stays available in NicheCut either way.
-        if channel.youtube_refresh_token:
+        if output_finalized and channel.youtube_refresh_token:
             if channel.publish_mode in ("auto", "scheduled"):
                 video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
                 # Approval is only consumed by the orange compliance path.
@@ -1209,6 +1204,35 @@ def _finalize_output_storage(db, video: Video, output_mp4: Path) -> None:
     video.output_path = str(output_mp4.relative_to(STORAGE_PATH) if STORAGE_PATH in output_mp4.parents else output_mp4)
     video.storage_backend = "local"
     video.output_size_bytes = size_bytes
+
+
+def _finalize_output_storage_or_fail(db, video: Video, output_mp4: Path) -> bool:
+    """Wraps _finalize_output_storage so a failure here can never again leave
+    a video silently stuck 'done' with no output_path and, eventually, no
+    file at all (confirmed in production: status/progress were committed as
+    finished BEFORE this step ran, so an exception here — anywhere past that
+    commit — used to just propagate up and get swallowed by the worker's
+    outer handler, leaving the DB row exactly as 'done' as it already was,
+    just with nothing playable behind it). Flips the video to a real,
+    visible failure instead when this can't be trusted to have worked.
+    Returns True on success."""
+    try:
+        _finalize_output_storage(db, video, output_mp4)
+        db.commit()
+        if not video.output_path:
+            raise RuntimeError("output_path still empty after _finalize_output_storage")
+        return True
+    except Exception as exc:
+        logger.error(f"_finalize_output_storage failed for video {video.id} — marking failed instead of leaving a brokenly-'done' row: {exc}")
+        db.rollback()
+        video.status = VideoStatus.FAILED.value
+        video.error_message = (
+            "Le montage a réussi mais l'enregistrement du fichier final a échoué. "
+            "Relance cette vidéo — le rendu repartira du début."
+        )
+        video.progress_stage = "Échec de l'enregistrement"
+        db.commit()
+        return False
 
 
 TRASH_ROOT = STORAGE_PATH / "trash"
