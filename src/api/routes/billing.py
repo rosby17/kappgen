@@ -124,6 +124,100 @@ def create_checkout(payload: CheckoutPayload, current_user: User = Depends(get_c
     return {"order_id": order.id, "redirect_url": redirect_url}
 
 
+# Custom credit purchase — a creator picks any amount of credits (no fixed
+# pack) instead of one of the catalog tiers. Rate: 30 000 FCFA per 1 000 000
+# credits (0.03 FCFA/crédit), fixed by the operator (2026-09-07) so "whatever
+# number a creator types, the price scales linearly off this one rate" —
+# never a separate price table to keep in sync. 200 000 credits (6 000 FCFA)
+# is the floor, low enough to stay reachable for a creator without much
+# budget, high enough that the flat per-order payment-provider overhead
+# doesn't eat an unreasonable share of a tiny purchase.
+CUSTOM_CREDIT_RATE_FCFA_PER_MILLION = 30_000
+MIN_CUSTOM_CREDITS = 200_000
+
+
+class CustomCreditsCheckoutPayload(BaseModel):
+    credits: int
+    provider: str
+
+
+def custom_credits_price_fcfa(credits: int) -> int:
+    import math
+    return math.ceil(credits * CUSTOM_CREDIT_RATE_FCFA_PER_MILLION / 1_000_000)
+
+
+@router.get("/custom-credits-quote")
+def custom_credits_quote(credits: int, current_user: User = Depends(get_current_user)):
+    """Live price preview as the creator types a credit amount — same math
+    checkout-custom-credits itself uses, exposed separately so the frontend
+    doesn't have to duplicate the rate/rounding rule client-side."""
+    if credits < MIN_CUSTOM_CREDITS:
+        return {"valid": False, "min_credits": MIN_CUSTOM_CREDITS, "amount_fcfa": None}
+    return {"valid": True, "min_credits": MIN_CUSTOM_CREDITS, "amount_fcfa": custom_credits_price_fcfa(credits)}
+
+
+@router.post("/checkout-custom-credits")
+def create_custom_credits_checkout(payload: CustomCreditsCheckoutPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db), _rl=Depends(_limit_checkout)):
+    if not current_user.email_verified:
+        raise HTTPException(status_code=403, detail="Confirme ton adresse email avant d'acheter des crédits.")
+    if payload.credits < MIN_CUSTOM_CREDITS:
+        raise HTTPException(status_code=400, detail=f"Le minimum est de {MIN_CUSTOM_CREDITS:,} crédits.".replace(",", " "))
+    if payload.provider not in ("maketou", "tarapay"):
+        raise HTTPException(status_code=400, detail="Fournisseur de paiement inconnu.")
+
+    amount_fcfa = custom_credits_price_fcfa(payload.credits)
+
+    # A throwaway, inactive Plan row carries this exact (credits, price) pair
+    # so _activate_subscription's existing plan.credits/.duration_days/.name
+    # read-path works completely unchanged for a custom order — no schema
+    # change to Order, no separate settlement branch to keep in sync with
+    # the catalog one. is_active=False keeps it out of /billing/plans and
+    # the admin catalog list; it only ever exists to be this order's target.
+    custom_plan = Plan(
+        name=f"Crédits personnalisés ({payload.credits:,})".replace(",", " "),
+        price_fcfa=amount_fcfa,
+        credits=payload.credits,
+        duration_days=30,
+        is_active=False,
+    )
+    db.add(custom_plan)
+    db.commit()
+    db.refresh(custom_plan)
+
+    order = Order(
+        user_id=current_user.id,
+        plan_id=custom_plan.id,
+        provider=payload.provider,
+        amount_fcfa=amount_fcfa,
+        billing_cycle="monthly",
+        status="pending",
+    )
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+
+    try:
+        if payload.provider == "maketou":
+            result = create_maketou_checkout(order.id, order.amount_fcfa, current_user.email, current_user.name)
+            order.provider_ref = result.get("provider_ref")
+            redirect_url = result.get("redirect_url")
+        else:
+            result = create_tarapay_checkout(order.id, order.amount_fcfa, custom_plan.name)
+            redirect_url = result.get("redirect_url")
+    except Exception as exc:
+        order.status = "failed"
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Impossible de créer le paiement : {exc}")
+
+    if not redirect_url:
+        order.status = "failed"
+        db.commit()
+        raise HTTPException(status_code=502, detail="Le fournisseur de paiement n'a pas renvoyé de lien de paiement.")
+
+    db.commit()
+    return {"order_id": order.id, "redirect_url": redirect_url, "amount_fcfa": amount_fcfa, "credits": payload.credits}
+
+
 def _activate_subscription(db: Session, order: Order):
     """Settles a just-paid order: credit-pack plans (the current model —
     every active plan has `credits` set, mirroring Izivoice's own packs)
