@@ -191,12 +191,49 @@ def _fill_early_text_video_metadata(video_id: str) -> None:
         db.close()
 
 
+class AudioDirectUploadStart(BaseModel):
+    filename: str
+    content_type: Optional[str] = "audio/mpeg"
+
+
+@router.post("/audio/direct-upload/start")
+def start_audio_direct_upload(payload: AudioDirectUploadStart, current_user: User = Depends(get_current_user)):
+    """A long narration audio file (a real recording, potentially tens of
+    minutes long, tens of MB) sent as one multipart POST to submit_video_subject
+    below routinely failed to complete on flaky/high-latency connections
+    (Starlink's ~15s satellite handoff being a real, observed case) — the
+    upload has to survive uninterrupted long enough to clear both the
+    frontend's submit timeout and Cloudflare's own ~100s proxy limit, and a
+    single dropped packet mid-transfer means starting the whole thing over.
+    Same fix already used for oversized B-roll clips (see channels.py's
+    broll/direct-upload/*): the browser PUTs straight to B2 via a short-lived
+    presigned URL, bypassing api.kappgen.com (and Cloudflare's proxy) for the
+    actual file bytes entirely — only the small confirm call below goes
+    through the API.
+    """
+    from src.utils import b2_storage
+    ext = Path(payload.filename or "").suffix.lower() or ".mp3"
+    if not b2_storage.is_b2_configured():
+        raise HTTPException(status_code=503, detail="L'envoi direct de gros fichiers n'est pas disponible pour le moment.")
+    object_key = f"staging/audio/{current_user.id}/{uuid.uuid4().hex}{ext}"
+    upload_url = b2_storage.presigned_put_url(object_key, content_type=payload.content_type or "audio/mpeg")
+    if not upload_url:
+        raise HTTPException(status_code=502, detail="Impossible de préparer l'envoi direct. Réessaie.")
+    return {"upload_url": upload_url, "object_key": object_key}
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def submit_video_subject(
     channel_id: str = Form(...),
     input_type: str = Form("text"),                    # "text" | "audio"
     script_text: Optional[str] = Form(""),
     audio_files: Optional[List[UploadFile]] = File(None),
+    # Object keys from audio/direct-upload/start+a completed B2 PUT — an
+    # alternative to audio_files for large recordings (see that endpoint's
+    # docstring). filenames carries the original names in the same order,
+    # for title-deriving/validation error messages exactly like audio_files.
+    audio_object_keys: Optional[List[str]] = Form(None),
+    audio_object_filenames: Optional[List[str]] = Form(None),
     transcribe_audio: bool = Form(True),
     audio_rights_confirmed: bool = Form(False),
     audio_source_type: Optional[str] = Form(None),
@@ -256,36 +293,60 @@ async def submit_video_subject(
     uploads_dir.mkdir(parents=True, exist_ok=True)
     
     if input_type == "audio":
-        if not audio_files:
+        audio_object_keys = [k for k in (audio_object_keys or []) if k]
+        if not audio_files and not audio_object_keys:
             raise HTTPException(status_code=400, detail="Veuillez téléverser au moins un fichier audio.")
-            
-        for audio_file in audio_files:
-            if not audio_file.filename:
-                continue
 
+        # Normalizes both sources (a plain multipart file, or an object
+        # already sitting in B2 from the direct-upload path above) into the
+        # same (filename, local dest_file) shape so the rest of this loop —
+        # validation, duration/cost checks, Video row creation — doesn't care
+        # which path a given file came in through.
+        pending_audio: List[tuple] = []
+        if audio_files:
+            for audio_file in audio_files:
+                if not audio_file.filename:
+                    continue
+                contents = await audio_file.read()
+                if not contents:
+                    raise HTTPException(status_code=400, detail=f"Le fichier {audio_file.filename} est vide.")
+                ext = Path(audio_file.filename).suffix or ".mp3"
+                dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
+                dest_file.write_bytes(contents)
+                pending_audio.append((audio_file.filename, dest_file))
+        else:
+            from src.utils import b2_storage
+            for i, object_key in enumerate(audio_object_keys):
+                original_name = (audio_object_filenames[i] if audio_object_filenames and i < len(audio_object_filenames) else None) or Path(object_key).name
+                ext = Path(original_name).suffix or ".mp3"
+                dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
+                try:
+                    if not b2_storage.download_file(object_key, dest_file):
+                        raise RuntimeError("download_file returned False")
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=f"« {original_name} » : envoi direct incomplet ou introuvable ({exc}). Réessaie.")
+                b2_storage.delete_video(object_key)
+                pending_audio.append((original_name, dest_file))
+
+        total_audio_count = len(pending_audio)
+        for original_filename, dest_file in pending_audio:
             can_render, reason = user_can_render(db, current_user)
             if not can_render:
+                dest_file.unlink(missing_ok=True)
                 if not created_videos:
                     raise HTTPException(status_code=402, detail=reason)
                 break
 
-            ext = Path(audio_file.filename).suffix or ".mp3"
-            dest_file = uploads_dir / f"upload_{uuid.uuid4()}{ext}"
-            
-            contents = await audio_file.read()
-            if not contents:
-                raise HTTPException(status_code=400, detail=f"Le fichier {audio_file.filename} est vide.")
-            dest_file.write_bytes(contents)
             try:
                 validate_audio_file(dest_file)
             except ValueError as exc:
                 dest_file.unlink(missing_ok=True)
-                raise HTTPException(status_code=400, detail=f"{audio_file.filename}: {exc}")
-            
+                raise HTTPException(status_code=400, detail=f"{original_filename}: {exc}")
+
             # Only meaningful for a single-file upload — with several files at
             # once every one would otherwise share the same explicit title,
             # so it's reserved for the filename-derived fallback in that case.
-            auto_title = explicit_title if (explicit_title and len(audio_files) == 1) else clean_filename_title(audio_file.filename)
+            auto_title = explicit_title if (explicit_title and total_audio_count == 1) else clean_filename_title(original_filename)
 
             try:
                 estimated_duration = get_audio_duration(dest_file)
@@ -296,7 +357,7 @@ async def submit_video_subject(
                 dest_file.unlink(missing_ok=True)
                 raise HTTPException(
                     status_code=400,
-                    detail=f"« {audio_file.filename} » dure {estimated_duration/60:.0f} min — la durée maximale de ton abonnement est de {effective_max_duration//60} min.",
+                    detail=f"« {original_filename} » dure {estimated_duration/60:.0f} min — la durée maximale de ton abonnement est de {effective_max_duration//60} min.",
                 )
 
             estimated_cost = estimate_video_cost_credits(
