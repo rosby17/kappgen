@@ -663,9 +663,19 @@ def admin_set_video_priority(video_id: str, payload: VideoPriorityPayload, admin
 
 @router.delete("/videos/{video_id}")
 def admin_delete_video(video_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Delete never actually worked for any video that had incurred real API
+    cost (i.e. almost every one): ApiUsageLog rows FK-reference video_id with
+    no ON DELETE clause, so Postgres rejected the delete with a foreign key
+    violation and the whole commit silently rolled back — the row reappeared
+    on the next fetch as if nothing had happened. Detach those log rows
+    first (video_id is nullable, and the logs themselves still power the
+    admin "Coûts" cost-tracking page — they just stop pointing at a video
+    that no longer exists) instead of deleting them."""
+    from src.db.models import ApiUsageLog
     video = db.query(Video).filter(Video.id == video_id).first()
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
+    db.query(ApiUsageLog).filter(ApiUsageLog.video_id == video_id).update({"video_id": None})
     db.delete(video)
     db.commit()
     return {"message": "Video deleted"}
