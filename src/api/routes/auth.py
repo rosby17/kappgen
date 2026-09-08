@@ -482,3 +482,21 @@ def update_user_profile(user_id: str, payload: ProfileUpdate, current_user: User
     db.commit()
     db.refresh(user)
     return user.to_dict()
+
+
+@router.delete("/me")
+def delete_own_account(response: Response, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Self-service account deletion — the 'Vos droits' section of the
+    privacy policy and the 'Résiliation' clause of the terms both promise a
+    creator can delete their own account and its content from their
+    settings; until this route existed, that was only actually possible by
+    emailing support and waiting on an admin. Removes the account and every
+    row that references it (channels, videos, credit history, uploaded
+    library content, voice clones...) via the same helper the admin panel
+    uses, then clears the session so the browser is logged out immediately."""
+    if current_user.is_admin:
+        raise HTTPException(status_code=400, detail="Un compte admin ne peut pas être supprimé depuis cette action — contacte un autre administrateur.")
+    from src.utils.account_deletion import delete_user_and_all_data
+    delete_user_and_all_data(db, current_user)
+    clear_session_cookie(response)
+    return {"deleted": True}

@@ -127,22 +127,19 @@ def get_user_detail(user_id: str, admin: User = Depends(get_current_admin), db: 
 @router.delete("/users/{user_id}")
 def delete_user(user_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     """Permanently deletes an account — for removing throwaway/test/audit
-    accounts. Channels, their videos, API keys and subscriptions cascade via
-    the User model's own relationships; PasswordReset/Order/ApiUsageLog rows
-    reference the user without a cascading relationship (Order keeps
-    financial history intentionally elsewhere), so they're deleted explicitly
-    here to avoid a foreign-key violation."""
+    accounts, and available to a creator themselves via the self-service
+    DELETE /api/auth/me (see delete_user_and_all_data — a plain db.delete(user)
+    was rejected by Postgres for almost any real account: credit_pots,
+    credit_transactions, voice_clone_jobs, community library rows and more
+    all have NO ACTION foreign keys back to users/channels with no cascade
+    at either the DB or the SQLAlchemy relationship level)."""
+    from src.utils.account_deletion import delete_user_and_all_data
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Impossible de supprimer ton propre compte admin.")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    db.query(PasswordReset).filter(PasswordReset.user_id == user_id).delete()
-    db.query(Order).filter(Order.user_id == user_id).delete()
-    db.query(ApiUsageLog).filter(ApiUsageLog.user_id == user_id).delete()
-    db.query(Folder).filter(Folder.user_id == user_id).delete()
-    db.delete(user)
-    db.commit()
+    delete_user_and_all_data(db, user)
     return {"deleted": True}
 
 
