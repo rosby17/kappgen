@@ -1677,7 +1677,7 @@ def set_paid_apis_kill_switch(payload: PaidApisKillSwitchPayload, admin: User = 
 # scene images and AI text. Must stay in sync with THUMBNAIL_PROVIDERS_ALL
 # (app_settings.py), which the actual reader (thumbnail_provider_order())
 # filters against.
-THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "kie", "huggingface"]
+THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "kie", "huggingface", "openai", "gemini"]
 
 
 @router.get("/settings/thumbnail-provider-mode")
@@ -1706,6 +1706,45 @@ def set_thumbnail_provider_mode(payload: ThumbnailProviderOrderPayload, admin: U
     return {"order": cleaned}
 
 
+# --- Scene image provider switch ----------------------------------------
+# Same structure as thumbnails. Default is huggingface (free). Adding
+# izivoice/ai33pro/fal means credits are spent per scene image (can be 100+
+# per video), so the admin must opt-in explicitly.
+SCENE_IMAGE_PROVIDERS = ["huggingface", "izivoice", "ai33pro", "fal", "kie"]
+
+
+@router.get("/settings/scene-image-provider-mode")
+def get_scene_image_provider_mode(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import scene_image_provider_order
+    from src.config import IZIVOICE_API_KEY, KIE_API_KEY, AI33PRO_API_KEY, FAL_API_KEY
+    configured = {
+        "huggingface": True,  # free, always available
+        "izivoice": bool(IZIVOICE_API_KEY),
+        "ai33pro": bool(AI33PRO_API_KEY),
+        "fal": bool(FAL_API_KEY),
+        "kie": bool(KIE_API_KEY),
+    }
+    order = scene_image_provider_order()
+    return {"order": order, "available": SCENE_IMAGE_PROVIDERS, "configured": configured}
+
+
+class SceneImageProviderOrderPayload(BaseModel):
+    order: List[str]
+
+
+@router.patch("/settings/scene-image-provider-mode")
+def set_scene_image_provider_mode(payload: SceneImageProviderOrderPayload, admin: User = Depends(get_current_admin)):
+    cleaned = []
+    for p in payload.order:
+        if p not in SCENE_IMAGE_PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
+        if p not in cleaned:
+            cleaned.append(p)
+    from src.utils.app_settings import set_scene_image_provider_order
+    set_scene_image_provider_order(cleaned)
+    return {"order": cleaned}
+
+
 # --- Voiceover/TTS provider switch -------------------------------------
 # Same order-picker structure as thumbnails above. "ai33pro" is the direct
 # upstream provider Izivoice (a separate business, also operator-owned)
@@ -1713,14 +1752,21 @@ def set_thumbnail_provider_mode(payload: ThumbnailProviderOrderPayload, admin: U
 # straight to ai33.pro instead of consuming Izivoice's account quota. See
 # src/pipeline/ai33_provider.py.
 
-VOICEOVER_PROVIDERS = ["izivoice", "ai33pro"]
+VOICEOVER_PROVIDERS = ["izivoice", "ai33pro", "kie", "fal", "openai", "gemini"]
 
 
 @router.get("/settings/voiceover-provider-mode")
 def get_voiceover_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import voiceover_provider_order
-    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY
-    configured = {"izivoice": bool(IZIVOICE_API_KEY), "ai33pro": bool(AI33PRO_API_KEY)}
+    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY, FAL_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+    configured = {
+        "izivoice": bool(IZIVOICE_API_KEY),
+        "ai33pro": bool(AI33PRO_API_KEY),
+        "kie": bool(KIE_API_KEY),
+        "fal": bool(FAL_API_KEY),
+        "openai": bool(OPENAI_API_KEY),
+        "gemini": bool(GEMINI_API_KEY),
+    }
     order = voiceover_provider_order()
     return {"order": order, "available": VOICEOVER_PROVIDERS, "configured": configured}
 
@@ -1747,14 +1793,19 @@ def set_voiceover_provider_mode(payload: VoiceoverProviderOrderPayload, admin: U
 # thin passthrough to this same ai33.pro endpoint (v1s/task/music-generation)
 # — see src/pipeline/music.py. "kie" (Suno v5.5 via kie.ai) is the only one
 # of the three on a genuinely separate account/quota.
-MUSIC_PROVIDERS = ["izivoice", "ai33pro", "kie"]
+MUSIC_PROVIDERS = ["izivoice", "ai33pro", "kie", "fal"]
 
 
 @router.get("/settings/music-provider-mode")
 def get_music_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import music_provider_order
-    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY
-    configured = {"izivoice": bool(IZIVOICE_API_KEY), "ai33pro": bool(AI33PRO_API_KEY), "kie": bool(KIE_API_KEY)}
+    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY, FAL_API_KEY
+    configured = {
+        "izivoice": bool(IZIVOICE_API_KEY),
+        "ai33pro": bool(AI33PRO_API_KEY),
+        "kie": bool(KIE_API_KEY),
+        "fal": bool(FAL_API_KEY),
+    }
     order = music_provider_order()
     return {"order": order, "available": MUSIC_PROVIDERS, "configured": configured}
 

@@ -40,7 +40,7 @@ def set_paid_apis_disabled(disabled: bool) -> None:
 # account hit its own quota/auth issues. Scene images keep their own
 # independent source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
-THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro", "kie", "huggingface"]
+THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro", "kie", "huggingface", "openai", "gemini"]
 THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 # The only genuinely free option here — same FLUX.1-schnell free tier the
 # scene-image generator already defaults to. Forced into the order (even if
@@ -93,6 +93,36 @@ def set_thumbnail_provider_order(order: List[str]) -> None:
     set_setting(THUMBNAIL_PROVIDER_ORDER_KEY, json.dumps(order))
 
 
+# Admin-defined priority for AI scene-image generation (fetch_or_generate_images,
+# images.py). Unlike thumbnails (1 image/video), scene images can number in
+# the hundreds — only Hugging Face is free here; paid options (izivoice,
+# ai33pro, fal) spend credits per scene. Default: huggingface only.
+SCENE_IMAGE_PROVIDER_ORDER_KEY = "scene_image_provider_order"
+SCENE_IMAGE_PROVIDERS_ALL = ["huggingface", "izivoice", "ai33pro", "fal", "kie"]
+SCENE_IMAGE_PROVIDER_ORDER_DEFAULT = ["huggingface"]
+SCENE_IMAGE_FREE_PROVIDERS = {"huggingface"}
+
+
+def scene_image_provider_order() -> List[str]:
+    raw = get_setting(SCENE_IMAGE_PROVIDER_ORDER_KEY, None)
+    if raw is None:
+        order = list(SCENE_IMAGE_PROVIDER_ORDER_DEFAULT)
+    else:
+        try:
+            parsed = json.loads(raw)
+            order = [p for p in parsed if p in SCENE_IMAGE_PROVIDERS_ALL] if isinstance(parsed, list) else list(SCENE_IMAGE_PROVIDER_ORDER_DEFAULT)
+        except (ValueError, TypeError):
+            order = list(SCENE_IMAGE_PROVIDER_ORDER_DEFAULT)
+    if paid_apis_disabled():
+        free_only = [p for p in order if p in SCENE_IMAGE_FREE_PROVIDERS]
+        return free_only or ["huggingface"]
+    return order
+
+
+def set_scene_image_provider_order(order: List[str]) -> None:
+    set_setting(SCENE_IMAGE_PROVIDER_ORDER_KEY, json.dumps(order))
+
+
 # Admin-defined priority order for text-generation providers (see
 # src/pipeline/ai_text.py) — "anthropic" | "deepseek" | "groq" | "openai" |
 # "fal", in the order they should be tried. Any configured provider left out
@@ -140,7 +170,7 @@ VOICEOVER_PROVIDER_ORDER_KEY = "voiceover_provider_order"
 # src/pipeline/ai33_provider.py) — added so KappGen's own automated volume
 # can stop consuming Izivoice's separate business account. Default order is
 # unchanged (izivoice first) so this is opt-in only, from the admin UI.
-VOICEOVER_PROVIDERS_ALL = ["izivoice", "ai33pro"]
+VOICEOVER_PROVIDERS_ALL = ["izivoice", "ai33pro", "kie", "fal", "openai", "gemini"]
 VOICEOVER_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 
@@ -169,7 +199,7 @@ def set_voiceover_provider_order(order: List[str]) -> None:
 # passthrough to this same ai33.pro endpoint, so routing there directly
 # bypasses Izivoice's account/quota the same way voice and thumbnails do.
 MUSIC_PROVIDER_ORDER_KEY = "music_provider_order"
-MUSIC_PROVIDERS_ALL = ["izivoice", "ai33pro", "kie"]
+MUSIC_PROVIDERS_ALL = ["izivoice", "ai33pro", "kie", "fal"]
 MUSIC_PROVIDER_ORDER_DEFAULT = ["izivoice"]
 
 

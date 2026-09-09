@@ -13,6 +13,8 @@ MODEL_CATALOG = {
     "kie": {
         "label": "Claude via Kie.ai",
         "text": ["claude-opus-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5"],
+        "image": ["gpt-image-2"],
+        "thumbnail": ["gpt-image-2"],
         "music": ["suno-v4", "suno-v4.5", "suno-v5"],
         "voice": ["standard", "neural", "elevenlabs"],
     },
@@ -20,6 +22,7 @@ MODEL_CATALOG = {
         "label": "fal.ai",
         "text": ["anthropic/claude-opus-5", "anthropic/claude-sonnet-5"],
         "image": ["fal-ai/flux-pro", "fal-ai/flux/dev", "fal-ai/flux/schnell", "fal-ai/gpt-image-2"],
+        "thumbnail": ["fal-ai/gpt-image-2", "fal-ai/flux-pro", "fal-ai/flux/dev", "fal-ai/flux/schnell"],
         "music": ["cassetteai/music-generator"],
         "voice": ["fal-ai/dia-tts"],
     },
@@ -27,6 +30,7 @@ MODEL_CATALOG = {
         "label": "OpenAI",
         "text": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         "image": ["gpt-image-2", "gpt-image-1.5"],
+        "thumbnail": ["gpt-image-2", "gpt-image-1.5"],
         "voice": ["gpt-4o-mini-tts", "gpt-4o-realtime"],
     },
     "deepseek": {"label": "DeepSeek", "text": ["deepseek-v4-flash", "deepseek-v4" ]},
@@ -36,13 +40,31 @@ MODEL_CATALOG = {
         "label": "Google Gemini (gratuit)",
         "text": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-pro"],
         "image": ["imagen-4", "gemini-2.5-flash-image"],
+        "thumbnail": ["imagen-4", "gemini-2.5-flash-image"],
         "voice": ["gemini-2.5-flash-tts"],
     },
-    "izivoice": {"label": "Izivoice", "voice": ["default"], "music": ["default"]},
-    "ai33pro": {"label": "ai33.pro", "voice": ["default"], "music": ["default"]},
+    "izivoice": {
+        "label": "Izivoice",
+        "image": ["gpt-image-2"],
+        "thumbnail": ["gpt-image-2"],
+        "voice": ["default"],
+        "music": ["default"],
+    },
+    "ai33pro": {
+        "label": "ai33.pro",
+        "image": ["gpt-image-2"],
+        "thumbnail": ["gpt-image-2"],
+        "voice": ["default"],
+        "music": ["default"],
+    },
+    "huggingface": {
+        "label": "Hugging Face (gratuit)",
+        "image": ["black-forest-labs/FLUX.1-schnell"],
+        "thumbnail": ["black-forest-labs/FLUX.1-schnell"],
+    },
 }
 
-TASKS = ("text", "image", "music", "voice")
+TASKS = ("text", "image", "thumbnail", "music", "voice")
 
 # USD per million tokens. Kept separate from the model ids because the same
 # model may cost differently depending on the reseller/source.
@@ -57,6 +79,7 @@ MODEL_PRICING = {
     "gemini:gemini-3.6-flash": {"input": 0.225, "output": 1.125},
     "groq:openai/gpt-oss-120b": {"free_tier": True},
     "xai:grok-4-6": {"input": 0.80, "output": 2.40},
+    "huggingface:black-forest-labs/FLUX.1-schnell": {"free_tier": True},
 }
 
 

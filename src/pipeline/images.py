@@ -787,7 +787,9 @@ def fetch_or_generate_images(
         return result[:required_count]
 
     def generate_images(ai_prompts: List[str], prefix: str = "ai_img") -> List[Path]:
-        logger.info(f"Generating {len(ai_prompts)} images (free tier: Hugging Face FLUX.1-schnell)...")
+        from src.utils.app_settings import scene_image_provider_order
+        scene_order = scene_image_provider_order()
+        logger.info(f"Generating {len(ai_prompts)} scene images (provider order: {scene_order})...")
         # These are independent network calls (each waits on Izivoice's API, not
         # local CPU), so running them one after another was pure dead time —
         # fanning them out is the single biggest lever for a long video's total
@@ -821,28 +823,37 @@ def fetch_or_generate_images(
             full_prompt = f"{p}, {style_prompt}" if style_prompt else p
             if niche:
                 full_prompt = f"{full_prompt}, in the visual context of {niche}"
-            # Free tier tried first, before any credit is touched — costs
-            # nothing up to Hugging Face's small monthly free allowance, so a
-            # video's whole visual pool can render for free as long as it lasts.
-            try:
-                return _generate_with_huggingface_flux(full_prompt, img_file, client, operation="scene_image"), True
-            except Exception as e:
-                # Paid fallback (Izivoice) intentionally disabled — free tier
-                # only, permanently: never spend a credit just because the
-                # free generator had a bad moment. Falls back through the
-                # channel's own library first (only if the creator actually
-                # enabled it — see `enabled` above), then the niche's
-                # community library (same condition), and only then
-                # get_image_pool's own last-resort synthetic gradient
-                # artwork if truly nothing else is enabled/available.
-                logger.warning(f"Hugging Face (FLUX.1-schnell) image generation failed, falling back to library images: {e}")
-                fallback = get_image_pool(
-                    output_dir, 1,
-                    custom_library_path=library_path if "library" in enabled else None,
-                    additional_library_files=_approved_community_library_files(niche, user_id=user_id) if "community" in enabled else [],
-                    niche=niche,
-                )
-                return (fallback[0] if fallback else None), False
+            # Try providers in admin-configured order. Hugging Face is the free
+            # default and always first unless the admin explicitly reorders.
+            # Paid providers (izivoice, ai33pro, fal) are tried in order only
+            # if configured — never fall silently through to them unless the
+            # admin opted them in, since each scene image costs a credit.
+            SCENE_FUNCS = {
+                "huggingface": lambda: (_generate_with_huggingface_flux(full_prompt, img_file, client, operation="scene_image"), True),
+                "izivoice": lambda: (_generate_with_key_pool("izivoice", IZIVOICE_API_KEY, lambda key: generate_ai_image(full_prompt, img_file, client, api_key=key)), False),
+                "ai33pro": lambda: (_generate_with_key_pool("ai33pro", AI33PRO_API_KEY, lambda key: _generate_with_ai33pro_image(full_prompt, img_file, client, api_key=key)), False),
+                "fal": lambda: (_generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(full_prompt, img_file, client, api_key=key)), False),
+                "kie": lambda: (_generate_with_key_pool("kie", KIE_API_KEY, lambda key: _generate_with_kie_image(full_prompt, img_file, client, api_key=key)), False),
+            }
+            last_exc = None
+            for provider_name in scene_order:
+                if provider_name not in SCENE_FUNCS:
+                    continue
+                try:
+                    result_path, is_fresh = SCENE_FUNCS[provider_name]()
+                    return result_path, is_fresh
+                except Exception as e:
+                    logger.warning(f"Scene image generation via {provider_name} failed: {e}")
+                    last_exc = e
+            # All configured providers failed — fall back to library/synthetic.
+            logger.warning(f"All scene image providers failed, falling back to library images. Last error: {last_exc}")
+            fallback = get_image_pool(
+                output_dir, 1,
+                custom_library_path=library_path if "library" in enabled else None,
+                additional_library_files=_approved_community_library_files(niche, user_id=user_id) if "community" in enabled else [],
+                niche=niche,
+            )
+            return (fallback[0] if fallback else None), False
 
         with httpx.Client(limits=httpx.Limits(max_connections=8, max_keepalive_connections=8)) as client:
             with ThreadPoolExecutor(max_workers=6) as pool:
