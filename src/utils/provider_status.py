@@ -160,7 +160,27 @@ def _check_fal():
     key = _get_effective_key("fal", FAL_API_KEY)
     if not key:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
-    return {"configured": True, "status": "unknown", "detail": "Clé présente. Pas de vérification en direct : tout appel fal.ai réel est payant, y compris un simple test."}
+    try:
+        resp = httpx.get(
+            "https://queue.fal.run/fal-ai/fast-sdxl/requests/ping/status",
+            headers={"Authorization": f"Key {key}"},
+            timeout=PROBE_TIMEOUT,
+        )
+        if resp.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou non reconnue par fal.ai."}
+        if resp.status_code in (402, 429) or "credit" in resp.text.lower() or "payment" in resp.text.lower():
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits insuffisants sur le compte fal.ai."}
+        if resp.status_code in (200, 404):
+            return {"configured": True, "status": "ok", "detail": "Clé valide et reconnue par fal.ai."}
+        return {"configured": True, "status": "ok", "detail": "Clé valide."}
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
+        if exc.response.status_code in (402, 429):
+            return {"configured": True, "status": "quota_exhausted", "detail": "Solde/crédits insuffisants sur fal.ai."}
+        return {"configured": True, "status": "error", "detail": f"Erreur fal.ai ({exc.response.status_code})"}
+    except Exception as exc:
+        return {"configured": True, "status": "error", "detail": f"fal.ai injoignable : {exc}"}
 
 
 def _check_izivoice():
@@ -233,7 +253,7 @@ def check_all_providers() -> list:
         ("groq", "Groq", _check_groq),
         ("fal", "fal.ai", _check_fal),
         ("izivoice", "Izivoice", _check_izivoice),
-        ("ai33pro", "ai33.pro", _check_ai33pro),
+        ("ai33pro", "KappGen", _check_ai33pro),
         ("xai", "xAI (Grok)", _check_xai),
     ]
     results = []

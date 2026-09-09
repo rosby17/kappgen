@@ -92,7 +92,7 @@ MODEL_CATALOG = {
         "music": ["default"],
     },
     "ai33pro": {
-        "label": "ai33.pro",
+        "label": "KappGen",
         "image": ["gpt-image-2"],
         "thumbnail": ["gpt-image-2"],
         "voice": ["default"],
