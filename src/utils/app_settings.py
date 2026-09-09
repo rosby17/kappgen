@@ -41,7 +41,7 @@ def set_paid_apis_disabled(disabled: bool) -> None:
 # independent source/provider policy.
 THUMBNAIL_PROVIDER_ORDER_KEY = "thumbnail_provider_order"
 THUMBNAIL_PROVIDERS_ALL = ["izivoice", "fal", "ai33pro", "kie", "huggingface", "openai", "gemini"]
-THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["izivoice"]
+THUMBNAIL_PROVIDER_ORDER_DEFAULT = ["ai33pro"]
 # The only genuinely free option here — same FLUX.1-schnell free tier the
 # scene-image generator already defaults to. Forced into the order (even if
 # the admin never explicitly enabled it) when paid_apis_disabled() is on, so
@@ -96,10 +96,10 @@ def set_thumbnail_provider_order(order: List[str]) -> None:
 # Admin-defined priority for AI scene-image generation (fetch_or_generate_images,
 # images.py). Unlike thumbnails (1 image/video), scene images can number in
 # the hundreds — only Hugging Face is free here; paid options (izivoice,
-# ai33pro, fal) spend credits per scene. Default: huggingface only.
+# ai33pro, fal) spend credits per scene. Default: KappGen.
 SCENE_IMAGE_PROVIDER_ORDER_KEY = "scene_image_provider_order"
 SCENE_IMAGE_PROVIDERS_ALL = ["huggingface", "izivoice", "ai33pro", "fal", "kie"]
-SCENE_IMAGE_PROVIDER_ORDER_DEFAULT = ["huggingface"]
+SCENE_IMAGE_PROVIDER_ORDER_DEFAULT = ["ai33pro"]
 SCENE_IMAGE_FREE_PROVIDERS = {"huggingface"}
 
 
@@ -160,18 +160,10 @@ def set_ai_text_provider_order(order: List[str]) -> None:
     set_setting(AI_TEXT_PROVIDER_ORDER_KEY, json.dumps(order))
 
 
-# Admin-defined priority order for voiceover/TTS providers — only "izivoice"
-# exists today (a single shared key, not a pool — see src/pipeline/voiceover.py),
-# but this is the same order-picker structure as thumbnails/AI-text above so
-# a second provider (e.g. ElevenLabs) can be added later without changing the
-# admin UI's shape, just this list.
+# The saved order remains selectable in Resources. New installations use KappGen.
 VOICEOVER_PROVIDER_ORDER_KEY = "voiceover_provider_order"
-# "ai33pro" is the direct upstream provider Izivoice itself resells (see
-# src/pipeline/ai33_provider.py) — added so KappGen's own automated volume
-# can stop consuming Izivoice's separate business account. Default order is
-# unchanged (izivoice first) so this is opt-in only, from the admin UI.
 VOICEOVER_PROVIDERS_ALL = ["izivoice", "ai33pro", "kie", "fal", "openai", "gemini"]
-VOICEOVER_PROVIDER_ORDER_DEFAULT = ["izivoice"]
+VOICEOVER_PROVIDER_ORDER_DEFAULT = ["ai33pro"]
 
 
 def voiceover_provider_order() -> List[str]:
@@ -200,7 +192,7 @@ def set_voiceover_provider_order(order: List[str]) -> None:
 # bypasses Izivoice's account/quota the same way voice and thumbnails do.
 MUSIC_PROVIDER_ORDER_KEY = "music_provider_order"
 MUSIC_PROVIDERS_ALL = ["izivoice", "ai33pro", "kie", "fal"]
-MUSIC_PROVIDER_ORDER_DEFAULT = ["izivoice"]
+MUSIC_PROVIDER_ORDER_DEFAULT = ["ai33pro"]
 
 
 def music_provider_order() -> List[str]:

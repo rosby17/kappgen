@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Tuple, Optional
 import httpx
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS, AI33PRO_API_KEY
 from src.utils.logger import logger
+from src.utils.media_providers import provider_key
 from src.utils.ffmpeg_runner import get_audio_duration, run_ffmpeg
 from src.utils.cost_tracking import log_usage, estimate_izivoice_tts_cost, estimate_izivoice_stt_cost
 
@@ -60,15 +61,13 @@ def _izivoice_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     return {"Authorization": f"Bearer {api_key or IZIVOICE_API_KEY}"}
 
 
-def _configured_providers() -> List[str]:
+def _configured_providers(api_key: Optional[str] = None) -> List[str]:
     """Admin-ordered voiceover providers (src/utils/app_settings.py), filtered
     to whichever actually have a key configured. "ai33pro" is ai33.pro
     directly (src/pipeline/ai33_provider.py) — the upstream provider Izivoice
-    itself resells; opt-in only, default order is unchanged ("izivoice")."""
+    itself resells. The saved admin order is authoritative."""
     from src.utils.app_settings import voiceover_provider_order
-    keys = {"izivoice": IZIVOICE_API_KEY, "ai33pro": AI33PRO_API_KEY}
-    providers = [p for p in voiceover_provider_order() if keys.get(p)]
-    return providers or (["izivoice"] if IZIVOICE_API_KEY else [])
+    return [p for p in voiceover_provider_order() if p in ("izivoice", "ai33pro") and provider_key(p, api_key)]
 
 
 def _post_with_retry(client: httpx.Client, url: str, max_retries: int = 5, **kwargs) -> httpx.Response:
@@ -465,10 +464,9 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
     real transcription via the admin-ordered voiceover provider (Izivoice,
     and/or ai33.pro direct) when configured, falling through to the next one
     on failure, else a synthetic even-split alignment over the fallback
-    title/text. An explicit `api_key` (BYOK) always means Izivoice
-    specifically, same as generate_voiceover.
+    title/text. Personal keys apply only to an enabled Izivoice entry.
     """
-    providers = ["izivoice"] if api_key else _configured_providers()
+    providers = _configured_providers(api_key)
     if not providers:
         logger.info("No voiceover provider configured. Using synthetic subtitle timing for uploaded audio.")
         duration = get_audio_duration(audio_path)
@@ -481,7 +479,7 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
 
     last_error: Optional[Exception] = None
     for provider in providers:
-        effective_key = api_key or (AI33PRO_API_KEY if provider == "ai33pro" else IZIVOICE_API_KEY)
+        effective_key = provider_key(provider, api_key)
         try:
             return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider)
         except Exception as e:
@@ -570,8 +568,8 @@ def generate_voiceover(
     Generates voiceover TTS audio via the admin-ordered voiceover provider
     (Izivoice, and/or ai33.pro direct — src/utils/app_settings.py's
     voiceover_provider_order(); falls through to the next configured provider
-    if one fails, same philosophy as ai_text.py's text-provider chain), or a
-    local fallback when none is configured. Then derives word-level subtitle
+    if one fails, same philosophy as ai_text.py's text-provider chain).
+    Missing or disabled providers fail explicitly. Then derives word-level subtitle
     timing via speech-to-text on the resulting audio (TTS does not return
     alignment data itself) — unless `transcribe` is False, in which case
     subtitle timing is approximated by evenly spreading the known script text
@@ -581,16 +579,14 @@ def generate_voiceover(
     silences; the synthetic fallback is free but drifts on anything that
     isn't a constant speech rate.
 
-    An explicit `api_key` (BYOK) always means Izivoice specifically — ai33.pro
-    is a wholly separate account system with no per-user key concept here —
-    so it bypasses the admin's provider order entirely, exactly as before.
+    A personal `api_key` is used only if Izivoice is enabled in the admin
+    order. It never changes the selected provider or supplies ai33pro credentials.
     """
     script_text = clean_script_text(script_text)
 
-    providers = ["izivoice"] if api_key else _configured_providers()
+    providers = _configured_providers(api_key)
     if not providers:
-        logger.info("No voiceover provider configured. Using local TTS fallback.")
-        return generate_mock_voiceover(script_text, output_audio_path)
+        raise RuntimeError("Aucun générateur vocal actif avec une clé configurée. Vérifiez la source dans Ressources.")
 
     char_count = len(script_text)
     if user_id:
@@ -600,7 +596,7 @@ def generate_voiceover(
 
     last_error: Optional[Exception] = None
     for provider in providers:
-        effective_key = AI33PRO_API_KEY if provider == "ai33pro" else IZIVOICE_API_KEY
+        effective_key = provider_key(provider, api_key)
         try:
             output_audio_path.parent.mkdir(parents=True, exist_ok=True)
             with httpx.Client() as client:
@@ -624,7 +620,7 @@ def generate_voiceover(
     try:
         # `provider` still holds whichever one succeeded above (the for/else
         # loop only exits via `break`, never falling off the end here).
-        effective_key = api_key if provider == "izivoice" and api_key else (AI33PRO_API_KEY if provider == "ai33pro" else IZIVOICE_API_KEY)
+        effective_key = provider_key(provider, api_key)
 
         # TTS providers have been observed returning a 200 with a genuinely
         # truncated audio file for very long scripts — no error, just
@@ -649,7 +645,7 @@ def generate_voiceover(
                 )
 
         log_usage(
-            "izivoice_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
+            f"{provider}_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
             user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id, "provider": provider},
         )
         if transcribe:

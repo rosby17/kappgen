@@ -508,8 +508,9 @@ def generate_voice_preview(voice_id: str, current_user: User = Depends(get_curre
     if not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
         raise HTTPException(status_code=400, detail="Identifiant de voix invalide.")
     api_key = izivoice_key_for_user(current_user)
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Connecte d'abord ton compte Izivoice dans les paramètres.")
+    from src.pipeline.voiceover import _configured_providers
+    if not _configured_providers(api_key):
+        raise HTTPException(status_code=503, detail="Aucune source vocale active avec une clé configurée.")
     preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
     if not preview_path.exists():
         preview_path.parent.mkdir(parents=True, exist_ok=True)
@@ -536,8 +537,9 @@ def generate_voice_settings_preview(
     if not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
         raise HTTPException(status_code=400, detail="Identifiant de voix invalide.")
     api_key = izivoice_key_for_user(current_user)
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Connecte d'abord ton compte Izivoice dans les paramètres.")
+    from src.pipeline.voiceover import _configured_providers
+    if not _configured_providers(api_key):
+        raise HTTPException(status_code=503, detail="Aucune source vocale active avec une clé configurée.")
 
     settings = {
         "speed": round(min(1.5, max(0.5, payload.speed)), 2),

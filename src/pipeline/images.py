@@ -723,7 +723,7 @@ def generate_thumbnail_image(
     actually produced the image, not just that one did: a manual regeneration
     counts toward MAX_THUMBNAIL_REGENERATIONS (videos.py) only when a paid
     provider was the one that succeeded, never Hugging Face."""
-    order = [p for p in (provider_order or []) if p in ("izivoice", "fal", "huggingface", "ai33pro", "kie")] or ["izivoice"]
+    order = [p for p in (provider_order if provider_order is not None else ["ai33pro"]) if p in ("izivoice", "fal", "huggingface", "ai33pro", "kie")]
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),

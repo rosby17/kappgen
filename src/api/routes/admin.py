@@ -1683,9 +1683,10 @@ THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "kie", "huggingface",
 @router.get("/settings/thumbnail-provider-mode")
 def get_thumbnail_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import thumbnail_provider_order
-    from src.config import IZIVOICE_API_KEY, KIE_API_KEY
+    from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY
     from src.utils.provider_status import _get_effective_key
     configured = {
+        "ai33pro": bool(_get_effective_key("ai33pro", AI33PRO_API_KEY)),
         "izivoice": bool(_get_effective_key("izivoice", IZIVOICE_API_KEY)),
         "kie": bool(_get_effective_key("kie", KIE_API_KEY)),
     }

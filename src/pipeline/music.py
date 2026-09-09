@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from src.config import ASSETS_PATH, STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, AI33PRO_API_KEY, KIE_API_KEY, KIE_BASE_URL
 from src.utils.logger import logger
+from src.utils.media_providers import provider_key
 from src.utils.ffmpeg_runner import run_ffmpeg
 from src.utils.cost_tracking import log_usage, estimate_kie_music_cost
 
@@ -20,9 +21,9 @@ def _configured_music_providers() -> List[str]:
     "kie" (kie.ai's Suno v5.5 reseller) is the only genuinely independent
     account of the three — izivoice/ai33pro share one upstream quota."""
     from src.utils.app_settings import music_provider_order
-    keys = {"izivoice": IZIVOICE_API_KEY, "ai33pro": AI33PRO_API_KEY, "kie": KIE_API_KEY}
+    keys = {p: provider_key(p) for p in ("izivoice", "ai33pro", "kie")}
     providers = [p for p in music_provider_order() if keys.get(p)]
-    return providers or (["izivoice"] if IZIVOICE_API_KEY else [])
+    return providers
 
 TASK_POLL_INTERVAL_SECONDS = 3.0
 # A real Izivoice music generation commonly runs well past 90s (the same
@@ -40,7 +41,7 @@ TASK_POLL_TIMEOUT_SECONDS = 600
 
 
 def _izivoice_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {IZIVOICE_API_KEY}"}
+    return {"Authorization": f"Bearer {provider_key('izivoice')}"}
 
 
 def _poll_izivoice_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
@@ -134,10 +135,10 @@ def _music_via_ai33(
     route is itself a thin passthrough to this same upstream endpoint)."""
     from src.pipeline import ai33_provider
     task_id = ai33_provider.submit_music_generation(
-        client, prompt, make_instrumental=(not lyrics), api_key=AI33PRO_API_KEY,
+        client, prompt, make_instrumental=(not lyrics), api_key=provider_key("ai33pro"),
         lyrics=lyrics, title=title, tags=tags, vocal_gender=vocal_gender,
     )
-    task = ai33_provider.poll_task(task_id, client, AI33PRO_API_KEY)
+    task = ai33_provider.poll_task(task_id, client, provider_key("ai33pro"))
     audio_url = (task.get("metadata") or {}).get("audio_url")
     if not audio_url:
         raise ValueError(f"ai33.pro music task {task_id} completed with no audio_url: {task}")
@@ -304,8 +305,8 @@ def get_background_music_track(
         return _generate_synthetic_fallback_track(duration)
 
     if mode == "ai_generate":
-        if not IZIVOICE_API_KEY:
-            logger.info("Music mode is 'ai_generate' but IZIVOICE_API_KEY is not set; using fallback tone.")
+        if not _configured_music_providers():
+            logger.info("No selected music provider has a configured key; using fallback tone.")
             return _generate_synthetic_fallback_track(duration)
 
         prompt = music_pref.get("ai_prompt")
@@ -319,7 +320,7 @@ def get_background_music_track(
         try:
             cache_dir = ASSETS_PATH / "music" / "ai_cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
-            output_path = cache_dir / f"{abs(hash((prompt, round(duration)))) }.mp3"
+            output_path = cache_dir / f"{abs(hash((tuple(_configured_music_providers()), prompt, round(duration)))) }.mp3"
             if output_path.exists():
                 return output_path
             if user_id:
