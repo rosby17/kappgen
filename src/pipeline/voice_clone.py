@@ -11,10 +11,11 @@ polling VoiceCloneJob rows in the database, means the job survives an API
 redeploy exactly like a queued video render already does.
 """
 from pathlib import Path
+from typing import Optional
 
 import httpx
 
-from src.config import IZIVOICE_BASE_URL, STORAGE_PATH
+from src.config import AI33PRO_API_KEY, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, STORAGE_PATH
 from src.db.models import VoiceCloneJob
 from src.utils.logger import logger
 
@@ -79,7 +80,6 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = Non
     place. Always leaves the job in a terminal status ("done" or "error").
     Uses ai33.pro directly if ai33pro is configured / prioritized in
     voiceover_provider_order(), otherwise uses Izivoice."""
-    from src.config import AI33PRO_API_KEY
     from src.utils.app_settings import voiceover_provider_order
     from src.pipeline import ai33_provider
 
