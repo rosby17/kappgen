@@ -208,6 +208,18 @@ def on_startup():
 def health_check():
     return {"status": "ok", "app": "KappGen Video Pipeline MVP"}
 
+# Public (unauthenticated) mirror of app_settings.paid_apis_disabled() — the
+# admin-only /api/admin/settings/paid-apis-kill-switch can't be polled by an
+# anonymous or non-admin visitor's browser, but the frontend needs to know
+# this *before* rendering the app, to show a maintenance screen instead of a
+# UI that looks normal but silently fails or degrades every generation
+# (voice/music have no free fallback — see app_settings.py). Never exposes
+# who flipped it or why, just the boolean the frontend gates on.
+@app.get("/api/maintenance-status", include_in_schema=False)
+def get_maintenance_status():
+    from src.utils.app_settings import paid_apis_disabled
+    return {"maintenance": paid_apis_disabled()}
+
 @app.get("/api/db-status", include_in_schema=False)
 def get_db_status(admin=Depends(get_current_admin)):
     # Was publicly reachable — leaked the DB engine, host and table names to
