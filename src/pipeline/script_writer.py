@@ -71,7 +71,10 @@ DEFAULT_SCRIPT_STRUCTURE = {
     "cta_style": "Weave invitations to like, subscribe, and comment naturally into the narration, never as a jarring aside.",
 }
 
-MAX_PART_WORD_COUNT_PER_CALL = 1600  # keeps every single Claude call comfortably inside a safe output-token budget
+# Kie’s text proxy can accept a request but time out before returning a long
+# response.  Keep each model call small and stitch adjacent chunks together
+# with the previous tail for continuity; the final script length is unchanged.
+MAX_PART_WORD_COUNT_PER_CALL = 180
 
 
 def _extract_json(text: str) -> dict:
@@ -93,9 +96,7 @@ def _extract_json(text: str) -> dict:
 
 
 def _split_oversized_parts(parts: List[dict]) -> List[dict]:
-    """Splits any single part whose word_count is too large for one safe Claude
-    call into several same-guidance sub-parts, so no individual call is asked
-    to produce more than MAX_PART_WORD_COUNT_PER_CALL words at once."""
+    """Split long parts into continuous sub-parts safe for every configured model."""
     result = []
     for part in parts:
         word_count = int(part.get("word_count", 0) or 0)
