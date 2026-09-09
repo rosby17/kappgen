@@ -130,6 +130,13 @@ MODEL_PRICING = {
     "fal:deepseek/deepseek-r1": {"input": 0.55, "output": 2.19},
     "fal:deepseek/deepseek-v3": {"input": 0.27, "output": 1.10},
     "fal:meta-llama/llama-3.3-70b-instruct": {"input": 0.40, "output": 0.80},
+    "fal:fal-ai/flux-pro": {"output": 0.04},
+    "fal:fal-ai/flux/dev": {"output": 0.025},
+    "fal:fal-ai/flux/schnell": {"output": 0.003},
+    "fal:fal-ai/gpt-image-2": {"output": 0.02},
+    "fal:fal-ai/recraft-v3": {"output": 0.04},
+    "fal:cassetteai/music-generator": {"output": 0.05},
+    "fal:fal-ai/dia-tts": {"output": 0.01},
 
     # OpenAI direct
     "openai:gpt-6-astra": {"input": 2.80, "output": 14.0},
