@@ -131,6 +131,7 @@ def set_scene_image_provider_order(order: List[str]) -> None:
 # providers to the front, e.g. move off Claude the instant its balance runs
 # low, without a redeploy. Set from the "Ressources" tab.
 AI_TEXT_PROVIDER_ORDER_KEY = "ai_text_provider_order"
+AI_TASK_MODELS_KEY = "ai_task_models"
 
 
 # Groq and Gemini are the only text/vision providers with a real free tier
@@ -156,6 +157,28 @@ def ai_text_provider_order() -> List[str]:
 
 def set_ai_text_provider_order(order: List[str]) -> None:
     set_setting(AI_TEXT_PROVIDER_ORDER_KEY, json.dumps(order))
+
+
+def ai_task_models() -> dict:
+    raw = get_setting(AI_TASK_MODELS_KEY, None)
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def selected_task_model(task: str, provider: str) -> Optional[str]:
+    task_models = ai_task_models().get(task, {})
+    return task_models.get(provider) if isinstance(task_models, dict) else None
+
+
+def set_selected_task_model(task: str, provider: str, model: str) -> None:
+    values = ai_task_models()
+    values.setdefault(task, {})[provider] = model
+    set_setting(AI_TASK_MODELS_KEY, json.dumps(values))
 
 
 # The saved order remains selectable in Resources. New installations use KappGen.

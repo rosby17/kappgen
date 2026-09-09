@@ -112,7 +112,25 @@ def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dic
     raise RuntimeError(f"All Anthropic keys failed: {last_exc}")
 
 
-def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+def _kie_response_text(data: dict) -> str:
+    if data.get("choices"):
+        return "\n".join(((choice.get("message") or {}).get("content") or "") for choice in data["choices"]).strip()
+    if data.get("content"):
+        return "\n".join(block.get("text", "") for block in data["content"] if block.get("type") == "text").strip()
+    if data.get("output"):
+        return "\n".join(
+            part.get("text", "")
+            for item in data["output"] if item.get("type") == "message"
+            for part in item.get("content", []) if part.get("type") == "output_text"
+        ).strip()
+    candidates = data.get("candidates") or []
+    return "\n".join(
+        part.get("text", "") for candidate in candidates
+        for part in ((candidate.get("content") or {}).get("parts") or []) if part.get("text")
+    ).strip()
+
+
+def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
     """Claude through kie.ai's reseller proxy — a cheaper alternative to
     calling Anthropic directly (see src/pipeline/ai_providers.py). This is
     NOT the Anthropic API: kie.ai exposes its own wrapper
@@ -126,18 +144,29 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     accounts = _provider_accounts_from_db("kie", env_fallback_keys=[KIE_API_KEY] if KIE_API_KEY else [])
     if not accounts:
         raise RuntimeError("KIE_API_KEY is not configured on the server.")
+    model = selected_model or KIE_CLAUDE_MODEL
     last_exc = None
     for account in accounts:
         try:
+            if model.startswith("claude-"):
+                path = "/claude/v1/messages"
+                payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False, "max_tokens": max_tokens}
+            elif model.startswith("gemini-"):
+                path = f"/gemini/v1/models/{model}:streamGenerateContent"
+                payload = {"stream": False, "contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": max_tokens}}
+            elif model.startswith("grok-"):
+                path = "/grok/v1/responses"
+                payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]}
+            elif model.startswith("deepseek-"):
+                path = "/deepseek/v1/chat/completions"
+                payload = {"model": model, "stream": False, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens}
+            else:
+                path = "/codex/v1/responses"
+                payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}], "reasoning": {"effort": "low"}}
             resp = httpx.post(
-                f"{KIE_BASE_URL}/claude/v1/messages",
+                f"{KIE_BASE_URL}{path}",
                 headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
-                json={
-                    "model": KIE_CLAUDE_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "max_tokens": max_tokens,
-                },
+                json=payload,
                 timeout=120.0,
             )
             resp.raise_for_status()
@@ -149,21 +178,23 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             if internal_code not in (None, 0, 200):
                 detail = data.get("msg") or data.get("message") or "unknown error"
                 raise RuntimeError(f"Kie.ai error {internal_code}: {detail}")
-            text_blocks = [block.get("text", "") for block in (data.get("content") or []) if block.get("type") == "text"]
-            text = "\n".join(t for t in text_blocks if t).strip()
+            text = _kie_response_text(data)
             if not text:
-                raise RuntimeError("Kie.ai (Claude) text generation returned no text content.")
-            usage = data.get("usage") or {}
-            in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+                raise RuntimeError("Kie.ai text generation returned no text content.")
+            usage = data.get("usage") or data.get("usageMetadata") or {}
+            in_tok = usage.get("input_tokens", usage.get("promptTokenCount", 0))
+            out_tok = usage.get("output_tokens", usage.get("candidatesTokenCount", 0))
             # kie.ai reports its own credits_consumed too, but the per-token
             # estimate keeps this provider comparable to every other row on
             # the admin "Coûts" page (all of which are token-based).
-            cost_usd = estimate_kie_claude_cost(in_tok, out_tok)
+            from src.pipeline.model_catalog import MODEL_PRICING
+            price = MODEL_PRICING.get(f"kie:{model}", {})
+            cost_usd = in_tok / 1_000_000 * price.get("input", 0) + out_tok / 1_000_000 * price.get("output", 0)
             log_usage(
                 "kie_claude", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
                 cost_usd,
                 user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-                meta={"model": KIE_CLAUDE_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "credits_consumed": data.get("credits_consumed")},
+                meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok, "credits_consumed": data.get("credits_consumed")},
             )
             _mark_provider_account(account["id"], "active")
             return text, cost_usd
@@ -576,9 +607,13 @@ def generate_text(
     first (or isn't available) the call still succeeds, just without live
     search results."""
     usage_ctx = {"operation": operation, "user_id": user_id, "channel_id": channel_id, "video_id": video_id}
+    from src.utils.app_settings import selected_task_model
+
+    def _selected_model(provider_id: str) -> Optional[str]:
+        return selected_task_model("text", provider_id)
     providers = {
         "anthropic": lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search),
-        "kie": lambda: _kie_complete(prompt, max_tokens, usage_ctx),
+        "kie": lambda: _kie_complete(prompt, max_tokens, usage_ctx, selected_model=_selected_model("kie")),
         "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx),
         "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
         "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),

@@ -137,16 +137,31 @@ def _check_kie():
     if not key:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
     try:
+        from src.utils.app_settings import selected_task_model
+        model = selected_task_model("text", "kie") or KIE_CLAUDE_MODEL
+        # The health probe follows the same endpoint family as production.
+        if model.startswith("claude-"):
+            path = "/claude/v1/messages"
+            payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": False, "max_tokens": 8}
+        elif model.startswith("gemini-"):
+            path = f"/gemini/v1/models/{model}:streamGenerateContent"
+            payload = {"stream": False, "contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 8}}
+        elif model.startswith("grok-"):
+            path = "/grok/v1/responses"
+            payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}
+        else:
+            path = "/codex/v1/responses"
+            payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}
         resp = httpx.post(
-            f"{KIE_BASE_URL}/claude/v1/messages",
+            f"{KIE_BASE_URL}{path}",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": KIE_CLAUDE_MODEL, "messages": [{"role": "user", "content": "hi"}], "stream": False, "max_tokens": 1},
+            json=payload,
             timeout=PROBE_TIMEOUT,
         )
         if resp.status_code in (402, 429) or "insufficient" in resp.text.lower() or "credit" in resp.text.lower():
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits kie.ai insuffisants."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         data = resp.json()
         internal_code = data.get("code")
@@ -155,10 +170,10 @@ def _check_kie():
             if internal_code == 401:
                 return {"configured": True, "status": "error", "detail": f"Authentification Kie.ai refusée : {detail}"}
             return {"configured": True, "status": "error", "detail": f"Kie.ai erreur {internal_code} : {detail}"}
-        content = data.get("content") or []
-        if not any(block.get("text") for block in content if isinstance(block, dict)):
+        from src.pipeline.ai_text import _kie_response_text
+        if not _kie_response_text(data):
             return {"configured": True, "status": "error", "detail": "Kie.ai a accepté la requête mais n'a renvoyé aucun texte."}
-        return {"configured": True, "status": "ok", "detail": f"Clé valide. Modèle configuré : {KIE_CLAUDE_MODEL}."}
+        return {"configured": True, "status": "ok", "detail": f"Clé valide. Modèle configuré : {model}."}
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (402, 429) or "insufficient" in exc.response.text.lower() or "credit" in exc.response.text.lower():
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits kie.ai insuffisants."}

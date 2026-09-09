@@ -1,5 +1,6 @@
 from src.pipeline import ai_providers, ai_text, script_writer
 from src.utils import provider_status
+import pytest
 
 
 def test_numbered_text_order_is_complete_chain(monkeypatch):
@@ -12,6 +13,7 @@ def test_numbered_text_order_is_complete_chain(monkeypatch):
 def test_preferred_provider_cannot_override_admin_order(monkeypatch):
     calls = []
     monkeypatch.setattr(ai_providers, "ordered_ids", lambda capability: ["kie", "ollama"])
+    monkeypatch.setattr("src.utils.app_settings.selected_task_model", lambda *args: None)
     monkeypatch.setattr(ai_text, "_kie_complete", lambda *args, **kwargs: (calls.append("kie") or "ok", 0.0))
 
     result = ai_text.generate_text("test", preferred_provider="gemini")
@@ -63,9 +65,45 @@ def test_kie_health_rejects_internal_unauthorized_response(monkeypatch):
             return {"code": 401, "msg": "Unauthorized"}
 
     monkeypatch.setattr(provider_status, "_get_effective_key", lambda *args: "secret")
+    monkeypatch.setattr("src.utils.app_settings.selected_task_model", lambda *args: "claude-sonnet-5")
     monkeypatch.setattr(provider_status.httpx, "post", lambda *args, **kwargs: Response())
 
     result = provider_status._check_kie()
 
     assert result["status"] == "error"
     assert "Authentification" in result["detail"]
+
+
+@pytest.mark.parametrize(
+    "model,path,response",
+    [
+        ("claude-sonnet-5", "/claude/v1/messages", {"content": [{"type": "text", "text": "Claude"}]}),
+        ("gpt-5-6-luna", "/codex/v1/responses", {"output": [{"type": "message", "content": [{"type": "output_text", "text": "GPT"}]}]}),
+        ("gemini-3-8-flash", "/gemini/v1/models/gemini-3-8-flash:streamGenerateContent", {"candidates": [{"content": {"parts": [{"text": "Gemini"}]}}]}),
+        ("grok-4-6", "/grok/v1/responses", {"output": [{"type": "message", "content": [{"type": "output_text", "text": "Grok"}]}]}),
+    ],
+)
+def test_kie_selected_model_controls_endpoint_and_payload(monkeypatch, model, path, response):
+    request = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return response
+
+    def fake_post(url, **kwargs):
+        request.update(url=url, payload=kwargs["json"])
+        return Response()
+
+    monkeypatch.setattr("src.pipeline.images._provider_accounts_from_db", lambda *args, **kwargs: [{"id": "key-1", "token": "secret"}])
+    monkeypatch.setattr("src.pipeline.images._mark_provider_account", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ai_text.httpx, "post", fake_post)
+    monkeypatch.setattr(ai_text, "log_usage", lambda *args, **kwargs: None)
+
+    text, _ = ai_text._kie_complete("Bonjour", 50, {}, selected_model=model)
+
+    assert request["url"].endswith(path)
+    assert request["payload"].get("model", model) == model
+    assert text

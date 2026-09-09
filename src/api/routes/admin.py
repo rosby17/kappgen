@@ -1885,16 +1885,24 @@ def get_model_catalog(task: str | None = None, admin: User = Depends(get_current
 
 @router.get("/settings/ai-text-provider")
 def get_ai_text_provider(admin: User = Depends(get_current_admin)):
-    from src.utils.app_settings import ai_text_provider_order
+    from src.utils.app_settings import ai_text_provider_order, ai_task_models
     from src.pipeline.ai_providers import configured_map
+    from src.pipeline.model_catalog import MODEL_CATALOG
     configured = configured_map()
     custom_order = [p for p in ai_text_provider_order() if p in AI_TEXT_PROVIDERS]
     full_order = custom_order or AI_TEXT_PROVIDERS
-    return {"order": custom_order, "available": AI_TEXT_PROVIDERS, "effective_order": full_order, "configured": configured}
+    models = ai_task_models().get("text", {})
+    for provider in full_order:
+        available = MODEL_CATALOG.get(provider, {}).get("text", [])
+        if available and provider not in models:
+            models[provider] = available[0]
+    return {"order": custom_order, "available": AI_TEXT_PROVIDERS, "effective_order": full_order, "configured": configured, "models": models}
 
 
 class AiTextProviderPayload(BaseModel):
     order: List[str]
+    provider: str | None = None
+    model: str | None = None
 
 
 @router.patch("/settings/ai-text-provider")
@@ -1905,6 +1913,13 @@ def set_ai_text_provider(payload: AiTextProviderPayload, admin: User = Depends(g
             raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
         if p not in cleaned:
             cleaned.append(p)
-    from src.utils.app_settings import set_ai_text_provider_order
+    from src.utils.app_settings import set_ai_text_provider_order, set_selected_task_model
     set_ai_text_provider_order(cleaned)
-    return {"order": cleaned}
+    if payload.provider and payload.model:
+        from src.pipeline.model_catalog import MODEL_CATALOG
+        allowed = MODEL_CATALOG.get(payload.provider, {}).get("text", [])
+        if payload.provider not in cleaned or payload.model not in allowed:
+            raise HTTPException(status_code=400, detail="Modèle incompatible avec le fournisseur sélectionné.")
+        set_selected_task_model("text", payload.provider, payload.model)
+    from src.utils.app_settings import ai_task_models
+    return {"order": cleaned, "models": ai_task_models().get("text", {})}
