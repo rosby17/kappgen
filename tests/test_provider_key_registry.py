@@ -65,6 +65,25 @@ def test_probe_receives_exact_requested_key(monkeypatch):
     assert keys.check('openai','requested') == ('active',None)
 
 
+def test_refresh_all_persists_each_key_and_aggregates_provider_state(registry, monkeypatch):
+    keys.accounts('openai')
+    db = registry()
+    db.add(HuggingFaceAccount(provider='openai', token='second-key', status='unverified'))
+    db.add(HuggingFaceAccount(provider='groq', token='quota-key', status='unverified'))
+    db.commit(); db.close()
+    monkeypatch.setattr(keys, 'check', lambda provider, token: ('active', None) if provider == 'openai' else ('quota_exhausted', 'Solde insuffisant.'))
+    result = keys.refresh_all()
+    summary = {row['id']: row for row in result['providers']}
+    assert result['checked'] == 3
+    assert summary['openai']['status'] == 'ok'
+    assert summary['groq']['status'] == 'quota_exhausted'
+    assert summary['anthropic']['status'] == 'not_configured'
+    db = registry()
+    assert {row.status for row in db.query(HuggingFaceAccount).filter_by(provider='openai')} == {'active'}
+    assert db.query(HuggingFaceAccount).filter_by(provider='groq').one().status == 'quota_exhausted'
+    db.close()
+
+
 def test_network_failure_is_not_invalid_key(registry):
     with pytest.raises(RuntimeError):
         keys.run('openai',lambda token: (_ for _ in ()).throw(httpx.ConnectError('offline')))

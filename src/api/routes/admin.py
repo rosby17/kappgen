@@ -326,13 +326,9 @@ def admin_stats(admin: User = Depends(get_current_admin), db: Session = Depends(
 
 @router.get("/providers/status")
 def admin_provider_status(admin: User = Depends(get_current_admin)):
-    """Live 'is this provider working right now' check for each external API
-    the pipeline depends on — see src/utils/provider_status.py for exactly
-    what each check does and, importantly, doesn't do (most providers expose
-    no real balance API; this is not a substitute for checking their own
-    dashboards for exact billing)."""
-    from src.utils.provider_status import check_all_providers
-    return {"providers": check_all_providers()}
+    """Latest persisted key state for each provider shown in routing."""
+    from src.utils.provider_keys import provider_summaries
+    return {"providers": provider_summaries()}
 
 
 @router.get("/costs")
@@ -1596,6 +1592,13 @@ def check_hf_account(account_id: str, admin: User = Depends(get_current_admin), 
     db.commit()
     db.refresh(account)
     return account.to_dict()
+
+
+@router.post("/hf-accounts/check-all")
+def check_all_hf_accounts(admin: User = Depends(get_current_admin)):
+    """Run the provider-specific probe for every enabled stored key."""
+    from src.utils.provider_keys import refresh_all
+    return refresh_all()
 
 
 class ProviderKeyUpdate(BaseModel):

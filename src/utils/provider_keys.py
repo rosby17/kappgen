@@ -20,6 +20,7 @@ ENV_NAMES = {
     'izivoice': ['IZIVOICE_API_KEY'], 'ai33pro': ['AI33PRO_API_KEY'],
     'ollama': ['OLLAMA_BASE_URL'], 'openrouter': ['OPENROUTER_API_KEY'],
 }
+MANAGED_PROVIDERS = tuple(provider for provider in ENV_NAMES if provider != 'openrouter')
 _current = ContextVar('provider_key_selection', default={})
 
 
@@ -192,6 +193,71 @@ def check(provider, token):
         return status, None if status == 'active' else detail[:300]
     finally:
         _current.reset(selected)
+
+
+def refresh_all():
+    """Re-check every configured key and return one truthful state per provider.
+
+    This is deliberately an administrator action: a few providers use a tiny
+    real request to prove that their configured model can still be called.
+    """
+    db = SessionLocal()
+    try:
+        for provider in MANAGED_PROVIDERS:
+            ensure_imported(db, provider)
+        db.commit()
+        rows = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.is_enabled == True).all()
+        checked = 0
+        for row in rows:
+            status, detail = check(row.provider, row.token)
+            row.status = status
+            row.last_error = None if status == 'active' else detail
+            row.last_checked_at = datetime.utcnow()
+            checked += 1
+        db.commit()
+        return {'checked': checked, 'providers': provider_summaries(db)}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def provider_summaries(db=None):
+    """Aggregate the latest per-key checks for routing badges.
+
+    Green is emitted only if at least one enabled key completed a successful
+    probe. Grey means no enabled key is configured or has not been checked.
+    Any checked failure is red in the UI.
+    """
+    own_session = db is None
+    db = db or SessionLocal()
+    try:
+        for provider in MANAGED_PROVIDERS:
+            ensure_imported(db, provider)
+        if own_session:
+            db.commit()
+        summaries = []
+        for provider in MANAGED_PROVIDERS:
+            rows = db.query(HuggingFaceAccount).filter(
+                HuggingFaceAccount.provider == provider,
+                HuggingFaceAccount.is_enabled == True,
+            ).all()
+            if not rows:
+                status, detail = 'not_configured', 'Aucune clé active configurée.'
+            elif any(row.status == 'active' for row in rows):
+                status, detail = 'ok', 'Au moins une clé vérifiée peut traiter les requêtes.'
+            elif any(row.status == 'unverified' for row in rows):
+                status, detail = 'not_configured', 'Clé configurée, vérification requise.'
+            elif any(row.status in ('quota_exhausted', 'rate_limited') for row in rows):
+                status, detail = 'quota_exhausted', 'Aucune clé active avec quota disponible.'
+            else:
+                status, detail = 'error', 'Aucune clé active ne répond au contrôle.'
+            summaries.append({'id': provider, 'status': status, 'configured': bool(rows), 'detail': detail})
+        return summaries
+    finally:
+        if own_session:
+            db.close()
 
 
 def sync_environment_file(provider):
