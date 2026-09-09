@@ -42,6 +42,9 @@ class User(Base):
     # already used for email_verified.
     beta_status = Column(String(20), nullable=False, default="pending")
     beta_status_updated_at = Column(DateTime, nullable=True)
+    # Explicit allow-list used only while the platform-wide maintenance gate
+    # is active. It is managed by an administrator from Demandes bêta.
+    maintenance_access = Column(Boolean, nullable=False, default=False)
     email_verified = Column(Boolean, nullable=False, default=False)
     email_verify_token = Column(String(64), nullable=True)
     email_verify_sent_at = Column(DateTime, nullable=True)
@@ -71,6 +74,7 @@ class User(Base):
             "channel_count": len(self.channels) if self.channels else 0,
             "is_admin": self.is_admin,
             "beta_status": self.beta_status,
+            "maintenance_access": self.maintenance_access,
             "email_verified": self.email_verified,
             "free_video_quota_granted": self.free_video_quota_granted,
             "free_videos_used": self.free_videos_used,

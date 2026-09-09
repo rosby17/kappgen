@@ -83,6 +83,32 @@ class BetaDecisionPayload(BaseModel):
     note: Optional[str] = None
 
 
+class MaintenanceAccessPayload(BaseModel):
+    email: str
+    granted: bool = True
+
+
+@router.get("/maintenance-access")
+def list_maintenance_access(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Accounts that remain usable when maintenance mode is enabled."""
+    users = db.query(User).filter(User.maintenance_access.is_(True)).order_by(User.email.asc()).all()
+    return [u.to_dict() for u in users]
+
+
+@router.post("/maintenance-access")
+def set_maintenance_access(payload: MaintenanceAccessPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    email = payload.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="L'adresse email est requise.")
+    user = db.query(User).filter(func.lower(User.email) == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Aucun compte ne correspond à cette adresse email.")
+    user.maintenance_access = payload.granted
+    db.commit()
+    db.refresh(user)
+    return user.to_dict()
+
+
 @router.post("/beta-requests/{user_id}/approve")
 def approve_beta_request(user_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()

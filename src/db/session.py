@@ -120,10 +120,12 @@ def init_db():
             "email_verify_sent_at": "ALTER TABLE users ADD COLUMN email_verify_sent_at TIMESTAMP",
             "beta_status": "ALTER TABLE users ADD COLUMN beta_status VARCHAR(20) DEFAULT 'pending' NOT NULL",
             "beta_status_updated_at": "ALTER TABLE users ADD COLUMN beta_status_updated_at TIMESTAMP",
+            "maintenance_access": "ALTER TABLE users ADD COLUMN maintenance_access BOOLEAN DEFAULT FALSE NOT NULL",
             "external_ai_keys": "ALTER TABLE users ADD COLUMN external_ai_keys JSON",
         }
         is_new_verified_column = "email_verified" not in existing_user_columns
         is_new_beta_column = "beta_status" not in existing_user_columns
+        is_new_maintenance_access_column = "maintenance_access" not in existing_user_columns
         with engine.begin() as conn:
             for col_name, ddl in migrations.items():
                 if col_name not in existing_user_columns:
@@ -142,6 +144,8 @@ def init_db():
                 # Only signups from this point on start "pending".
                 logger.info("Grandfathering existing users as beta_status='approved'.")
                 conn.execute(text("UPDATE users SET beta_status = 'approved'"))
+            if is_new_maintenance_access_column:
+                conn.execute(text("UPDATE users SET maintenance_access = TRUE WHERE LOWER(email) = 'rooseveltmkr@gmail.com'"))
 
     if "channels" in inspector.get_table_names():
         existing_channel_columns = {col["name"] for col in inspector.get_columns("channels")}
@@ -323,17 +327,3 @@ def init_db():
                 if col_name not in existing_ct_columns:
                     logger.info(f"Migrating credit_transactions table: adding {col_name} column.")
                     conn.execute(text(ddl))
-
-    # One-time, idempotent product migration: old flat free-video quotas are
-    # retired and every pre-existing creator receives the same 10,000-credit
-    # welcome pot as a newly registered creator. Purchased/admin credits are
-    # separate pots and remain untouched.
-    from src.utils.billing import migrate_legacy_accounts_to_welcome_credits, topup_welcome_credits_to_20000
-    db = SessionLocal()
-    try:
-        migrate_legacy_accounts_to_welcome_credits(db)
-        # One-time: welcome grant raised 10,000 -> 20,000 (2026-09-07); top up
-        # everyone who already got the old 10,000 with +10,000 more.
-        topup_welcome_credits_to_20000(db)
-    finally:
-        db.close()

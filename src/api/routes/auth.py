@@ -15,7 +15,6 @@ from src.utils.logger import logger
 from src.utils.auth import create_session_token, get_current_user, set_session_cookie, clear_session_cookie
 from src.utils.email import SUPPORTED_LOCALES, detect_locale, send_brevo_email, email_shell, EMAIL_ACCENT
 from src.utils.rate_limit import rate_limit
-from src.utils.billing import grant_welcome_credits
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -27,7 +26,13 @@ def get_session(current_user: User = Depends(get_current_user)):
     # already logged in?" (to show "Accéder à KappGen" instead of the
     # login/signup buttons) without needing the user's id up front — 401 via
     # get_current_user when there's no valid cookie.
-    return {"id": current_user.id, "name": current_user.name}
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "is_admin": current_user.is_admin,
+        "maintenance_access": current_user.maintenance_access,
+    }
 
 _limit_login = rate_limit("login", max_attempts=10, window_seconds=300)
 _limit_register = rate_limit("register", max_attempts=5, window_seconds=3600)
@@ -38,12 +43,9 @@ RESET_CODE_LIFETIME_MINUTES = 10
 RESET_MAX_REQUESTS_PER_HOUR = 5
 RESET_MAX_ATTEMPTS = 5
 RESET_GENERIC_MESSAGE = "Si un compte correspond à cette adresse, un code de vérification vient d'être envoyé."
-# New accounts no longer get a flat "N free videos" quota (free_video_quota_granted
-# stays 0) — they get a spendable credit pot instead (grant_welcome_credits,
-# see registration below), so free usage tracks real cost per video rather
-# than counting a cheap short video the same as an hour-long AI-generated
-# one. Existing accounts created before this change keep whatever quota they
-# already had; this only affects new registrations going forward.
+# New accounts receive no free rendering credits. They can create an account
+# and enter the private-beta queue, but generation starts only after a paid
+# plan or a deliberate admin credit grant.
 
 
 def _auth_response(user: User, response: Response) -> dict:
@@ -115,7 +117,6 @@ def register_user(payload: UserCreate, request: Request, response: Response, db:
     db.add(user)
     db.commit()
     db.refresh(user)
-    grant_welcome_credits(db, user)
 
     try:
         send_welcome_email(user.email, user.name, user.locale)
@@ -407,7 +408,6 @@ def google_auth(payload: GoogleAuthPayload, response: Response, db: Session = De
         db.add(user)
         db.commit()
         db.refresh(user)
-        grant_welcome_credits(db, user)
     elif picture_url and user.picture_url != picture_url:
         user.picture_url = picture_url
         db.commit()
