@@ -129,6 +129,9 @@ def _check_kie():
         elif model.startswith("grok-"):
             path = "/grok/v1/responses"
             payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}
+        elif model.startswith("deepseek-"):
+            path = "/deepseek/v1/chat/completions"
+            payload = {"model": model, "stream": False, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8}
         else:
             path = "/codex/v1/responses"
             payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}

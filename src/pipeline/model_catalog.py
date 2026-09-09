@@ -47,8 +47,6 @@ MODEL_CATALOG = {
             "grok-4-6",
             "grok-4-5",
             "grok-4-3",
-            "deepseek-r1",
-            "deepseek-v3",
         ],
         "image": ["gpt-image-2", "flux-pro", "flux-dev", "flux-schnell"],
         "thumbnail": ["gpt-image-2", "flux-pro", "flux-dev", "flux-schnell"],
