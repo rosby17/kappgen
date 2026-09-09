@@ -76,6 +76,8 @@ CREDIT_INSUFFICIENT_MESSAGE = (
     "La génération automatique est en pause : ton solde de crédits KappGen est épuisé. "
     "Recharge des crédits pour que cette chaîne continue à écrire et publier ses vidéos automatiquement."
 )
+AUTOMATION_CREDIT_FAILURE_STAGE = "Échec — crédits insuffisants"
+AUTOMATION_CREDIT_FAILURE_LIMIT = 3
 
 # Case-insensitive substrings that reliably show up in a paid provider's own
 # error text when the problem is billing/quota/rate-limit related, across
@@ -1577,7 +1579,13 @@ def _channel_local_date_and_seconds(channel: Channel) -> tuple:
     return local_now.strftime("%Y-%m-%d"), seconds_into_day
 
 
-def _record_automation_failure(db, channel: Channel, message: str = SERVICE_UNAVAILABLE_MESSAGE) -> None:
+def _record_automation_failure(
+    db,
+    channel: Channel,
+    message: str = SERVICE_UNAVAILABLE_MESSAGE,
+    *,
+    credit_insufficient: bool = False,
+) -> None:
     """Surfaces a script-generation failure as a visible Échec card instead
     of a server-log-only skip — a creator watching "Nouvelle Vidéo" do
     nothing has no way to tell a real outage apart from the automation
@@ -1592,7 +1600,7 @@ def _record_automation_failure(db, channel: Channel, message: str = SERVICE_UNAV
         .filter(
             Video.channel_id == channel.id,
             Video.status == VideoStatus.FAILED.value,
-            Video.progress_stage == "Échec",
+            Video.progress_stage.like("Échec%"),
         )
         .order_by(Video.created_at.desc())
         .first()
@@ -1601,17 +1609,47 @@ def _record_automation_failure(db, channel: Channel, message: str = SERVICE_UNAV
         last_failure_zone = last_failure.created_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(_channel_zone(channel))
         if last_failure_zone.strftime("%Y-%m-%d") == today_str:
             return
-    db.add(Video(
+    failure = Video(
         channel_id=channel.id,
         input_type="text",
         creation_source="automatic",
         script_text="",
         status=VideoStatus.FAILED.value,
         error_message=message,
-        progress_stage="Échec",
+        progress_stage=AUTOMATION_CREDIT_FAILURE_STAGE if credit_insufficient else "Échec",
         progress_percent=0,
-    ))
+    )
+    db.add(failure)
     db.commit()
+
+    if credit_insufficient:
+        # Count durable, visible automation attempts rather than every
+        # 10-minute worker retry. Any successful/new non-credit automatic
+        # video between them breaks the streak naturally.
+        recent_automatic = (
+            db.query(Video)
+            .filter(Video.channel_id == channel.id, Video.creation_source == "automatic")
+            .order_by(Video.created_at.desc())
+            .limit(AUTOMATION_CREDIT_FAILURE_LIMIT)
+            .all()
+        )
+        if (
+            len(recent_automatic) == AUTOMATION_CREDIT_FAILURE_LIMIT
+            and all(v.status == VideoStatus.FAILED.value and v.progress_stage == AUTOMATION_CREDIT_FAILURE_STAGE
+                    for v in recent_automatic)
+        ):
+            channel.is_active = False
+            failure.error_message = (
+                f"{message} Après {AUTOMATION_CREDIT_FAILURE_LIMIT} échecs automatiques consécutifs "
+                "pour crédits insuffisants, cette chaîne a été désactivée. Recharge tes crédits puis "
+                "réactive la chaîne pour reprendre l’automatisation."
+            )
+            db.commit()
+            logger.warning(
+                "Daily automation disabled channel %s after %s consecutive insufficient-credit failures.",
+                channel.id,
+                AUTOMATION_CREDIT_FAILURE_LIMIT,
+            )
 
 
 def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
@@ -1661,7 +1699,7 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         # balance is genuinely substantial but AI image generation alone
         # (up to ~100 images at ~1000 credits each) dwarfs it.
         message = format_insufficient_credits_message(video_breakdown, get_credit_balance(db, owner), script_cost=script_cost)
-        _record_automation_failure(db, channel, message=message)
+        _record_automation_failure(db, channel, message=message, credit_insufficient=True)
         return None
     try:
         validate_channel_visual_source(channel, db)
