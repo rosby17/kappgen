@@ -93,16 +93,79 @@ TASKS = ("text", "image", "thumbnail", "music", "voice")
 # USD per million tokens. Kept separate from the model ids because the same
 # model may cost differently depending on the reseller/source.
 MODEL_PRICING = {
+    # Anthropic direct ($ / 1M tokens)
     "anthropic:claude-opus-5": {"input": 2.0, "output": 10.0},
+    "anthropic:claude-sonnet-5": {"input": 3.0, "output": 15.0},
+    "anthropic:claude-haiku-5": {"input": 0.80, "output": 4.0},
+
+    # Kie.ai ($ / 1M tokens — discounted reseller rates)
+    "kie:claude-opus-5": {"input": 2.0, "output": 10.0},
+    "kie:claude-sonnet-5": {"input": 1.50, "output": 7.50},
+    "kie:claude-sonnet-4-6": {"input": 1.00, "output": 5.00},
+    "kie:claude-haiku-5": {"input": 0.25, "output": 1.25},
+    "kie:claude-3-7-sonnet": {"input": 1.50, "output": 7.50},
+    "kie:claude-3-5-sonnet": {"input": 1.50, "output": 7.50},
+    "kie:gpt-4o": {"input": 1.25, "output": 5.00},
+    "kie:gpt-4o-mini": {"input": 0.075, "output": 0.30},
+    "kie:o3-mini": {"input": 0.55, "output": 2.20},
+    "kie:deepseek-r1": {"input": 0.28, "output": 1.10},
+    "kie:deepseek-v3": {"input": 0.14, "output": 0.28},
+    "kie:gemini-2.0-flash": {"input": 0.05, "output": 0.20},
+    "kie:gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+    "kie:gpt-image-2": {"output": 0.02},
+    "kie:flux-pro": {"output": 0.04},
+    "kie:flux-dev": {"output": 0.025},
+    "kie:flux-schnell": {"output": 0.015},
+    "kie:suno-v4": {"output": 0.06},
+    "kie:suno-v4.5": {"output": 0.06},
+    "kie:suno-v5": {"output": 0.06},
+
+    # fal.ai
+    "fal:anthropic/claude-opus-5": {"input": 2.0, "output": 10.0},
+    "fal:anthropic/claude-sonnet-5": {"input": 1.50, "output": 7.50},
+    "fal:anthropic/claude-3.7-sonnet": {"input": 3.0, "output": 15.0},
+    "fal:anthropic/claude-3.5-sonnet": {"input": 3.0, "output": 15.0},
+    "fal:openai/gpt-4o": {"input": 2.50, "output": 10.0},
+    "fal:openai/gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "fal:deepseek/deepseek-r1": {"input": 0.55, "output": 2.19},
+    "fal:deepseek/deepseek-v3": {"input": 0.27, "output": 1.10},
+    "fal:meta-llama/llama-3.3-70b-instruct": {"input": 0.40, "output": 0.80},
+
+    # OpenAI direct
     "openai:gpt-6-astra": {"input": 2.80, "output": 14.0},
     "openai:gpt-5.6-sol": {"input": 1.40, "output": 8.40},
     "openai:gpt-5.6-terra": {"input": 0.56, "output": 3.36},
     "openai:gpt-5.6-luna": {"output": 0.336},
+    "openai:gpt-4o": {"input": 2.50, "output": 10.0},
+    "openai:gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "openai:o3-mini": {"input": 1.10, "output": 4.40},
+
+    # DeepSeek direct
+    "deepseek:deepseek-r1": {"input": 0.55, "output": 2.19},
+    "deepseek:deepseek-v3": {"input": 0.27, "output": 1.10},
+    "deepseek:deepseek-v4": {"input": 0.27, "output": 1.10},
+    "deepseek:deepseek-v4-flash": {"input": 0.14, "output": 0.55},
+
+    # Google Gemini
     "gemini:gemini-3.8-flash": {"input": 0.225, "output": 1.125},
     "gemini:gemini-3.7-flash": {"input": 0.225, "output": 1.125},
     "gemini:gemini-3.6-flash": {"input": 0.225, "output": 1.125},
+    "gemini:gemini-3.5-pro": {"input": 1.25, "output": 5.0},
+    "gemini:gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+    "gemini:gemini-1.5-pro": {"input": 1.25, "output": 5.0},
+
+    # Groq (Free Tier)
     "groq:openai/gpt-oss-120b": {"free_tier": True},
+    "groq:llama-4-scout": {"free_tier": True},
+    "groq:qwen3-32b": {"free_tier": True},
+    "groq:llama-3.3-70b-versatile": {"free_tier": True},
+
+    # xAI
     "xai:grok-4-6": {"input": 0.80, "output": 2.40},
+    "xai:grok-4": {"input": 1.00, "output": 3.00},
+    "xai:grok-4-fast": {"input": 0.20, "output": 0.50},
+
+    # Hugging Face
     "huggingface:black-forest-labs/FLUX.1-schnell": {"free_tier": True},
 }
 
