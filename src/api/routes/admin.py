@@ -1510,7 +1510,10 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
 # text-generation chain, ai_text.py — Claude direct and Claude via the
 # kie.ai reseller) reuse the exact same pool/rotation mechanism.
 
-IMAGE_KEY_PROVIDERS = ["huggingface", "fal", "izivoice", "gemini", "anthropic", "kie"]
+IMAGE_KEY_PROVIDERS = [
+    "huggingface", "fal", "gemini", "anthropic", "kie",
+    "openai", "deepseek", "groq", "izivoice", "ai33pro",
+]
 
 
 @router.get("/hf-accounts")
@@ -1794,6 +1797,15 @@ def set_render_concurrency(payload: RenderConcurrencyPayload, admin: User = Depe
 # (src/pipeline/ai_providers.py) so a provider added there shows up in this
 # picker — and in every fallback chain — without editing anything here.
 from src.pipeline.ai_providers import ALL_IDS as AI_TEXT_PROVIDERS
+
+
+@router.get("/settings/model-catalog")
+def get_model_catalog(task: str | None = None, admin: User = Depends(get_current_admin)):
+    """Return the model catalog grouped by provider and generation task."""
+    from src.pipeline.model_catalog import catalog_for, TASKS
+    if task is not None and task not in TASKS:
+        raise HTTPException(status_code=400, detail=f"Tâche invalide : {task}")
+    return {"task": task, "tasks": TASKS, "providers": catalog_for(task)}
 
 
 @router.get("/settings/ai-text-provider")
