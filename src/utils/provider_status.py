@@ -183,7 +183,24 @@ def _check_ai33pro():
     key = _get_effective_key("ai33pro", AI33PRO_API_KEY)
     if not key:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
-    return {"configured": True, "status": "unknown", "detail": "Clé présente."}
+    try:
+        resp = httpx.get(
+            f"{AI33PRO_BASE_URL}/v1/shared-voices",
+            headers={"xi-api-key": key},
+            timeout=PROBE_TIMEOUT,
+        )
+        if resp.status_code in (402, 429) or "credits" in resp.text.lower():
+            return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits insuffisants sur le compte ai33.pro."}
+        if resp.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+        resp.raise_for_status()
+        return {"configured": True, "status": "ok", "detail": "Clé valide et opérationnelle."}
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (402, 429) or "credits" in exc.response.text.lower():
+            return {"configured": True, "status": "quota_exhausted", "detail": "Solde/crédits épuisés sur ai33.pro."}
+        return {"configured": True, "status": "error", "detail": f"Erreur ai33.pro ({exc.response.status_code})."}
+    except Exception as exc:
+        return {"configured": True, "status": "error", "detail": f"ai33.pro injoignable : {exc}"}
 
 
 def _check_xai():

@@ -61,7 +61,7 @@ IZIVOICE_VOICE_ID = os.getenv("IZIVOICE_VOICE_ID", "")  # optional: auto-picked 
 # src/pipeline/ai33_provider.py. Admin picks which provider is actually used
 # per src/utils/app_settings.py's voiceover_provider_order(); this being set
 # only makes ai33pro selectable, it does not switch anything by itself.
-AI33PRO_API_KEY = os.getenv("AI33PRO_API_KEY", "")
+AI33PRO_API_KEY = os.getenv("AI33PRO_API_KEY") or os.getenv("AI_IMAGE_PROVIDER_API_KEY", "")
 AI33PRO_BASE_URL = os.getenv("AI33PRO_BASE_URL", "https://api.ai33.pro")
 # Product policy: video renders are sequential FIFO. Only an explicit admin
 # override may move a video ahead of older work; a creator's plan never changes
