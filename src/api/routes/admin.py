@@ -1512,7 +1512,7 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
 
 IMAGE_KEY_PROVIDERS = [
     "huggingface", "fal", "gemini", "anthropic", "kie",
-    "openai", "deepseek", "groq", "izivoice", "ai33pro",
+    "openai", "deepseek", "groq", "xai", "izivoice", "ai33pro",
 ]
 
 
@@ -1533,7 +1533,7 @@ def list_hf_accounts(provider: str = "huggingface", admin: User = Depends(get_cu
     env_names = {
         "huggingface": "HUGGINGFACE_API_KEY", "fal": "FAL_API_KEY", "gemini": "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY", "kie": "KIE_API_KEY", "openai": "OPENAI_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY", "groq": "GROQ_API_KEY", "izivoice": "IZIVOICE_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY", "groq": "GROQ_API_KEY", "xai": "XAI_API_KEY", "izivoice": "IZIVOICE_API_KEY",
         "ai33pro": "AI33PRO_API_KEY",
     }
     env_key = getattr(config, env_names.get(provider, ""), "") if env_names.get(provider) else ""

@@ -31,6 +31,7 @@ MODEL_CATALOG = {
     },
     "deepseek": {"label": "DeepSeek", "text": ["deepseek-v4-flash", "deepseek-v4" ]},
     "groq": {"label": "Groq (gratuit)", "text": ["openai/gpt-oss-120b", "llama-4-scout", "qwen3-32b"]},
+    "xai": {"label": "xAI", "text": ["grok-4-6", "grok-4", "grok-4-fast"]},
     "gemini": {
         "label": "Google Gemini (gratuit)",
         "text": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-pro"],
@@ -55,6 +56,7 @@ MODEL_PRICING = {
     "gemini:gemini-3.7-flash": {"input": 0.225, "output": 1.125},
     "gemini:gemini-3.6-flash": {"input": 0.225, "output": 1.125},
     "groq:openai/gpt-oss-120b": {"free_tier": True},
+    "xai:grok-4-6": {"input": 0.80, "output": 2.40},
 }
 
 

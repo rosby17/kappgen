@@ -190,6 +190,8 @@ KIE_API_KEY = os.getenv("KIE_API_KEY", "")
 KIE_BASE_URL = os.getenv("KIE_BASE_URL", "https://api.kie.ai")
 KIE_CLAUDE_MODEL = os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-4-6")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()] or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
 

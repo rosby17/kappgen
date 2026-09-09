@@ -13,7 +13,7 @@ from typing import Optional
 from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY, GEMINI_API_KEY, GEMINI_API_KEYS,
-    KIE_API_KEY, KIE_BASE_URL, KIE_CLAUDE_MODEL,
+    KIE_API_KEY, KIE_BASE_URL, KIE_CLAUDE_MODEL, XAI_API_KEY, XAI_BASE_URL,
 )
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, estimate_kie_claude_cost, PRICING
@@ -217,6 +217,39 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
 
 
 DEEPSEEK_MODEL = "deepseek-v4-flash"
+
+XAI_MODEL = "grok-4-6"
+
+
+def _xai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
+    accounts = _provider_accounts_from_db("xai", [XAI_API_KEY] if XAI_API_KEY else [])
+    last_exc = None
+    for account in accounts:
+        try:
+            resp = httpx.post(
+                f"{XAI_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
+                json={"model": XAI_MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+            if not text:
+                raise RuntimeError("xAI text generation returned no text content.")
+            usage = data.get("usage") or {}
+            in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+            cost_usd = in_tok / 1_000_000 * 0.80 + out_tok / 1_000_000 * 2.40
+            _mark_provider_account(account["id"], "active")
+            log_usage("xai", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens", cost_usd,
+                      user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+                      meta={"model": XAI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok})
+            return text.strip(), cost_usd
+        except Exception as exc:
+            last_exc = exc
+            _mark_provider_account(account["id"], _classify_key_failure(exc), str(exc)[:300])
+    raise RuntimeError(f"All xAI keys failed: {last_exc}")
 
 
 def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
@@ -482,6 +515,7 @@ def generate_text(
         "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
         "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),
         "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
+        "xai": lambda: _xai_complete(prompt, max_tokens, usage_ctx),
         "gemini": lambda: _gemini_complete(prompt, max_tokens, usage_ctx),
     }
     from src.pipeline.ai_providers import ordered_ids
