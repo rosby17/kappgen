@@ -557,9 +557,10 @@ def _generate_with_kie_image(prompt: str, output_path: Path, client: httpx.Clien
 
 
 def _provider_accounts_from_db(provider: str, env_fallback_keys: Optional[List[str]] = None) -> List[Any]:
-    """Admin-managed key pool for one image-generation provider
-    (src/api/routes/admin.py's image-provider-keys routes) — "huggingface",
-    "fal", or "izivoice". Ordered by last_used_at ascending (nulls first) so
+    """Admin-managed key pool for one provider (src/api/routes/admin.py's
+    hf-accounts routes / IMAGE_KEY_PROVIDERS) — "huggingface", "fal",
+    "izivoice", "gemini" (images) and "anthropic", "kie" (text generation,
+    see ai_text.py). Ordered by last_used_at ascending (nulls first) so
     load spreads evenly across keys instead of hammering whichever sorts
     first. Falls back to `env_fallback_keys` (wrapped as plain dicts, no id)
     only if the pool is empty for this provider, so an existing

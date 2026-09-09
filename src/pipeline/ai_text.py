@@ -33,13 +33,30 @@ _OPENROUTER_LEAKED_REASONING_PREFIXES = ("okay,", "let me", "i need to", "the us
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
 
-def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dict, enable_web_search: bool = False, api_key_override: Optional[str] = None) -> tuple:
-    import anthropic
+def _classify_key_failure(exc: Exception) -> str:
+    """"invalid" (bad/revoked key — auth failure) vs "quota_exhausted" (out
+    of credits/rate-limited) for the admin pool's live status column. Checked
+    by status_code first (both the Anthropic SDK's APIStatusError and a
+    plain httpx.HTTPStatusError expose one); falls back to sniffing the
+    message for providers/exceptions that don't."""
+    status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code in (401, 403):
+        return "invalid"
+    if status_code in (402, 429):
+        return "quota_exhausted"
+    text = str(exc).lower()
+    if any(m in text for m in ("insufficient_quota", "credit_balance", "429", "rate limit", "quota")):
+        return "quota_exhausted"
+    return "invalid"
 
-    api_key = api_key_override or ANTHROPIC_API_KEY
-    if not api_key:
+
+def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dict, enable_web_search: bool = False) -> tuple:
+    import anthropic
+    from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
+
+    accounts = _provider_accounts_from_db("anthropic", env_fallback_keys=[ANTHROPIC_API_KEY] if ANTHROPIC_API_KEY else [])
+    if not accounts:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured on the server.")
-    client = anthropic.Anthropic(api_key=api_key)
     # Anthropic's server-side web_search tool runs the search(es) itself and
     # feeds the results back into the same response — no client-side tool
     # loop needed, just pass the tool and read the final text block(s). Only
@@ -48,56 +65,56 @@ def _anthropic_complete(prompt: str, max_tokens: int, model: str, usage_ctx: dic
     kwargs = {"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
     if enable_web_search:
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
-    # Retried once, in-process, before ever falling through to fal.ai/OpenAI:
-    # an empty response (no text block at all — no exception, no error
-    # status, just nothing to read) has been observed in production for a
-    # specific recurring prompt shape (a long "don't repeat these past
-    # titles" list on a health-niche script) — a one-off hiccup on Anthropic's
-    # end that a plain retry of the exact same request has cleared every
-    # time it's been seen, rather than a real, repeatable rejection of the
-    # prompt's content. Logs stop_reason on the empty attempt for whichever
-    # case isn't a one-off shows up later.
-    response = client.messages.create(**kwargs)
-    if not any(block.type == "text" for block in response.content):
-        logger.warning(f"Anthropic returned no text content (stop_reason={response.stop_reason!r}, operation={usage_ctx.get('operation')}) — retrying once.")
-        response = client.messages.create(**kwargs)
-    in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
-    # Web searches are billed separately by Anthropic per-use, on top of
-    # tokens — the SDK reports the real count on usage.server_tool_use when
-    # the tool actually ran; falling back to counting the server_tool_use
-    # content blocks themselves covers older SDK versions that don't expose
-    # that usage field yet. Either way, a real charge on this call must
-    # always be reflected in what the creator is billed — never left out.
-    web_search_uses = getattr(getattr(response.usage, "server_tool_use", None), "web_search_requests", None)
-    if web_search_uses is None:
-        web_search_uses = sum(1 for block in response.content if getattr(block, "type", None) == "server_tool_use" and getattr(block, "name", None) == "web_search")
-    real_cost_usd = estimate_anthropic_cost(in_tok, out_tok, web_search_uses=web_search_uses)
-    # A personal key means the creator is already paying Anthropic directly
-    # for this call — billed to them here too, it would be double-billing,
-    # and counting it on KappGen's own "Coûts" page would overstate what the
-    # platform actually spent. Zeroed for both, tagged byok so it's still
-    # visible which calls this was for.
-    cost_usd = 0.0 if api_key_override else real_cost_usd
-    log_usage(
-        "anthropic", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
-        cost_usd,
-        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok, "web_search": enable_web_search, "web_search_uses": web_search_uses, "byok": bool(api_key_override)},
-    )
-    # With tools enabled, content interleaves server_tool_use/web_search_tool_result
-    # blocks with the final text — collect every text block instead of
-    # returning on the first one, and use the last of them (Claude's actual
-    # answer, after any search commentary).
-    text_blocks = [block.text for block in response.content if block.type == "text"]
-    if text_blocks:
-        return text_blocks[-1].strip(), cost_usd
-    raise RuntimeError("Anthropic text generation returned no text content.")
+    last_exc = None
+    for account in accounts:
+        client = anthropic.Anthropic(api_key=account["token"])
+        try:
+            # Retried once, in-process, before falling to the next key: an
+            # empty response (no text block at all — no exception, no error
+            # status, just nothing to read) has been observed in production
+            # for a specific recurring prompt shape — a one-off hiccup that a
+            # plain retry of the exact same request has cleared every time.
+            response = client.messages.create(**kwargs)
+            if not any(block.type == "text" for block in response.content):
+                logger.warning(f"Anthropic returned no text content (stop_reason={response.stop_reason!r}, operation={usage_ctx.get('operation')}) — retrying once.")
+                response = client.messages.create(**kwargs)
+            in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
+            # Web searches are billed separately by Anthropic per-use, on top
+            # of tokens — the SDK reports the real count on
+            # usage.server_tool_use when the tool actually ran; falling back
+            # to counting the server_tool_use content blocks themselves
+            # covers older SDK versions that don't expose that usage field.
+            web_search_uses = getattr(getattr(response.usage, "server_tool_use", None), "web_search_requests", None)
+            if web_search_uses is None:
+                web_search_uses = sum(1 for block in response.content if getattr(block, "type", None) == "server_tool_use" and getattr(block, "name", None) == "web_search")
+            cost_usd = estimate_anthropic_cost(in_tok, out_tok, web_search_uses=web_search_uses)
+            log_usage(
+                "anthropic", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+                cost_usd,
+                user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+                meta={"model": model, "input_tokens": in_tok, "output_tokens": out_tok, "web_search": enable_web_search, "web_search_uses": web_search_uses},
+            )
+            # With tools enabled, content interleaves server_tool_use/
+            # web_search_tool_result blocks with the final text — collect
+            # every text block instead of returning on the first one, and
+            # use the last of them (Claude's actual answer, after any search
+            # commentary).
+            text_blocks = [block.text for block in response.content if block.type == "text"]
+            if not text_blocks:
+                raise RuntimeError("Anthropic text generation returned no text content.")
+            _mark_provider_account(account["id"], "active")
+            return text_blocks[-1].strip(), cost_usd
+        except Exception as exc:  # noqa: BLE001 - trying the next pooled key is the point
+            _mark_provider_account(account["id"], _classify_key_failure(exc), str(exc)[:300])
+            last_exc = exc
+            continue
+    raise RuntimeError(f"All Anthropic keys failed: {last_exc}")
 
 
-def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_override: Optional[str] = None) -> tuple:
-    """Claude through kie.ai's reseller proxy — a cheaper, admin-opt-in
-    alternative to calling Anthropic directly (see src/pipeline/ai_providers.py).
-    This is NOT the Anthropic API: kie.ai exposes its own wrapper
+def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    """Claude through kie.ai's reseller proxy — a cheaper alternative to
+    calling Anthropic directly (see src/pipeline/ai_providers.py). This is
+    NOT the Anthropic API: kie.ai exposes its own wrapper
     (POST /claude/v1/messages) with a much smaller surface — no `system`
     prompt, no extended-thinking effort controls, no prompt caching,
     max_tokens capped low by default. Deliberately pinned to
@@ -105,49 +122,58 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_overrid
     whatever kie.ai lists as newest) since that's the admin's own choice
     of which Claude generation to route here.
     """
-    api_key = api_key_override or KIE_API_KEY
-    if not api_key:
+    from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
+
+    accounts = _provider_accounts_from_db("kie", env_fallback_keys=[KIE_API_KEY] if KIE_API_KEY else [])
+    if not accounts:
         raise RuntimeError("KIE_API_KEY is not configured on the server.")
-    resp = httpx.post(
-        f"{KIE_BASE_URL}/claude/v1/messages",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": KIE_CLAUDE_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "max_tokens": max_tokens,
-        },
-        timeout=120.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    text_blocks = [block.get("text", "") for block in (data.get("content") or []) if block.get("type") == "text"]
-    text = "\n".join(t for t in text_blocks if t).strip()
-    if not text:
-        raise RuntimeError("Kie.ai (Claude) text generation returned no text content.")
-    usage = data.get("usage") or {}
-    in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
-    # kie.ai reports its own credits_consumed too, but the per-token
-    # estimate keeps this provider comparable to every other row on the
-    # admin "Coûts" page (all of which are token-based). Zeroed for a
-    # personal key — see the matching comment in _anthropic_complete.
-    cost_usd = 0.0 if api_key_override else estimate_kie_claude_cost(in_tok, out_tok)
-    log_usage(
-        "kie_claude", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
-        cost_usd,
-        user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": KIE_CLAUDE_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "credits_consumed": data.get("credits_consumed"), "byok": bool(api_key_override)},
-    )
-    return text, cost_usd
+    last_exc = None
+    for account in accounts:
+        try:
+            resp = httpx.post(
+                f"{KIE_BASE_URL}/claude/v1/messages",
+                headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
+                json={
+                    "model": KIE_CLAUDE_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "max_tokens": max_tokens,
+                },
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text_blocks = [block.get("text", "") for block in (data.get("content") or []) if block.get("type") == "text"]
+            text = "\n".join(t for t in text_blocks if t).strip()
+            if not text:
+                raise RuntimeError("Kie.ai (Claude) text generation returned no text content.")
+            usage = data.get("usage") or {}
+            in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+            # kie.ai reports its own credits_consumed too, but the per-token
+            # estimate keeps this provider comparable to every other row on
+            # the admin "Coûts" page (all of which are token-based).
+            cost_usd = estimate_kie_claude_cost(in_tok, out_tok)
+            log_usage(
+                "kie_claude", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+                cost_usd,
+                user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+                meta={"model": KIE_CLAUDE_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "credits_consumed": data.get("credits_consumed")},
+            )
+            _mark_provider_account(account["id"], "active")
+            return text, cost_usd
+        except Exception as exc:  # noqa: BLE001 - trying the next pooled key is the point
+            _mark_provider_account(account["id"], _classify_key_failure(exc), str(exc)[:300])
+            last_exc = exc
+            continue
+    raise RuntimeError(f"All Kie.ai keys failed: {last_exc}")
 
 
-def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_override: Optional[str] = None) -> tuple:
-    api_key = api_key_override or FAL_API_KEY
-    if not api_key:
+def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    if not FAL_API_KEY:
         raise RuntimeError("FAL_API_KEY is not configured on the server.")
     resp = httpx.post(
         "https://fal.run/openrouter/router",
-        headers={"Authorization": f"Key {api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"},
         json={"prompt": prompt, "model": "anthropic/claude-sonnet-4.5", "max_tokens": max_tokens},
         timeout=120.0,
     )
@@ -155,22 +181,21 @@ def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_overrid
     output = (resp.json() or {}).get("output")
     if not output:
         raise RuntimeError("fal.ai text generation returned no output.")
-    cost_usd = 0.0 if api_key_override else PRICING["fal_text"]["flat_per_request"]
+    cost_usd = PRICING["fal_text"]["flat_per_request"]
     log_usage(
         "fal_text", usage_ctx.get("operation", "text"), 1, "request", cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": "anthropic/claude-sonnet-4.5 (via fal.ai fallback)", "byok": bool(api_key_override)},
+        meta={"model": "anthropic/claude-sonnet-4.5 (via fal.ai fallback)"},
     )
     return output.strip(), cost_usd
 
 
-def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_override: Optional[str] = None) -> tuple:
-    api_key = api_key_override or OPENAI_API_KEY
-    if not api_key:
+def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
     resp = httpx.post(
         "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
         json={"model": "gpt-4o", "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
         timeout=120.0,
     )
@@ -181,12 +206,12 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_over
         raise RuntimeError("OpenAI text generation returned no text content.")
     usage = data.get("usage") or {}
     in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
-    cost_usd = 0.0 if api_key_override else estimate_openai_cost(in_tok, out_tok)
+    cost_usd = estimate_openai_cost(in_tok, out_tok)
     log_usage(
         "openai", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": "gpt-4o (fallback)", "input_tokens": in_tok, "output_tokens": out_tok, "byok": bool(api_key_override)},
+        meta={"model": "gpt-4o (fallback)", "input_tokens": in_tok, "output_tokens": out_tok},
     )
     return text.strip(), cost_usd
 
@@ -194,13 +219,12 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_over
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
-def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_override: Optional[str] = None) -> tuple:
-    api_key = api_key_override or DEEPSEEK_API_KEY
-    if not api_key:
+def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured on the server.")
     resp = httpx.post(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
         json={"model": DEEPSEEK_MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
         timeout=120.0,
     )
@@ -211,12 +235,12 @@ def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict, api_key_ov
         raise RuntimeError("DeepSeek text generation returned no text content.")
     usage = data.get("usage") or {}
     in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
-    cost_usd = 0.0 if api_key_override else estimate_deepseek_cost(in_tok, out_tok)
+    cost_usd = estimate_deepseek_cost(in_tok, out_tok)
     log_usage(
         "deepseek", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": DEEPSEEK_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "byok": bool(api_key_override)},
+        meta={"model": DEEPSEEK_MODEL, "input_tokens": in_tok, "output_tokens": out_tok},
     )
     return text.strip(), cost_usd
 
@@ -451,39 +475,12 @@ def generate_text(
     first (or isn't available) the call still succeeds, just without live
     search results."""
     usage_ctx = {"operation": operation, "user_id": user_id, "channel_id": channel_id, "video_id": video_id}
-    # Bring-your-own-key: if this call is attributable to a creator who has
-    # connected (and enabled) their own key for one of these providers (see
-    # Settings > Clés API / src/utils/credentials.get_user_provider_key),
-    # that key is used in place of the platform's for that provider's slot
-    # in the chain — free for their KappGen credits (see the byok handling
-    # in each _xxx_complete above), and it also means a provider the admin
-    # never configured a platform key for at all still works for this one
-    # creator specifically. A lookup failure here (DB hiccup) must never
-    # break generation — falls back to "no personal keys" silently.
-    byok = {}
-    if user_id:
-        try:
-            from src.db.session import SessionLocal
-            from src.db.models import User
-            from src.utils.credentials import get_user_provider_key
-            db = SessionLocal()
-            try:
-                owner = db.query(User).filter(User.id == user_id).first()
-                if owner and owner.external_ai_keys:
-                    for pid in ("anthropic", "kie", "deepseek", "fal", "openai"):
-                        key = get_user_provider_key(owner, pid)
-                        if key:
-                            byok[pid] = key
-            finally:
-                db.close()
-        except Exception as exc:  # noqa: BLE001 - a personal-key lookup is a nice-to-have, never a hard dependency
-            logger.warning(f"[ai_text] could not look up BYOK for user {user_id}: {exc}")
     providers = {
-        "anthropic": lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search, api_key_override=byok.get("anthropic")),
-        "kie": lambda: _kie_complete(prompt, max_tokens, usage_ctx, api_key_override=byok.get("kie")),
-        "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx, api_key_override=byok.get("deepseek")),
-        "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx, api_key_override=byok.get("fal")),
-        "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx, api_key_override=byok.get("openai")),
+        "anthropic": lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search),
+        "kie": lambda: _kie_complete(prompt, max_tokens, usage_ctx),
+        "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx),
+        "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
+        "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),
         "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
         "gemini": lambda: _gemini_complete(prompt, max_tokens, usage_ctx),
     }

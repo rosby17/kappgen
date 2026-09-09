@@ -40,29 +40,3 @@ def izivoice_key_for_user(user) -> str:
         return decrypt_credential(getattr(user, "izivoice_api_key_encrypted", None)) or IZIVOICE_API_KEY
     except RuntimeError:
         return IZIVOICE_API_KEY
-
-
-def key_prefix(raw_key: str) -> str:
-    """Short, non-secret preview shown in the UI once a key is saved (e.g.
-    'sk-ant-...I9kQ') — enough to recognize which key is connected without
-    ever displaying (or re-fetching) the real value."""
-    raw_key = (raw_key or "").strip()
-    if len(raw_key) <= 12:
-        return raw_key[:4] + "…" if raw_key else ""
-    return f"{raw_key[:8]}…{raw_key[-4:]}"
-
-
-def get_user_provider_key(user, provider_id: str) -> Optional[str]:
-    """The user's own connected+enabled key for one text-generation provider
-    (see src/pipeline/ai_providers.py), decrypted — or None if they haven't
-    connected one, disabled it, or it can no longer be decrypted (encryption
-    seed rotated: same fail-open-to-platform behavior as izivoice_key_for_user,
-    never a hard error)."""
-    entries = getattr(user, "external_ai_keys", None) or {}
-    entry = entries.get(provider_id)
-    if not entry or not entry.get("enabled", True) or not entry.get("encrypted"):
-        return None
-    try:
-        return decrypt_credential(entry["encrypted"])
-    except RuntimeError:
-        return None

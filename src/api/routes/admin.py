@@ -1500,15 +1500,17 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
 
 
 # --- Hugging Face free-tier image generation accounts ------------------------
-# Admin-managed key pools for the image-generation providers (see
+# Admin-managed key pools — originally image-generation-only (see
 # src/pipeline/images.py's _provider_accounts_from_db/_generate_with_key_pool)
 # — lets new keys keep being added over time without a redeploy, and shows
 # which ones are currently working vs quota-exhausted/invalid. Originally
-# Hugging-Face-only ("hf-accounts"); generalized to fal/Izivoice too via the
-# `provider` column, kept under the old URL prefix since the frontend and
-# any saved links already point at it.
+# Hugging-Face-only ("hf-accounts"); generalized to fal/Izivoice/Gemini via
+# the `provider` column, kept under the old URL prefix since the frontend and
+# any saved links already point at it. "anthropic"/"kie" (both used by the
+# text-generation chain, ai_text.py — Claude direct and Claude via the
+# kie.ai reseller) reuse the exact same pool/rotation mechanism.
 
-IMAGE_KEY_PROVIDERS = ["huggingface", "fal", "izivoice", "gemini"]
+IMAGE_KEY_PROVIDERS = ["huggingface", "fal", "izivoice", "gemini", "anthropic", "kie"]
 
 
 @router.get("/hf-accounts")
