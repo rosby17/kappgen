@@ -267,7 +267,7 @@ def _check_ollama():
         probe = httpx.post(
             f"{base_url}/api/chat", headers=headers,
             json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "Hi"}],
-                  "options": {"num_predict": 8}, "stream": False, "think": False}, timeout=60.0,
+                  "options": {"num_predict": 1}, "stream": False, "think": False}, timeout=180.0,
         )
         probe.raise_for_status()
         content = (probe.json().get("message") or {}).get("content")
