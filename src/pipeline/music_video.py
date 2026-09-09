@@ -59,6 +59,9 @@ def _generate_audio_track(
     lyrics: Optional[str] = None, title: Optional[str] = None, vocal_gender: Optional[str] = None,
 ) -> Path:
     output_path = output_dir / f"track_{index}.mp3"
+    if output_path.exists() and output_path.stat().st_size > 1000:
+        logger.info("Reusing existing music track from disk: %s", output_path)
+        return output_path
     if user_id:
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_MUSIC_CREDITS
         if not debit_izivoice_usage_by_user_id(user_id, IZIVOICE_MUSIC_CREDITS, "music_video_generation", video_id=video_id):

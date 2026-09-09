@@ -514,16 +514,12 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # then gets drawn on top of that, producing a visibly duplicated title.
     # Repeating and escalating the instruction cuts this down noticeably.
     #
-    # The old suffix here ("cinematic, high detail, dramatic lighting,
-    # eye-catching") was generic boilerplate stacked on top of an already
-    # detailed style_prompt (see propose_thumbnail_concept) — those buzzwords
-    # are exactly what makes different niches' AI backgrounds converge on the
-    # same generic look. When a real concept exists, its own composition
-    # instruction (now part of style_prompt) is trusted instead; the
-    # boilerplate only kicks in as a bare-minimum floor for channels that
-    # never generated one (style_prompt empty/legacy).
-    prompt = build_thumbnail_background_prompt(text, niche, thumbnail_style, channel.image_style or {})
     ai_path = destination.with_suffix(".ai.jpg")
+    if ai_path.exists() and ai_path.stat().st_size > 1000:
+        logger.info("Reusing existing AI thumbnail background from disk: %s", ai_path)
+        return ai_path, None
+
+    prompt = build_thumbnail_background_prompt(text, niche, thumbnail_style, channel.image_style or {})
 
     # Feed the creator's own uploaded thumbnail references straight into the
     # image model as conditioning images, not just as text (via style_prompt
@@ -559,19 +555,27 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # — it just falls through to generate_thumbnail's own video-frame-grab
     # fallback below, same as any other AI-generation failure. Skipped
     # entirely in free-only mode since no paid call can ever happen.
+    paid_debited = False
     if channel.user_id and allow_paid_fallback:
         from src.utils.billing import debit_izivoice_usage_by_user_id
         from src.utils.billing import THUMBNAIL_CREDITS
         if not debit_izivoice_usage_by_user_id(channel.user_id, THUMBNAIL_CREDITS, "ai_thumbnail_generation", video_id=video_id):
             raise RuntimeError(f"Insufficient KappGen credit balance for AI thumbnail generation (user {channel.user_id}).")
+        paid_debited = True
 
     # Unlike the bulk per-scene image generation (many images, needs to fail fast to
     # avoid stalling the whole render), this is the single standalone call for the
     # thumbnail — the one image viewers judge the video by — so it's worth waiting
     # longer for it rather than falling back to a plain video-frame grab.
-    with httpx.Client(timeout=120.0) as client:
-        _, provider_used = generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths, provider_order=provider_order)
-    return ai_path, provider_used
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            _, provider_used = generate_thumbnail_image(prompt, ai_path, client, reference_image_paths=reference_paths, provider_order=provider_order)
+        return ai_path, provider_used
+    except Exception as exc:
+        if paid_debited and channel.user_id:
+            from src.utils.billing import refund_izivoice_usage_by_user_id, THUMBNAIL_CREDITS
+            refund_izivoice_usage_by_user_id(channel.user_id, THUMBNAIL_CREDITS, "ai_thumbnail_generation", video_id=video_id)
+        raise
 
 
 def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=None, video_id: Optional[str] = None, strict: bool = False) -> tuple:
@@ -588,8 +592,12 @@ def generate_thumbnail(video_path: Path, destination: Path, text: str, channel=N
     care whether AI was used at all (vs. a plain frame grab) can keep
     ignoring the third value; the manual-regeneration cap in videos.py needs
     it to tell a free Hugging Face success apart from a paid one."""
-    text = clean_thumbnail_headline(text)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and destination.stat().st_size > 1000:
+        logger.info("Reusing existing final thumbnail from disk: %s", destination)
+        return destination, True, None
+
+    text = clean_thumbnail_headline(text)
     frame_path = destination.with_suffix(".frame.jpg")
     image = None
     ai_success = False

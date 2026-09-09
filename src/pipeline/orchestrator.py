@@ -183,7 +183,7 @@ def run_video_pipeline(
     raw_vo_path = source_dir / "voiceover.mp3"
     transcript_json_path = source_dir / "transcript.json"
 
-    if raw_vo_path.exists() and transcript_json_path.exists():
+    if raw_vo_path.exists() and raw_vo_path.stat().st_size > 1000:
         # output_dir is deterministic per video (see queue_runner.py), so a
         # video re-queued after being interrupted mid-render (server restart,
         # deploy killing the worker, etc.) lands right back in the same
@@ -191,9 +191,30 @@ def run_video_pipeline(
         # transcription STT calls are the most expensive, most re-billed step
         # of a restart — reuse what's already on disk instead of paying for
         # and redoing them every single retry.
-        logger.info("Step 1/7: Reusing voiceover + transcript from a previous (interrupted) attempt instead of regenerating.")
-        progress("Reprise : voix off déjà générée", 8)
-        transcript_info = json.loads(transcript_json_path.read_text(encoding="utf-8"))
+        if transcript_json_path.exists():
+            logger.info("Step 1/7: Reusing voiceover + transcript from a previous attempt instead of regenerating.")
+            progress("Reprise : voix off déjà générée", 8)
+            try:
+                transcript_info = json.loads(transcript_json_path.read_text(encoding="utf-8"))
+            except Exception:
+                transcript_info = None
+        else:
+            transcript_info = None
+
+        if not transcript_info or not transcript_info.get("duration"):
+            logger.info("Step 1/7: Reusing voiceover audio from previous attempt; generating transcript only.")
+            progress("Reprise : voix off existante, alignement...", 8)
+            if transcribe_audio:
+                transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Vidéo sans titre", api_key=izivoice_api_key, user_id=channel_config.get("user_id"), video_id=video_id, progress_callback=progress)
+            else:
+                duration = get_audio_duration(raw_vo_path)
+                fallback_text = script_text or "Vidéo sans titre"
+                transcript_info = {
+                    "text": fallback_text,
+                    "duration": duration,
+                    "words": synthetic_word_timings(fallback_text, duration),
+                }
+            transcript_json_path.write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
     elif pre_recorded_audio_path and pre_recorded_audio_path.exists():
         progress("Préparation et transcription de l’audio", 8)
         logger.info(f"Step 1/7: Using pre-recorded audio file: {pre_recorded_audio_path}")
@@ -220,12 +241,12 @@ def run_video_pipeline(
                 "duration": duration,
                 "words": synthetic_word_timings(fallback_text, duration),
             }
+        transcript_json_path.write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
     else:
         progress("Génération de la voix off", 8)
         logger.info("Step 1/7: Generating voiceover audio via TTS...")
         _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path, voice_id=voice_id, api_key=izivoice_api_key, voice_settings=voice_settings, user_id=channel_config.get("user_id"), transcribe=transcribe_audio, video_id=video_id, progress_callback=progress)
-
-    (source_dir / "transcript.json").write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
+        transcript_json_path.write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
     
     total_duration = transcript_info.get("duration", 10.0)
     

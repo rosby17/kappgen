@@ -1,5 +1,6 @@
 import re
 import time
+import json
 import threading
 import subprocess
 from pathlib import Path
@@ -308,6 +309,16 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     files (10min+/3h videos) to stay under the API's per-request size limit,
     and stitching word-level timing back together with per-chunk offsets.
     """
+    transcript_file = audio_path.parent / "transcript.json"
+    if transcript_file.exists():
+        try:
+            cached_transcript = json.loads(transcript_file.read_text(encoding="utf-8"))
+            if cached_transcript.get("duration") and cached_transcript.get("words"):
+                logger.info("Reusing existing transcript.json from disk (skipping STT call and STT debit)")
+                return cached_transcript
+        except Exception:
+            pass
+
     total_duration = get_audio_duration(audio_path)
     if user_id:
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
@@ -437,9 +448,17 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                 offset += chunk_duration
 
         if failed_chunks == len(chunks):
+            if user_id:
+                from src.utils.billing import refund_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
+                refund_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt", video_id=video_id)
             raise RuntimeError(f"All {len(chunks)} transcription chunk(s) failed.")
         if failed_chunks:
             logger.warning(f"{failed_chunks}/{len(chunks)} transcription chunks failed and were skipped; the rest of the transcript is real.")
+    except Exception:
+        if user_id:
+            from src.utils.billing import refund_izivoice_usage_by_user_id, IZIVOICE_STT_CREDITS_PER_SEC
+            refund_izivoice_usage_by_user_id(user_id, total_duration * IZIVOICE_STT_CREDITS_PER_SEC, "transcription_stt", video_id=video_id)
+        raise
     finally:
         if chunk_dir.exists() and chunk_dir != audio_path.parent:
             for f in chunk_dir.glob("*"):
@@ -468,6 +487,16 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
     on failure, else a synthetic even-split alignment over the fallback
     title/text. Personal keys apply only to an enabled Izivoice entry.
     """
+    transcript_file = audio_path.parent / "transcript.json"
+    if transcript_file.exists():
+        try:
+            cached = json.loads(transcript_file.read_text(encoding="utf-8"))
+            if cached.get("duration") and cached.get("words"):
+                logger.info("Reusing existing transcript.json for audio: %s", audio_path)
+                return cached
+        except Exception:
+            pass
+
     providers = _configured_providers(api_key)
     if not providers:
         logger.info("No voiceover provider configured. Using synthetic subtitle timing for uploaded audio.")
@@ -591,6 +620,33 @@ def generate_voiceover(
     if not providers:
         raise RuntimeError("Aucun générateur vocal actif avec une clé configurée. Vérifiez la source dans Ressources.")
 
+    output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_file = output_audio_path.parent / "transcript.json"
+
+    # ZERO CREDIT WASTE: If voiceover audio already exists on disk from an earlier run/attempt,
+    # NEVER re-synthesize it and NEVER re-debit TTS credits!
+    if output_audio_path.exists() and output_audio_path.stat().st_size > 1000:
+        logger.info(f"Reusing existing voiceover audio file: {output_audio_path} (skipping TTS call and TTS credit debit)")
+        raw_duration = get_audio_duration(output_audio_path)
+        if transcript_file.exists():
+            try:
+                transcript_info = json.loads(transcript_file.read_text(encoding="utf-8"))
+                if transcript_info.get("duration") and transcript_info.get("words"):
+                    return output_audio_path, transcript_info
+            except Exception:
+                pass
+        if transcribe:
+            effective_key = provider_key(providers[0], api_key)
+            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=providers[0], progress_callback=progress_callback)
+        else:
+            transcript_info = {
+                "text": script_text,
+                "duration": raw_duration,
+                "words": synthetic_word_timings(script_text, raw_duration),
+            }
+        transcript_file.write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
+        return output_audio_path, transcript_info
+
     char_count = len(script_text)
     if user_id:
         from src.utils.billing import debit_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
@@ -601,7 +657,6 @@ def generate_voiceover(
     for provider in providers:
         effective_key = provider_key(provider, api_key)
         try:
-            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
             with httpx.Client() as client:
                 if provider == "ai33pro":
                     resolved_voice_id, audio_url = _tts_via_ai33(client, script_text, voice_id, voice_settings, effective_key)
@@ -618,6 +673,9 @@ def generate_voiceover(
             logger.warning(f"{provider} text-to-speech failed ({e}); trying next configured provider if any.")
             continue
     else:
+        if user_id:
+            from src.utils.billing import refund_izivoice_usage_by_user_id, IZIVOICE_TTS_CREDITS_PER_CHAR
+            refund_izivoice_usage_by_user_id(user_id, char_count * IZIVOICE_TTS_CREDITS_PER_CHAR, "voiceover_tts", video_id=video_id)
         raise RuntimeError(f"Voiceover generation failed on every configured provider: {last_error}") from last_error
 
     try:
@@ -661,6 +719,7 @@ def generate_voiceover(
                 "duration": raw_duration,
                 "words": synthetic_word_timings(script_text, raw_duration),
             }
+        transcript_file.write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
         return output_audio_path, transcript_info
 
     except Exception as e:

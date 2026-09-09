@@ -645,7 +645,7 @@ def process_single_queued_video() -> bool:
         # Every finished video must have a visible card thumbnail. Channels
         # without a reference style skip the parallel AI job, but still get a
         # representative frame from the finished MP4 here.
-        if not thumbnail_ai_used and not thumbnail_already_exists:
+        if not thumbnail_ai_used and not thumbnail_already_exists and not (thumbnail_destination.exists() and thumbnail_destination.stat().st_size > 1000):
             # The parallel attempt above started before the video existed and
             # failed its AI call — strict=True means it raised rather than
             # writing a generic, unstyled placeholder (see
