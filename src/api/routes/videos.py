@@ -1814,6 +1814,9 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
         db.refresh(video)
         return video.to_dict()
 
+    if channel and channel.voice_id:
+        video.voice_id = channel.voice_id
+
     video.status = VideoStatus.QUEUED.value
     video.restart_count = 0
     video.error_message = None

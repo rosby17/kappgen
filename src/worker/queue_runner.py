@@ -571,7 +571,7 @@ def process_single_queued_video() -> bool:
             pre_recorded_audio_path=pre_audio_path,
             progress_callback=update_progress,
             transcribe_audio=video.transcribe_audio,
-            voice_id=video.voice_id,
+            voice_id=channel.voice_id or video.voice_id,
             izivoice_api_key=izivoice_api_key,
             voice_settings=(channel.to_dict().get("voice_settings") or {}),
             video_id=video.id,
