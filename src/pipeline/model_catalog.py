@@ -36,21 +36,6 @@ MODEL_CATALOG = {
     },
     "fal": {
         "label": "fal.ai",
-        "text": [
-            "anthropic/claude-opus-5",
-            "anthropic/claude-sonnet-5",
-            "anthropic/claude-3.7-sonnet",
-            "anthropic/claude-3.5-sonnet",
-            "openai/gpt-4o",
-            "openai/gpt-4o-mini",
-            "deepseek/deepseek-r1",
-            "deepseek/deepseek-v3",
-            "meta-llama/llama-3.3-70b-instruct",
-        ],
-        "image": ["fal-ai/flux-pro", "fal-ai/flux/dev", "fal-ai/flux/schnell", "fal-ai/gpt-image-2", "fal-ai/recraft-v3"],
-        "thumbnail": ["fal-ai/gpt-image-2", "fal-ai/flux-pro", "fal-ai/flux/dev", "fal-ai/flux/schnell", "fal-ai/recraft-v3"],
-        "music": ["cassetteai/music-generator"],
-        "voice": ["fal-ai/dia-tts"],
     },
     "openai": {
         "label": "OpenAI",

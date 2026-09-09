@@ -170,18 +170,23 @@ def _check_fal():
     if not key:
         return {"configured": False, "status": "not_configured", "detail": "Aucune clé configurée."}
     try:
-        resp = httpx.get(
-            "https://queue.fal.run/fal-ai/fast-sdxl/requests/ping/status",
-            headers={"Authorization": f"Key {key}"},
+        # Use the same router as the text pipeline.  The old queue ping can
+        # succeed even when fal locks the account for a top-up, yielding a
+        # misleading green badge.
+        resp = httpx.post(
+            "https://fal.run/openrouter/router",
+            headers={"Authorization": f"Key {key}", "Content-Type": "application/json"},
+            json={"prompt": "OK", "model": "openai/gpt-4o-mini", "max_tokens": 1},
             timeout=PROBE_TIMEOUT,
         )
         if resp.status_code == 401:
             return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou non reconnue par fal.ai."}
-        if resp.status_code in (402, 429) or "credit" in resp.text.lower() or "payment" in resp.text.lower():
+        if resp.status_code in (402, 403, 429) or "credit" in resp.text.lower() or "payment" in resp.text.lower() or "top_up" in resp.text.lower():
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits insuffisants sur le compte fal.ai."}
-        if resp.status_code in (200, 404):
-            return {"configured": True, "status": "ok", "detail": "Clé valide et reconnue par fal.ai."}
-        return {"configured": True, "status": "ok", "detail": "Clé valide."}
+        resp.raise_for_status()
+        if not (resp.json() or {}).get("output"):
+            return {"configured": True, "status": "error", "detail": "fal.ai a accepté le contrôle sans renvoyer de texte."}
+        return {"configured": True, "status": "ok", "detail": "Clé valide et opérationnelle."}
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             return {"configured": True, "status": "error", "detail": "Clé invalide ou révoquée."}
