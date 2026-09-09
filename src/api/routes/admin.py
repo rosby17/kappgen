@@ -1684,7 +1684,11 @@ THUMBNAIL_IMAGE_PROVIDERS = ["izivoice", "fal", "ai33pro", "kie", "huggingface",
 def get_thumbnail_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import thumbnail_provider_order
     from src.config import IZIVOICE_API_KEY, KIE_API_KEY
-    configured = {"izivoice": bool(IZIVOICE_API_KEY), "kie": bool(KIE_API_KEY)}
+    from src.utils.provider_status import _get_effective_key
+    configured = {
+        "izivoice": bool(_get_effective_key("izivoice", IZIVOICE_API_KEY)),
+        "kie": bool(_get_effective_key("kie", KIE_API_KEY)),
+    }
     order = thumbnail_provider_order()
     return {"order": order, "available": THUMBNAIL_IMAGE_PROVIDERS, "configured": configured}
 
@@ -1717,12 +1721,13 @@ SCENE_IMAGE_PROVIDERS = ["huggingface", "izivoice", "ai33pro", "fal", "kie"]
 def get_scene_image_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import scene_image_provider_order
     from src.config import IZIVOICE_API_KEY, KIE_API_KEY, AI33PRO_API_KEY, FAL_API_KEY
+    from src.utils.provider_status import _get_effective_key
     configured = {
         "huggingface": True,  # free, always available
-        "izivoice": bool(IZIVOICE_API_KEY),
-        "ai33pro": bool(AI33PRO_API_KEY),
-        "fal": bool(FAL_API_KEY),
-        "kie": bool(KIE_API_KEY),
+        "izivoice": bool(_get_effective_key("izivoice", IZIVOICE_API_KEY)),
+        "ai33pro": bool(_get_effective_key("ai33pro", AI33PRO_API_KEY)),
+        "fal": bool(_get_effective_key("fal", FAL_API_KEY)),
+        "kie": bool(_get_effective_key("kie", KIE_API_KEY)),
     }
     order = scene_image_provider_order()
     return {"order": order, "available": SCENE_IMAGE_PROVIDERS, "configured": configured}
@@ -1759,13 +1764,14 @@ VOICEOVER_PROVIDERS = ["izivoice", "ai33pro", "kie", "fal", "openai", "gemini"]
 def get_voiceover_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import voiceover_provider_order
     from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY, FAL_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+    from src.utils.provider_status import _get_effective_key
     configured = {
-        "izivoice": bool(IZIVOICE_API_KEY),
-        "ai33pro": bool(AI33PRO_API_KEY),
-        "kie": bool(KIE_API_KEY),
-        "fal": bool(FAL_API_KEY),
-        "openai": bool(OPENAI_API_KEY),
-        "gemini": bool(GEMINI_API_KEY),
+        "izivoice": bool(_get_effective_key("izivoice", IZIVOICE_API_KEY)),
+        "ai33pro": bool(_get_effective_key("ai33pro", AI33PRO_API_KEY)),
+        "kie": bool(_get_effective_key("kie", KIE_API_KEY)),
+        "fal": bool(_get_effective_key("fal", FAL_API_KEY)),
+        "openai": bool(_get_effective_key("openai", OPENAI_API_KEY)),
+        "gemini": bool(_get_effective_key("gemini", GEMINI_API_KEY)),
     }
     order = voiceover_provider_order()
     return {"order": order, "available": VOICEOVER_PROVIDERS, "configured": configured}
@@ -1800,11 +1806,12 @@ MUSIC_PROVIDERS = ["izivoice", "ai33pro", "kie", "fal"]
 def get_music_provider_mode(admin: User = Depends(get_current_admin)):
     from src.utils.app_settings import music_provider_order
     from src.config import IZIVOICE_API_KEY, AI33PRO_API_KEY, KIE_API_KEY, FAL_API_KEY
+    from src.utils.provider_status import _get_effective_key
     configured = {
-        "izivoice": bool(IZIVOICE_API_KEY),
-        "ai33pro": bool(AI33PRO_API_KEY),
-        "kie": bool(KIE_API_KEY),
-        "fal": bool(FAL_API_KEY),
+        "izivoice": bool(_get_effective_key("izivoice", IZIVOICE_API_KEY)),
+        "ai33pro": bool(_get_effective_key("ai33pro", AI33PRO_API_KEY)),
+        "kie": bool(_get_effective_key("kie", KIE_API_KEY)),
+        "fal": bool(_get_effective_key("fal", FAL_API_KEY)),
     }
     order = music_provider_order()
     return {"order": order, "available": MUSIC_PROVIDERS, "configured": configured}
