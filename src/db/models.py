@@ -19,6 +19,17 @@ class User(Base):
     izivoice_api_key_encrypted = Column(Text, nullable=True)
     izivoice_key_prefix = Column(String(20), nullable=True)
     izivoice_connected_at = Column(DateTime, nullable=True)
+    # Bring-your-own-key for the text-generation provider chain (see
+    # src/pipeline/ai_providers.py) — one entry per provider id ("anthropic",
+    # "kie", "deepseek", "fal", "openai", "groq", "gemini"):
+    # {"<provider_id>": {"encrypted": "<fernet token>", "prefix": "sk-ant-...", "enabled": true}}.
+    # A JSON blob rather than a column per provider (like Izivoice above) —
+    # covering every provider in the registry with dedicated columns would
+    # mean a migration every time one is added; generate_text() substitutes
+    # the user's own key wherever their provider sits in the existing
+    # fallback chain, and that call is never billed against their KappGen
+    # credits, same principle as izivoice_api_key_encrypted above.
+    external_ai_keys = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     is_admin = Column(Boolean, nullable=False, default=False)

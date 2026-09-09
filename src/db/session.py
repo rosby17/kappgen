@@ -120,6 +120,7 @@ def init_db():
             "email_verify_sent_at": "ALTER TABLE users ADD COLUMN email_verify_sent_at TIMESTAMP",
             "beta_status": "ALTER TABLE users ADD COLUMN beta_status VARCHAR(20) DEFAULT 'pending' NOT NULL",
             "beta_status_updated_at": "ALTER TABLE users ADD COLUMN beta_status_updated_at TIMESTAMP",
+            "external_ai_keys": "ALTER TABLE users ADD COLUMN external_ai_keys JSON",
         }
         is_new_verified_column = "email_verified" not in existing_user_columns
         is_new_beta_column = "beta_status" not in existing_user_columns

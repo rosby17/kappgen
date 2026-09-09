@@ -119,6 +119,7 @@ def _pick_topic(
     topic_examples: Optional[str] = None,
     use_web_trends: bool = False,
     youtube_topic_sources: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[str]:
     avoid_list = "\n".join(f"- {t}" for t in recent_titles[:20]) or "(none yet — this is the first video)"
     # Without real examples, topic selection has nothing to anchor on but the
@@ -186,6 +187,7 @@ Invent ONE brand-new, specific video topic that fits this niche and hasn't been 
             # Topic selection is a short auxiliary task; keep Sonnet for the
             # long-form narration itself and use Gemini's free tier first.
             preferred_provider='gemini',
+            user_id=user_id,
         )
         data = _extract_json(raw_text)
         title = str(data.get("title", "")).strip()
@@ -213,6 +215,7 @@ def _write_part(
     is_last_part: bool,
     cost_sink: Optional[List[float]] = None,
     originality_context: str = "",
+    user_id: Optional[str] = None,
 ) -> Optional[str]:
     word_count = int(part.get("word_count", 300) or 300)
     rules_block = "\n".join(f"- {r}" for r in formatting_rules) if formatting_rules else ""
@@ -256,6 +259,7 @@ Originality guardrail: older videos from this channel commonly used the followin
             operation='script',
             cost_sink=cost_sink,
             preferred_provider=preferred_provider,
+            user_id=user_id,
         ).strip()
         return text or None
     except Exception as e:
@@ -277,6 +281,7 @@ def generate_daily_script(
     on_title: Optional[callable] = None,
     on_partial_script: Optional[callable] = None,
     preset_title: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Returns {"title": str, "script_text": str} for a brand-new video topic in
@@ -319,6 +324,7 @@ def generate_daily_script(
         title = (preset_title or "").strip() or _pick_topic(
             niche, recent_titles, style_prompt, language, cost_sink=cost_sink,
             topic_examples=topic_examples, use_web_trends=use_web_trends, youtube_topic_sources=youtube_topic_sources,
+            user_id=user_id,
         )
         if not title:
             return None
@@ -338,7 +344,7 @@ def generate_daily_script(
             part_text = _write_part(
                 title, niche, language, style_prompt, formatting_rules, cta_style,
                 part, tail, is_last_part=(i == len(parts) - 1), cost_sink=cost_sink,
-                originality_context=originality_context,
+                originality_context=originality_context, user_id=user_id,
             )
             if not part_text:
                 logger.warning(f"Daily script generation: part '{part.get('name')}' failed, aborting this run.")
