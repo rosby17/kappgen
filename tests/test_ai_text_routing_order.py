@@ -106,4 +106,6 @@ def test_kie_selected_model_controls_endpoint_and_payload(monkeypatch, model, pa
 
     assert request["url"].endswith(path)
     assert request["payload"].get("model", model) == model
+    if model.startswith("gpt-"):
+        assert request["payload"]["max_output_tokens"] == 50
     assert text

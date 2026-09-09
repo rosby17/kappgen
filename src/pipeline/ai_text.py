@@ -33,6 +33,10 @@ OPENROUTER_FREE_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 _OPENROUTER_LEAKED_REASONING_PREFIXES = ("okay,", "let me", "i need to", "the user", "first,")
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+# A text fragment should never hold a worker indefinitely. Kie's GPT proxy
+# occasionally accepts a request then stalls while producing its response;
+# failing over after a bounded wait is preferable to blocking a full script.
+KIE_TEXT_REQUEST_TIMEOUT_SECONDS = 45.0
 
 
 def _classify_key_failure(exc: Exception) -> str:
@@ -163,12 +167,21 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model:
                 payload = {"model": model, "stream": False, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens}
             else:
                 path = "/codex/v1/responses"
-                payload = {"model": model, "stream": False, "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}], "reasoning": {"effort": "low"}}
+                payload = {
+                    "model": model,
+                    "stream": False,
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+                    # Without this limit, the Kie Responses proxy can keep
+                    # generating far beyond the section's requested size and
+                    # leave the worker waiting until the HTTP timeout.
+                    "max_output_tokens": max_tokens,
+                    "reasoning": {"effort": "low"},
+                }
             resp = httpx.post(
                 f"{KIE_BASE_URL}{path}",
                 headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
                 json=payload,
-                timeout=120.0,
+                timeout=KIE_TEXT_REQUEST_TIMEOUT_SECONDS,
             )
             resp.raise_for_status()
             data = resp.json()
