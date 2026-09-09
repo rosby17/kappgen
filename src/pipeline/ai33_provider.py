@@ -177,7 +177,7 @@ def submit_stt_with_webhook(
     return resp.json()["task_id"]
 
 
-def await_stt_webhook_result(task_id: str, timeout: float = STT_WEBHOOK_WAIT_TIMEOUT_SECONDS) -> Dict[str, Any]:
+def await_stt_webhook_result(task_id: str, timeout: float = STT_WEBHOOK_WAIT_TIMEOUT_SECONDS, *, client: Optional[httpx.Client] = None, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Waits for src/api/routes/webhooks.py's ai33 STT webhook to have
     recorded a terminal result for `task_id` in the Ai33TaskResult table —
     converts ai33.pro's unreliable direct polling into reliable polling
@@ -187,9 +187,10 @@ def await_stt_webhook_result(task_id: str, timeout: float = STT_WEBHOOK_WAIT_TIM
     from src.db.session import SessionLocal
     from src.db.models import Ai33TaskResult
 
-    elapsed = 0.0
+    deadline = time.monotonic() + timeout
+    next_probe = time.monotonic() + 15.0
     interval = 2.0
-    while elapsed < timeout:
+    while time.monotonic() < deadline:
         db = SessionLocal()
         try:
             row = db.query(Ai33TaskResult).filter(Ai33TaskResult.task_id == task_id).first()
@@ -200,8 +201,30 @@ def await_stt_webhook_result(task_id: str, timeout: float = STT_WEBHOOK_WAIT_TIM
                     raise RuntimeError(f"ai33.pro STT task {task_id} failed: {row.payload}")
         finally:
             db.close()
-        time.sleep(interval)
-        elapsed += interval
+        # Webhooks remain primary. A missed callback must not hide an
+        # already completed task; transient polling errors never abort STT.
+        if client is not None and time.monotonic() >= next_probe:
+            task = None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response = client.get(
+                    f"{AI33PRO_BASE_URL}/v1/task/{task_id}",
+                    headers=_headers(api_key), timeout=min(10.0, remaining),
+                )
+                response.raise_for_status()
+                task = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.debug("STT status probe unavailable for %s: %s", task_id, exc)
+            if isinstance(task, dict):
+                status = str(task.get("status") or "").lower()
+                if status == "done" and task.get("metadata"):
+                    return task["metadata"]
+                if status in ("error", "failed"):
+                    raise RuntimeError(f"ai33.pro STT task {task_id} failed: {task.get('error') or task}")
+            next_probe = time.monotonic() + 15.0
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
     raise TimeoutError(f"ai33.pro STT webhook for task {task_id} did not arrive within {timeout}s")
 
 

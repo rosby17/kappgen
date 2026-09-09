@@ -3,7 +3,7 @@ import time
 import threading
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Callable
 import httpx
 from src.config import IZIVOICE_API_KEY, IZIVOICE_BASE_URL, IZIVOICE_VOICE_ID, MAX_CONCURRENT_IZIVOICE_CALLS, AI33PRO_API_KEY
 from src.utils.logger import logger
@@ -301,7 +301,7 @@ def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
     return sorted(chunk_dir.glob("chunk_*.mp3"))
 
 
-def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None, provider: str = "izivoice") -> Dict[str, Any]:
+def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None, provider: str = "izivoice", progress_callback: Optional[Callable[[str, int], None]] = None) -> Dict[str, Any]:
     """
     Transcribes an audio file via speech-to-text (Izivoice, or ai33.pro direct
     when provider="ai33pro" — src/pipeline/ai33_provider.py), chunking long
@@ -344,6 +344,8 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
         with httpx.Client() as client:
             for chunk_index, chunk_path in enumerate(chunks):
                 chunk_duration = chunk_durations[chunk_index]
+                if progress_callback:
+                    progress_callback(f"Transcription — segment {chunk_index + 1}/{len(chunks)}", 15 + int(8 * chunk_index / len(chunks)))
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
                 try:
@@ -351,7 +353,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                         from src.pipeline import ai33_provider
                         with _izivoice_semaphore:
                             task_id = ai33_provider.submit_stt_with_webhook(client, chunk_path, api_key)
-                            metadata = ai33_provider.await_stt_webhook_result(task_id)
+                            metadata = ai33_provider.await_stt_webhook_result(task_id, client=client, api_key=api_key)
                     else:
                         with _izivoice_semaphore:
                             with open(chunk_path, "rb") as f:
@@ -458,7 +460,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
     }
 
 
-def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None) -> Dict[str, Any]:
+def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None, progress_callback: Optional[Callable[[str, int], None]] = None) -> Dict[str, Any]:
     """
     Public entrypoint used by the orchestrator for pre-recorded/uploaded audio:
     real transcription via the admin-ordered voiceover provider (Izivoice,
@@ -481,7 +483,7 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
     for provider in providers:
         effective_key = provider_key(provider, api_key)
         try:
-            return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider)
+            return transcribe_audio_izivoice(audio_path, fallback_text=fallback_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider, progress_callback=progress_callback)
         except Exception as e:
             last_error = e
             logger.warning(f"{provider} speech-to-text failed ({e}); trying next configured provider if any.")
@@ -563,6 +565,7 @@ def generate_voiceover(
     voice_settings: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None, channel_id: Optional[str] = None, video_id: Optional[str] = None,
     transcribe: bool = True,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """
     Generates voiceover TTS audio via the admin-ordered voiceover provider
@@ -648,8 +651,10 @@ def generate_voiceover(
             f"{provider}_tts", "voiceover", char_count, "characters", estimate_izivoice_tts_cost(char_count),
             user_id=user_id, channel_id=channel_id, video_id=video_id, meta={"voice_id": voice_id, "provider": provider},
         )
+        if progress_callback:
+            progress_callback("Transcription de la voix off" if transcribe else "Préparation des sous-titres", 15)
         if transcribe:
-            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider)
+            transcript_info = transcribe_audio_izivoice(output_audio_path, fallback_text=script_text, api_key=effective_key, user_id=user_id, video_id=video_id, provider=provider, progress_callback=progress_callback)
         else:
             transcript_info = {
                 "text": script_text,

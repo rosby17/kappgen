@@ -207,7 +207,7 @@ def run_video_pipeline(
             # the filename-derived title), so transcribe via Izivoice speech-to-text
             # to get accurate subtitle text and word-level timing. This is billable
             # (Izivoice STT credits) — callers can opt out via transcribe_audio=False.
-            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré", api_key=izivoice_api_key, user_id=channel_config.get("user_id"), video_id=video_id)
+            transcript_info = generate_transcript_for_audio(raw_vo_path, fallback_text=script_text or "Audio préenregistré", api_key=izivoice_api_key, user_id=channel_config.get("user_id"), video_id=video_id, progress_callback=progress)
         else:
             # Skips the paid STT call entirely — subtitles fall back to the video's
             # title evenly spread over the audio's duration (same fallback already
@@ -221,9 +221,9 @@ def run_video_pipeline(
                 "words": synthetic_word_timings(fallback_text, duration),
             }
     else:
-        progress("Génération de la voix et transcription", 8)
+        progress("Génération de la voix off", 8)
         logger.info("Step 1/7: Generating voiceover audio via TTS...")
-        _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path, voice_id=voice_id, api_key=izivoice_api_key, voice_settings=voice_settings, user_id=channel_config.get("user_id"), transcribe=transcribe_audio, video_id=video_id)
+        _, transcript_info = generate_voiceover(script_text or "Vidéo sans titre", raw_vo_path, voice_id=voice_id, api_key=izivoice_api_key, voice_settings=voice_settings, user_id=channel_config.get("user_id"), transcribe=transcribe_audio, video_id=video_id, progress_callback=progress)
 
     (source_dir / "transcript.json").write_text(json.dumps(transcript_info, indent=2), encoding="utf-8")
     
