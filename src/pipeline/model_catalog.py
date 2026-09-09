@@ -165,6 +165,14 @@ MODEL_PRICING = {
     "xai:grok-4": {"input": 1.00, "output": 3.00},
     "xai:grok-4-fast": {"input": 0.20, "output": 0.50},
 
+    # Izivoice ($5 / 1M tokens)
+    "izivoice:default": {"input": 5.0, "output": 5.0},
+    "izivoice:gpt-image-2": {"output": 0.02},
+
+    # ai33.pro ($5 / 1M tokens)
+    "ai33pro:default": {"input": 5.0, "output": 5.0},
+    "ai33pro:gpt-image-2": {"output": 0.02},
+
     # Hugging Face
     "huggingface:black-forest-labs/FLUX.1-schnell": {"free_tier": True},
 }
