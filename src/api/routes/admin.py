@@ -1526,7 +1526,23 @@ def list_hf_accounts(provider: str = "huggingface", admin: User = Depends(get_cu
         .order_by(HuggingFaceAccount.created_at.asc())
         .all()
     )
-    return [a.to_dict() for a in accounts]
+    result = [a.to_dict() for a in accounts]
+    # Show keys supplied through environment configuration as read-only pool
+    # entries, so the admin can see every available credential in one place.
+    from src import config
+    env_names = {
+        "huggingface": "HUGGINGFACE_API_KEY", "fal": "FAL_API_KEY", "gemini": "GEMINI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY", "kie": "KIE_API_KEY", "openai": "OPENAI_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY", "groq": "GROQ_API_KEY", "izivoice": "IZIVOICE_API_KEY",
+        "ai33pro": "AI33PRO_API_KEY",
+    }
+    env_key = getattr(config, env_names.get(provider, ""), "") if env_names.get(provider) else ""
+    if env_key and not accounts:
+        result.insert(0, {"id": f"env-{provider}", "provider": provider,
+                          "token_preview": f"{env_key[:8]}...{env_key[-4:]}",
+                          "label": "Configurée (.env)", "status": "active",
+                          "is_enabled": True, "read_only": True})
+    return result
 
 
 class HfAccountPayload(BaseModel):
