@@ -100,8 +100,7 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = Non
             db.commit()
             return
 
-        order = voiceover_provider_order()
-        primary_provider = "ai33pro" if ("ai33pro" in order and AI33PRO_API_KEY) else "izivoice"
+        primary_provider = "ai33pro" if AI33PRO_API_KEY else "izivoice"
         voice_id = None
 
         if primary_provider == "ai33pro" and AI33PRO_API_KEY:
