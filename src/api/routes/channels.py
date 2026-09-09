@@ -20,7 +20,7 @@ from urllib.parse import quote, urlparse
 from src.db.session import get_db
 from src.db.models import Channel, Video, User, VoiceCloneJob, CommunityLibraryFolder, CommunityLibraryImagePlacement, CommunityLibraryImageTag, Voice, ChannelPipelineShare, ChannelSoundEffect
 from src.models.project import ChannelCreate, ChannelUpdate, VideoStatus, IzivoiceConnectionPayload, MusicPreference
-from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
+from src.config import STORAGE_PATH, IZIVOICE_API_KEY, IZIVOICE_BASE_URL, AI33PRO_API_KEY, FRONTEND_BASE_URL, IMAGE_UPLOAD_EXTENSIONS, HEIC_EXTENSIONS, PEXELS_API_KEY
 from fastapi.responses import RedirectResponse
 from datetime import datetime, timedelta
 from src.pipeline import youtube_publisher
@@ -321,8 +321,8 @@ async def clone_channel_voice(channel_id: str, name: str = Form(...), gender: st
     if not contents:
         raise HTTPException(status_code=400, detail="L'échantillon audio est vide.")
     api_key = izivoice_key_for_user(current_user)
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Izivoice n'est pas configuré.")
+    if not api_key and not AI33PRO_API_KEY:
+        raise HTTPException(status_code=503, detail="Aucun service vocal (ai33.pro ou Izivoice) n'est configuré.")
 
     from src.utils.billing import user_max_cloned_voices
     voice_cap = user_max_cloned_voices(db, current_user)
@@ -384,6 +384,26 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
         seen.add(job.voice_id)
         voices.append({"id": job.voice_id, "name": job.name, "gender": job.gender, "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None})
 
+    # When ai33.pro is configured, list custom/cloned voices directly from ai33.pro
+    if AI33PRO_API_KEY:
+        try:
+            from src.pipeline import ai33_provider
+            with httpx.Client(timeout=20) as client:
+                ai33_voices = ai33_provider.list_user_voices(client, AI33PRO_API_KEY)
+                for voice in ai33_voices:
+                    voice_id = str(voice.get("voice_id") or voice.get("id") or "").strip()
+                    if not voice_id or voice_id in seen:
+                        continue
+                    seen.add(voice_id)
+                    voices.append({
+                        "id": voice_id,
+                        "name": voice.get("name") or f"Voix {voice_id[:8]}",
+                        "gender": (voice.get("labels") or {}).get("gender") or "neutral",
+                        "preview_url": voice.get("preview_url") or f"/channels/voice/{voice_id}/preview",
+                    })
+        except Exception as exc:
+            logger.warning("ai33.pro clone sync failed: %s", exc)
+
     # Never query `mine=true` with KappGen's shared service key: that key is
     # not a creator identity and could expose another user's private clones.
     # A connected personal key is exactly the scope Izivoice needs here.
@@ -426,13 +446,9 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
 
 @router.delete("/my-cloned-voices/{voice_id}")
 def delete_my_cloned_voice(voice_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Deletes a cloned voice: removes it from Izivoice itself (best-effort —
-    an Izivoice-side failure doesn't block clearing it from KappGen, since a
-    voice_id that no longer resolves there is useless here too) and from every
-    VoiceCloneJob row that reference it, so it stops appearing in "Mes voix
-    clonées". Refuses if any of the user's channels still has it selected as
-    their active voiceover voice, to avoid silently breaking future renders —
-    the creator has to pick a different voice on that channel first."""
+    """Deletes a cloned voice: removes it from ai33.pro / Izivoice itself (best-effort)
+    and from every VoiceCloneJob row that reference it, so it stops appearing in "Mes voix
+    clonées"."""
     owns_it = (
         db.query(VoiceCloneJob)
         .filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.voice_id == voice_id)
@@ -452,6 +468,14 @@ def delete_my_cloned_voice(voice_id: str, current_user: User = Depends(get_curre
             status_code=409,
             detail=f"Cette voix est encore utilisée par : {names}. Choisis une autre voix sur cette/ces chaîne(s) avant de la supprimer.",
         )
+
+    if AI33PRO_API_KEY:
+        try:
+            from src.pipeline import ai33_provider
+            with httpx.Client(timeout=10) as client:
+                ai33_provider.delete_voice(client, voice_id, AI33PRO_API_KEY)
+        except Exception as exc:
+            logger.warning(f"Failed to delete voice {voice_id} on ai33.pro: {exc}")
 
     api_key = izivoice_key_for_user(current_user)
     if api_key:

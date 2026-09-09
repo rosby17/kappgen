@@ -87,6 +87,17 @@ def poll_task(task_id: str, client: httpx.Client, api_key: Optional[str] = None)
     raise TimeoutError(f"ai33.pro task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s")
 
 
+def _raise_for_status_with_detail(resp: httpx.Response, endpoint_name: str = "ai33.pro") -> None:
+    if resp.is_error:
+        detail = ""
+        try:
+            err_data = resp.json()
+            detail = err_data.get("message") or err_data.get("detail") or err_data.get("error") or str(err_data)
+        except Exception:
+            detail = resp.text
+        raise RuntimeError(f"{endpoint_name} returned HTTP {resp.status_code}: {detail or resp.reason_phrase}")
+
+
 def default_voice_id(client: httpx.Client, api_key: Optional[str] = None) -> str:
     """GET /v1/shared-voices — response is NOT wrapped in {"data": {...}} the
     way Izivoice's own /voices is; it's {"total_count", "voices": [...]}
@@ -102,7 +113,7 @@ def default_voice_id(client: httpx.Client, api_key: Optional[str] = None) -> str
         params={"page": 0, "page_size": 5, "language": "fr"},
         timeout=30.0,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp, "ai33.pro GET /v1/shared-voices")
     voices = resp.json().get("voices") or []
     if not voices:
         # Retry without the language filter as a last resort rather than
@@ -112,13 +123,73 @@ def default_voice_id(client: httpx.Client, api_key: Optional[str] = None) -> str
             f"{AI33PRO_BASE_URL}/v1/shared-voices",
             headers=_headers(api_key), params={"page": 0, "page_size": 5}, timeout=30.0,
         )
-        resp.raise_for_status()
+        _raise_for_status_with_detail(resp, "ai33.pro GET /v1/shared-voices")
         voices = resp.json().get("voices") or []
     if not voices:
         raise RuntimeError("No voice_id configured and ai33.pro /v1/shared-voices returned no voices to auto-select.")
     selected_id = voices[0]["voice_id"]
     logger.info(f"Auto-selected ai33.pro voice_id={selected_id} ({voices[0].get('name')})")
     return selected_id
+
+
+def list_user_voices(client: httpx.Client, api_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    """GET /v1/voices — returns the user's own custom/cloned voices on ai33.pro."""
+    try:
+        resp = client.get(
+            f"{AI33PRO_BASE_URL}/v1/voices",
+            headers=_headers(api_key),
+            timeout=30.0,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("voices") or []
+        return []
+    except Exception as exc:
+        logger.warning(f"ai33.pro /v1/voices fetch failed: {exc}")
+        return []
+
+
+def submit_voice_clone(
+    client: httpx.Client,
+    name: str,
+    audio_bytes: bytes,
+    filename: str = "voice-sample.flac",
+    description: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> str:
+    """POST /v1/voices/add (FormData with files) — instant voice cloning on ai33.pro.
+    Returns the newly created voice_id."""
+    files = [("files", (filename, audio_bytes, "audio/flac" if filename.endswith(".flac") else "audio/mpeg"))]
+    data = {"name": name}
+    if description:
+        data["description"] = description
+    resp = _post_with_retry(
+        client,
+        f"{AI33PRO_BASE_URL}/v1/voices/add",
+        headers=_headers(api_key),
+        data=data,
+        files=files,
+        timeout=120.0,
+    )
+    _raise_for_status_with_detail(resp, "ai33.pro POST /v1/voices/add")
+    res_data = resp.json()
+    voice_id = res_data.get("voice_id") or ((res_data.get("data") or {}).get("voice_id"))
+    if not voice_id:
+        raise RuntimeError(f"ai33.pro voice clone returned no voice_id: {res_data}")
+    return str(voice_id)
+
+
+def delete_voice(client: httpx.Client, voice_id: str, api_key: Optional[str] = None) -> bool:
+    """DELETE /v1/voices/{voice_id} — deletes a cloned voice on ai33.pro."""
+    try:
+        resp = client.delete(
+            f"{AI33PRO_BASE_URL}/v1/voices/{voice_id}",
+            headers=_headers(api_key),
+            timeout=30.0,
+        )
+        return resp.status_code in (200, 204)
+    except Exception as exc:
+        logger.warning(f"ai33.pro delete voice {voice_id} failed: {exc}")
+        return False
 
 
 def submit_tts(
@@ -146,7 +217,7 @@ def submit_tts(
         client, f"{AI33PRO_BASE_URL}/v3/text-to-speech",
         headers=_headers(api_key), data=form, timeout=30.0,
     )
-    resp.raise_for_status()
+    _raise_for_status_with_detail(resp, "ai33.pro POST /v3/text-to-speech")
     return resp.json()["task_id"]
 
 

@@ -73,15 +73,16 @@ def transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
             return contents
 
 
-def process_voice_clone_job(db, job: VoiceCloneJob, api_key: str) -> None:
+def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = None) -> None:
     """Runs one claimed clone job (already flipped to "processing" and
     committed by the caller) to completion (or failure), updating the row in
-    place. Always leaves the job in a terminal status ("done" or "error") —
-    the API's status endpoint just reads whatever's here, so a creator's
-    browser tab polling it resolves correctly even if this process (or the
-    API's) gets redeployed mid-job. If the worker is killed mid-call instead,
-    the job is left in "processing" — requeue_orphaned_voice_clone_jobs()
-    (queue_runner.py) resets it back to "pending" on the next worker startup."""
+    place. Always leaves the job in a terminal status ("done" or "error").
+    Uses ai33.pro directly if ai33pro is configured / prioritized in
+    voiceover_provider_order(), otherwise uses Izivoice."""
+    from src.config import AI33PRO_API_KEY
+    from src.utils.app_settings import voiceover_provider_order
+    from src.pipeline import ai33_provider
+
     audio_path = STORAGE_PATH / job.audio_path
     try:
         contents = audio_path.read_bytes()
@@ -93,47 +94,55 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: str) -> None:
 
     try:
         clean_audio = transcode_to_clean_audio(contents, job.audio_path)
-        if len(clean_audio) > 4 * 1024 * 1024:
+        if len(clean_audio) > 8 * 1024 * 1024:
             job.status = "error"
-            job.error_message = "Cet échantillon est trop long une fois nettoyé (limite Izivoice : 4 Mo). Utilisez un extrait plus court (~30-45 s)."
+            job.error_message = "Cet échantillon est trop volumineux une fois nettoyé (> 8 Mo). Utilisez un extrait plus court (~20-45 s)."
             db.commit()
             return
 
-        response = httpx.post(
-            f"{IZIVOICE_BASE_URL}/clone",
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
-            # Back to removeNoise=true (server-side noise cleanup) now that
-            # Izivoice has fixed the "Failed to parse duration" bug on that
-            # path too — it was temporarily forced to "false" to route
-            # around it (see git history for the full story).
-            data={"name": job.name, "removeNoise": "true", "optimizeAccent": "true"},
-            timeout=280,
-        )
-        response.raise_for_status()
-        data = response.json()
-        voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
+        order = voiceover_provider_order()
+        primary_provider = "ai33pro" if ("ai33pro" in order and AI33PRO_API_KEY) else "izivoice"
+        voice_id = None
+
+        if primary_provider == "ai33pro" and AI33PRO_API_KEY:
+            logger.info(f"Cloning voice '{job.name}' directly on ai33.pro...")
+            with httpx.Client() as client:
+                voice_id = ai33_provider.submit_voice_clone(
+                    client=client,
+                    name=job.name,
+                    audio_bytes=clean_audio,
+                    filename="voice-sample.flac",
+                    description="Clonée via KappGen",
+                    api_key=AI33PRO_API_KEY,
+                )
+        else:
+            effective_key = api_key or IZIVOICE_API_KEY
+            if not effective_key:
+                raise RuntimeError("Aucune clé API configurée pour le clonage de voix (ni ai33.pro, ni Izivoice).")
+            logger.info(f"Cloning voice '{job.name}' via Izivoice...")
+            response = httpx.post(
+                f"{IZIVOICE_BASE_URL}/clone",
+                headers={"Authorization": f"Bearer {effective_key}"},
+                files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
+                data={"name": job.name, "removeNoise": "true", "optimizeAccent": "true"},
+                timeout=280,
+            )
+            response.raise_for_status()
+            data = response.json()
+            voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
+
         if not voice_id:
             job.status = "error"
-            job.error_message = "Izivoice n'a retourné aucun identifiant de voix."
+            job.error_message = f"{primary_provider} n'a retourné aucun identifiant de voix."
             db.commit()
             return
 
-        # Izivoice's /clone deliberately returns preview_url: null ("no longer
-        # generate a preview here to speed up the process") — without this,
-        # a freshly cloned voice has no way to be previewed anywhere in the
-        # app (catalog voices all have a pre-made sample; this one wouldn't).
-        # Best-effort: a cloned voice with no preview is still usable, just
-        # not previewable, so this never fails the clone itself.
         preview_url = None
         try:
             preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
             preview_path.parent.mkdir(parents=True, exist_ok=True)
             from src.pipeline.voiceover import generate_voiceover
             generate_voiceover(VOICE_PREVIEW_TEXT, preview_path, voice_id=voice_id, api_key=api_key)
-            # API_BASE on the frontend already ends in /api — a leading /api
-            # here would double up into /api/api/... (see the same note on
-            # the scene-image route in videos.py, which hit this exact bug).
             preview_url = f"/channels/voice/{voice_id}/preview"
         except Exception as exc:
             logger.warning(f"Voice-clone preview generation failed for {voice_id}: {exc}")
@@ -142,30 +151,19 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: str) -> None:
         job.voice_id = voice_id
         job.preview_url = preview_url
         db.commit()
+        logger.info(f"Voice clone successful for job {job.id}: voice_id={voice_id}")
     except httpx.HTTPStatusError as exc:
-        # Surface whatever Izivoice actually said instead of just the status
-        # code — a bare "(500)" gives no way to tell a bad audio file apart
-        # from a misconfigured request on our side.
         try:
             upstream_detail = exc.response.json()
             upstream_detail = upstream_detail.get("message") or upstream_detail.get("detail") or upstream_detail.get("error") or exc.response.text
         except Exception:
             upstream_detail = exc.response.text
-        logger.error(f"Izivoice /clone failed ({exc.response.status_code}): {upstream_detail}")
-        # Known upstream quirk (acknowledged in Izivoice's own code): their
-        # cloning engine sometimes can't read the duration of an audio file
-        # whose container/header is non-standard, even though the file plays
-        # fine everywhere else — re-exporting it (e.g. to a clean WAV/MP3)
-        # reliably fixes it, so point the creator at that instead of a raw
-        # upstream error they can't act on.
-        if "failed to parse duration" in str(upstream_detail).lower():
-            job.error_message = "Izivoice n'a pas réussi à lire ce fichier audio (en-tête non standard, même s'il joue normalement ailleurs). Réexportez-le en MP3 ou WAV propre (ex. via Audacity ou QuickTime) puis réessayez."
-        else:
-            job.error_message = f"Izivoice a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'raison inconnue'}"
+        logger.error(f"Voice clone failed ({exc.response.status_code}): {upstream_detail}")
         job.status = "error"
+        job.error_message = f"Le fournisseur a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'erreur inconnue'}"
         db.commit()
     except Exception as exc:
-        logger.error(f"Izivoice /clone crashed: {exc}")
+        logger.error(f"Voice clone crashed: {exc}")
         job.status = "error"
         job.error_message = f"Le clonage a échoué : {exc}"
         db.commit()

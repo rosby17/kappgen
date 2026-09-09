@@ -2422,11 +2422,12 @@ def process_single_voice_clone_job() -> bool:
         if not job:
             return False
 
+        from src.config import AI33PRO_API_KEY
         user = db.query(User).filter(User.id == job.user_id).first()
         api_key = izivoice_key_for_user(user) if user else None
-        if not api_key:
+        if not api_key and not AI33PRO_API_KEY:
             job.status = "error"
-            job.error_message = "Izivoice n'est pas configuré."
+            job.error_message = "Aucun service vocal (ai33.pro ou Izivoice) n'est configuré."
             db.commit()
             return True
 
