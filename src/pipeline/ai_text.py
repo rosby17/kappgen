@@ -1,3 +1,4 @@
+from src.utils.provider_keys import rotating, key as provider_key_value
 """Shared text-generation helper with a provider fallback chain, text-only
 (see src/pipeline/vision.py for the separate 3-provider vision chain):
 Anthropic direct -> fal.ai (Claude via OpenRouter, billed against fal.ai
@@ -205,13 +206,16 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model:
     raise RuntimeError(f"All Kie.ai keys failed: {last_exc}")
 
 
-def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+@rotating("fal")
+def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
+    FAL_API_KEY = provider_key_value("fal")
     if not FAL_API_KEY:
         raise RuntimeError("FAL_API_KEY is not configured on the server.")
+    active_model = selected_model or "anthropic/claude-sonnet-4.5"
     resp = httpx.post(
         "https://fal.run/openrouter/router",
         headers={"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"},
-        json={"prompt": prompt, "model": "anthropic/claude-sonnet-4.5", "max_tokens": max_tokens},
+        json={"prompt": prompt, "model": active_model, "max_tokens": max_tokens},
         timeout=120.0,
     )
     resp.raise_for_status()
@@ -222,18 +226,21 @@ def _fal_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     log_usage(
         "fal_text", usage_ctx.get("operation", "text"), 1, "request", cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": "anthropic/claude-sonnet-4.5 (via fal.ai fallback)"},
+        meta={"model": active_model},
     )
     return output.strip(), cost_usd
 
 
-def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+@rotating("openai")
+def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
+    OPENAI_API_KEY = provider_key_value("openai")
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
+    active_model = selected_model or "gpt-4o"
     resp = httpx.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-        json={"model": "gpt-4o", "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
+        json={"model": active_model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
         timeout=120.0,
     )
     resp.raise_for_status()
@@ -248,7 +255,7 @@ def _openai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
         "openai", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": "gpt-4o (fallback)", "input_tokens": in_tok, "output_tokens": out_tok},
+        meta={"model": active_model, "input_tokens": in_tok, "output_tokens": out_tok},
     )
     return text.strip(), cost_usd
 
@@ -258,16 +265,17 @@ DEEPSEEK_MODEL = "deepseek-v4-flash"
 XAI_MODEL = "grok-4-6"
 
 
-def _xai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+def _xai_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
     from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
     accounts = _provider_accounts_from_db("xai", [XAI_API_KEY] if XAI_API_KEY else [])
+    active_model = selected_model or XAI_MODEL
     last_exc = None
     for account in accounts:
         try:
             resp = httpx.post(
                 f"{XAI_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {account['token']}", "Content-Type": "application/json"},
-                json={"model": XAI_MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
+                json={"model": active_model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
                 timeout=120.0,
             )
             resp.raise_for_status()
@@ -281,7 +289,7 @@ def _xai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             _mark_provider_account(account["id"], "active")
             log_usage("xai", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens", cost_usd,
                       user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-                      meta={"model": XAI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok})
+                      meta={"model": active_model, "input_tokens": in_tok, "output_tokens": out_tok})
             return text.strip(), cost_usd
         except Exception as exc:
             last_exc = exc
@@ -289,13 +297,16 @@ def _xai_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     raise RuntimeError(f"All xAI keys failed: {last_exc}")
 
 
-def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+@rotating("deepseek")
+def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
+    DEEPSEEK_API_KEY = provider_key_value("deepseek")
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured on the server.")
+    active_model = selected_model or DEEPSEEK_MODEL
     resp = httpx.post(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
-        json={"model": DEEPSEEK_MODEL, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
+        json={"model": active_model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
         timeout=120.0,
     )
     resp.raise_for_status()
@@ -310,7 +321,7 @@ def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
         "deepseek", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         cost_usd,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": DEEPSEEK_MODEL, "input_tokens": in_tok, "output_tokens": out_tok},
+        meta={"model": active_model, "input_tokens": in_tok, "output_tokens": out_tok},
     )
     return text.strip(), cost_usd
 
@@ -318,14 +329,17 @@ def _deepseek_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 
-def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+@rotating("groq")
+def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
+    GROQ_API_KEY = provider_key_value("groq")
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not configured on the server.")
+    active_model = selected_model or GROQ_MODEL
     resp = httpx.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": GROQ_MODEL,
+            "model": active_model,
             # gpt-oss is a reasoning model: it spends part of max_tokens on a hidden
             # "reasoning" field before writing the actual answer, so give it headroom
             # and keep the reasoning budget low to avoid burning tokens/latency on it.
@@ -333,7 +347,7 @@ def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             # ...but only gpt-oss accepts that parameter. Sending it to
             # groq/compound is a hard 400, which made that model unusable
             # here even though it answers fine without it.
-            **({"reasoning_effort": "low"} if GROQ_MODEL.startswith("openai/gpt-oss") else {}),
+            **({"reasoning_effort": "low"} if active_model.startswith("openai/gpt-oss") else {}),
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=120.0,
@@ -360,7 +374,7 @@ def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
         "groq", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
         0.0,
         user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-        meta={"model": GROQ_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
+        meta={"model": active_model, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
     )
     return text.strip(), 0.0
 
@@ -368,30 +382,18 @@ def _groq_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
 GEMINI_MODEL = "gemini-3.6-flash"
 
 
-def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
-    keys = [{"id": None, "token": key} for key in GEMINI_API_KEYS]
-    try:
-        from src.db.session import SessionLocal
-        from src.db.models import HuggingFaceAccount
-        db = SessionLocal()
-        try:
-            rows = (db.query(HuggingFaceAccount.id, HuggingFaceAccount.token)
-                    .filter(HuggingFaceAccount.provider == "gemini", HuggingFaceAccount.is_enabled == True)
-                    .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst()).all())
-            if rows:
-                keys = [{"id": row[0], "token": row[1]} for row in rows]
-        finally:
-            db.close()
-    except Exception:
-        pass
+def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict, selected_model: Optional[str] = None) -> tuple:
+    from src.pipeline.images import _provider_accounts_from_db
+    keys = _provider_accounts_from_db("gemini")
     if not keys:
         raise RuntimeError("GEMINI_API_KEY is not configured on the server.")
+    active_model = selected_model or GEMINI_MODEL
     last_error = None
     for account in keys:
         key = account["token"]
         try:
             resp = httpx.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{active_model}:generateContent",
             params={"key": key},
             json={
             "contents": [{"parts": [{"text": prompt}]}],
@@ -417,15 +419,19 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
                 raise RuntimeError(f"Gemini text generation returned no text content (finishReason={reason}).")
             usage = data.get("usageMetadata") or {}
             in_tok, out_tok = usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
-            log_usage("gemini", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens", 0.0, user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"), meta={"model": GEMINI_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True})
+            log_usage("gemini", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens", 0.0, user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"), meta={"model": active_model, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True})
             if account["id"]:
                 from src.pipeline.images import _mark_provider_account
                 _mark_provider_account(account["id"], "active")
             return text, 0.0
         except Exception as exc:
-            last_error = exc
-            continue
-def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict, *, images=None) -> tuple:
+            from src.utils.provider_keys import mark, error_status
+            last_error = error_status(exc)
+            mark(account["id"], *last_error)
+    raise RuntimeError(f"Toutes les clés Gemini ont échoué : {last_error[1] if last_error else 'aucune clé disponible'}")
+
+
+def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict, *, images=None, model: Optional[str] = None) -> tuple:
     """Ollama local or tunneled native chat endpoint.
 
     The native endpoint is used because it reliably honors ``think: false``
@@ -437,7 +443,7 @@ def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict, *, images=No
         raise RuntimeError("OLLAMA_BASE_URL is not configured on the server.")
     from src.utils.ollama import request_headers
     from src.config import OLLAMA_VISION_MODEL
-    selected_model = OLLAMA_VISION_MODEL if images else OLLAMA_MODEL
+    selected_model = OLLAMA_VISION_MODEL if images else (model or OLLAMA_MODEL)
     message = {"role": "user", "content": prompt}
     if images:
         import base64
@@ -492,7 +498,9 @@ def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict, *, images=No
     raise RuntimeError(f"All Ollama endpoints failed: {last_exc}")
 
 
+@rotating("openrouter")
 def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
+    OPENROUTER_API_KEY = provider_key_value("openrouter")
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not configured on the server.")
     # OPENROUTER_FREE_MODEL is a reasoning model — it spends completion
@@ -612,15 +620,15 @@ def generate_text(
     def _selected_model(provider_id: str) -> Optional[str]:
         return selected_task_model("text", provider_id)
     providers = {
-        "anthropic": lambda: _anthropic_complete(prompt, max_tokens, model, usage_ctx, enable_web_search=enable_web_search),
+        "anthropic": lambda: _anthropic_complete(prompt, max_tokens, _selected_model("anthropic") or model, usage_ctx, enable_web_search=enable_web_search),
         "kie": lambda: _kie_complete(prompt, max_tokens, usage_ctx, selected_model=_selected_model("kie")),
-        "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx),
-        "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx),
-        "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx),
-        "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
-        "xai": lambda: _xai_complete(prompt, max_tokens, usage_ctx),
-        "gemini": lambda: _gemini_complete(prompt, max_tokens, usage_ctx),
-        "ollama": lambda: _ollama_complete(prompt, max_tokens, usage_ctx),
+        "deepseek": lambda: _deepseek_complete(prompt, max_tokens, usage_ctx, _selected_model("deepseek")),
+        "fal": lambda: _fal_complete(prompt, max_tokens, usage_ctx, _selected_model("fal")),
+        "openai": lambda: _openai_complete(prompt, max_tokens, usage_ctx, _selected_model("openai")),
+        "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx, _selected_model("groq")),
+        "xai": lambda: _xai_complete(prompt, max_tokens, usage_ctx, _selected_model("xai")),
+        "gemini": lambda: _gemini_complete(prompt, max_tokens, usage_ctx, _selected_model("gemini")),
+        "ollama": lambda: _ollama_complete(prompt, max_tokens, usage_ctx, model=_selected_model("ollama")),
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]

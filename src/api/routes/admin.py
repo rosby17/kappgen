@@ -1512,7 +1512,7 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
 
 IMAGE_KEY_PROVIDERS = [
     "huggingface", "fal", "gemini", "anthropic", "kie",
-    "openai", "deepseek", "groq", "xai", "izivoice", "ai33pro",
+    "openai", "deepseek", "groq", "xai", "izivoice", "ai33pro", "ollama",
 ]
 
 
@@ -1520,29 +1520,10 @@ IMAGE_KEY_PROVIDERS = [
 def list_hf_accounts(provider: str = "huggingface", admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     if provider not in IMAGE_KEY_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {provider}")
-    accounts = (
-        db.query(HuggingFaceAccount)
-        .filter(HuggingFaceAccount.provider == provider)
-        .order_by(HuggingFaceAccount.created_at.asc())
-        .all()
-    )
-    result = [a.to_dict() for a in accounts]
-    # Show keys supplied through environment configuration as read-only pool
-    # entries, so the admin can see every available credential in one place.
-    from src import config
-    env_names = {
-        "huggingface": "HUGGINGFACE_API_KEY", "fal": "FAL_API_KEY", "gemini": "GEMINI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY", "kie": "KIE_API_KEY", "openai": "OPENAI_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY", "groq": "GROQ_API_KEY", "xai": "XAI_API_KEY", "izivoice": "IZIVOICE_API_KEY",
-        "ai33pro": "AI33PRO_API_KEY",
-    }
-    env_key = getattr(config, env_names.get(provider, ""), "") if env_names.get(provider) else ""
-    if env_key and not accounts:
-        result.insert(0, {"id": f"env-{provider}", "provider": provider,
-                          "token_preview": f"{env_key[:8]}...{env_key[-4:]}",
-                          "label": "Configurée (.env)", "status": "active",
-                          "is_enabled": True, "read_only": True})
-    return result
+    from src.utils.provider_keys import ensure_imported
+    ensure_imported(db, provider)
+    db.commit()
+    return [a.to_dict() for a in db.query(HuggingFaceAccount).filter(HuggingFaceAccount.provider == provider).order_by(HuggingFaceAccount.created_at.asc()).all()]
 
 
 class HfAccountPayload(BaseModel):
@@ -1581,15 +1562,14 @@ def add_hf_account(payload: HfAccountPayload, admin: User = Depends(get_current_
     if payload.provider not in IMAGE_KEY_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {payload.provider}")
     token = payload.token.strip()
-    if not token:
+    if not token or '\n' in token or '\r' in token:
         raise HTTPException(status_code=400, detail="Le token ne peut pas être vide.")
-    if db.query(HuggingFaceAccount).filter(HuggingFaceAccount.token == token).first():
-        raise HTTPException(status_code=400, detail="Ce token est déjà enregistré.")
-
-    if payload.provider == "huggingface":
-        status, error = _test_hf_token(token)
-    else:
-        status, error = "active", None
+    from src.utils.provider_keys import ensure_imported, check, find_token
+    ensure_imported(db, payload.provider)
+    db.commit()
+    if find_token(db, token):
+        raise HTTPException(status_code=409, detail="Cette clé est déjà enregistrée.")
+    status, error = check(payload.provider, token)
     account = HuggingFaceAccount(
         provider=payload.provider,
         token=token,
@@ -1601,7 +1581,8 @@ def add_hf_account(payload: HfAccountPayload, admin: User = Depends(get_current_
     db.add(account)
     db.commit()
     db.refresh(account)
-    return account.to_dict()
+    from src.utils.provider_keys import sync_environment_file
+    return {**account.to_dict(), "environment_sync": sync_environment_file(account.provider)}
 
 
 @router.post("/hf-accounts/{account_id}/check")
@@ -1609,28 +1590,52 @@ def check_hf_account(account_id: str, admin: User = Depends(get_current_admin), 
     account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
-    if account.provider == "huggingface":
-        status, error = _test_hf_token(account.token)
-        account.status = status
-        account.last_error = error
+    from src.utils.provider_keys import check
+    account.status, account.last_error = check(account.provider, account.token)
     account.last_checked_at = datetime.utcnow()
     db.commit()
     db.refresh(account)
     return account.to_dict()
 
 
+class ProviderKeyUpdate(BaseModel):
+    token: Optional[str] = None
+    label: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+
 @router.patch("/hf-accounts/{account_id}")
-def update_hf_account(account_id: str, is_enabled: Optional[bool] = None, label: Optional[str] = None, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+def update_hf_account(account_id: str, payload: Optional[ProviderKeyUpdate] = None, is_enabled: Optional[bool] = None, label: Optional[str] = None, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
+    from src.utils.provider_keys import ensure_imported
+    ensure_imported(db, account.provider)
+    if payload:
+        if payload.token is not None:
+            token = payload.token.strip()
+            if not token or '\n' in token or '\r' in token:
+                raise HTTPException(status_code=400, detail="La clé ne peut pas être vide.")
+            from src.utils.provider_keys import find_token
+            duplicate = find_token(db, token, exclude_id=account.id)
+            if duplicate:
+                raise HTTPException(status_code=409, detail="Cette clé est déjà enregistrée.")
+            account.token = token
+            from src.utils.provider_keys import check
+            account.status, account.last_error = check(account.provider, token)
+            account.last_checked_at = datetime.utcnow()
+        if payload.label is not None:
+            label = payload.label
+        if payload.is_enabled is not None:
+            is_enabled = payload.is_enabled
     if is_enabled is not None:
         account.is_enabled = is_enabled
     if label is not None:
         account.label = label.strip() or None
     db.commit()
     db.refresh(account)
-    return account.to_dict()
+    from src.utils.provider_keys import sync_environment_file
+    return {**account.to_dict(), "environment_sync": sync_environment_file(account.provider)}
 
 
 @router.delete("/hf-accounts/{account_id}")
@@ -1638,9 +1643,13 @@ def delete_hf_account(account_id: str, admin: User = Depends(get_current_admin),
     account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="Compte introuvable.")
+    provider = account.provider
+    from src.utils.provider_keys import ensure_imported
+    ensure_imported(db, provider)
     db.delete(account)
     db.commit()
-    return {"deleted": True}
+    from src.utils.provider_keys import sync_environment_file
+    return {"deleted": True, "environment_sync": sync_environment_file(provider)}
 
 
 # --- Emergency kill switch: stop every paid API call platform-wide ---------

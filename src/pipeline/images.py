@@ -557,58 +557,15 @@ def _generate_with_kie_image(prompt: str, output_path: Path, client: httpx.Clien
 
 
 def _provider_accounts_from_db(provider: str, env_fallback_keys: Optional[List[str]] = None) -> List[Any]:
-    """Admin-managed key pool for one provider (src/api/routes/admin.py's
-    hf-accounts routes / IMAGE_KEY_PROVIDERS) — "huggingface", "fal",
-    "izivoice", "gemini" (images) and "anthropic", "kie" (text generation,
-    see ai_text.py). Ordered by last_used_at ascending (nulls first) so
-    load spreads evenly across keys instead of hammering whichever sorts
-    first. Falls back to `env_fallback_keys` (wrapped as plain dicts, no id)
-    only if the pool is empty for this provider, so an existing
-    single-env-var deployment keeps working before anyone's added a key via
-    the admin UI."""
-    from src.db.session import SessionLocal
-    from src.db.models import HuggingFaceAccount
-    db = SessionLocal()
-    try:
-        rows = (
-            db.query(HuggingFaceAccount)
-            .filter(HuggingFaceAccount.provider == provider, HuggingFaceAccount.is_enabled == True)  # noqa: E712
-            .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst())
-            .all()
-        )
-        if rows:
-            return [{"id": r.id, "token": r.token} for r in rows]
-    finally:
-        db.close()
-    return [{"id": None, "token": key} for key in (env_fallback_keys or []) if key]
+    from src.utils.provider_keys import accounts
+    return accounts(provider)
 
 
 def _mark_provider_account(account_id: Optional[str], status: str, error: Optional[str] = None) -> None:
-    """Best-effort status update after a real attempt — never allowed to
-    fail the actual generation it's tracking (same fail-open convention as
-    cost_tracking.log_usage)."""
-    if not account_id:
-        return
-    try:
-        from src.db.session import SessionLocal
-        from src.db.models import HuggingFaceAccount
-        from datetime import datetime
-        db = SessionLocal()
-        try:
-            account = db.query(HuggingFaceAccount).filter(HuggingFaceAccount.id == account_id).first()
-            if account:
-                account.status = status
-                account.last_used_at = datetime.utcnow()
-                # Clear the stale error the moment an account works again —
-                # leaving a months-old "402 Payment Required" visible under a
-                # green "Actif" badge (which is what an admin actually sees)
-                # reads as "this is broken right now" when it isn't.
-                account.last_error = error if status != "active" else None
-                db.commit()
-        finally:
-            db.close()
-    except Exception:
-        pass
+    from src.utils.provider_keys import mark
+    # Legacy call sites do not reliably classify failures; avoid false invalid labels.
+    mark(account_id, status if status in ('active', 'quota_exhausted') else 'error',
+         None if status == 'active' else 'Échec du dernier appel ; revérifiez cette clé.')
 
 
 def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: httpx.Client, size: str = "1280x720", operation: str = "image") -> Path:
@@ -670,36 +627,8 @@ def _generate_with_huggingface_flux(prompt: str, output_path: Path, client: http
 
 
 def _generate_with_key_pool(provider: str, env_fallback_key: str, call: "callable") -> Path:
-    """Rotates through the admin-managed key pool for a paid provider (fal,
-    Izivoice), same least-recently-used/mark-on-failure pattern as Hugging
-    Face above — one exhausted/invalid key doesn't stall generation as long
-    as another one in the pool still works. `call(api_key)` performs the
-    actual request and must raise on failure (an httpx.HTTPStatusError with
-    a 401/402/429 marks the key as exhausted rather than invalid)."""
-    accounts = _provider_accounts_from_db(provider, [env_fallback_key] if env_fallback_key else [])
-    if not accounts:
-        raise RuntimeError(f"No {provider} API key configured (add one in the admin panel, or set the env var).")
-
-    last_exc: Optional[Exception] = None
-    for account in accounts:
-        try:
-            result = call(account["token"])
-            _mark_provider_account(account["id"], "active")
-            return result
-        except httpx.HTTPStatusError as exc:
-            last_exc = exc
-            if exc.response is not None and exc.response.status_code in (401, 402, 429):
-                logger.warning(f"{provider} key {account['id'] or '(env)'} exhausted/rejected ({exc.response.status_code}), trying next key...")
-                status = "invalid" if exc.response.status_code == 401 else "quota_exhausted"
-                _mark_provider_account(account["id"], status, str(exc)[:300])
-                continue
-            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
-            raise
-        except Exception as exc:
-            last_exc = exc
-            _mark_provider_account(account["id"], "invalid", str(exc)[:300])
-            continue
-    raise RuntimeError(f"All {len(accounts)} {provider} key(s) failed. Last error: {last_exc}")
+    from src.utils.provider_keys import run
+    return run(provider, call)
 
 
 def generate_thumbnail_image(

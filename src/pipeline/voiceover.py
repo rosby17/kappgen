@@ -1,3 +1,4 @@
+from src.utils.provider_keys import rotating, key as provider_key_value
 import re
 import time
 import json
@@ -302,6 +303,32 @@ def _split_audio_for_stt(audio_path: Path, chunk_dir: Path) -> List[Path]:
     return sorted(chunk_dir.glob("chunk_*.mp3"))
 
 
+def _transcribe_chunk(provider, client, chunk_path):
+    from src.utils.provider_keys import run
+    def request(api_key):
+        if provider == "ai33pro":
+            from src.pipeline import ai33_provider
+            with _izivoice_semaphore:
+                task_id = ai33_provider.submit_stt_with_webhook(client, chunk_path, api_key)
+                metadata = ai33_provider.await_stt_webhook_result(task_id, client=client, api_key=api_key)
+        else:
+            with _izivoice_semaphore:
+                with open(chunk_path, "rb") as f:
+                    resp = _post_with_retry(
+                        client,
+                        f"{IZIVOICE_BASE_URL}/speech-to-text",
+                        headers=_izivoice_headers(api_key),
+                        files={"file": (chunk_path.name, f, "audio/mpeg")},
+                        timeout=60.0
+                    )
+                resp.raise_for_status()
+                task_id = resp.json()["task_id"]
+                task = _poll_task(task_id, client, api_key)
+                metadata = task.get("metadata", {}) or {}
+        return metadata
+    return run(provider, request)
+
+
 def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key: Optional[str] = None, user_id: Optional[str] = None, video_id: Optional[str] = None, provider: str = "izivoice", progress_callback: Optional[Callable[[str, int], None]] = None) -> Dict[str, Any]:
     """
     Transcribes an audio file via speech-to-text (Izivoice, or ai33.pro direct
@@ -360,25 +387,7 @@ def transcribe_audio_izivoice(audio_path: Path, fallback_text: str = "", api_key
                 logger.info(f"Transcribing chunk {chunk_path.name} ({chunk_duration:.1f}s, offset={offset:.1f}s)...")
 
                 try:
-                    if provider == "ai33pro":
-                        from src.pipeline import ai33_provider
-                        with _izivoice_semaphore:
-                            task_id = ai33_provider.submit_stt_with_webhook(client, chunk_path, api_key)
-                            metadata = ai33_provider.await_stt_webhook_result(task_id, client=client, api_key=api_key)
-                    else:
-                        with _izivoice_semaphore:
-                            with open(chunk_path, "rb") as f:
-                                resp = _post_with_retry(
-                                    client,
-                                    f"{IZIVOICE_BASE_URL}/speech-to-text",
-                                    headers=_izivoice_headers(api_key),
-                                    files={"file": (chunk_path.name, f, "audio/mpeg")},
-                                    timeout=60.0
-                                )
-                            resp.raise_for_status()
-                            task_id = resp.json()["task_id"]
-                            task = _poll_task(task_id, client, api_key)
-                            metadata = task.get("metadata", {}) or {}
+                    metadata = _transcribe_chunk(provider, client, chunk_path)
                     chunk_text, chunk_words = _extract_words_from_stt_metadata(metadata, client)
                 except Exception as chunk_err:
                     # One chunk failing (Izivoice has returned 500s on some
@@ -528,8 +537,10 @@ def generate_transcript_for_audio(audio_path: Path, fallback_text: str = "", api
     }
 
 
+@rotating("izivoice")
 def _tts_via_izivoice(client: httpx.Client, script_text: str, voice_id: Optional[str], voice_settings: Optional[Dict[str, Any]], api_key: str) -> Tuple[str, str]:
     """Returns (voice_id_used, audio_url)."""
+    api_key = provider_key_value("izivoice")
     voice_id = voice_id or _get_default_voice_id(client, api_key)
     logger.info("Requesting voiceover from Izivoice /text-to-speech...")
     with _izivoice_semaphore:
@@ -574,9 +585,11 @@ def _tts_via_izivoice(client: httpx.Client, script_text: str, voice_id: Optional
     return voice_id, audio_url
 
 
+@rotating("ai33pro")
 def _tts_via_ai33(client: httpx.Client, script_text: str, voice_id: Optional[str], voice_settings: Optional[Dict[str, Any]], api_key: str) -> Tuple[str, str]:
     """Returns (voice_id_used, audio_url) — same shape as _tts_via_izivoice,
     ai33.pro directly (see src/pipeline/ai33_provider.py)."""
+    api_key = provider_key_value("ai33pro")
     from src.pipeline import ai33_provider
     voice_id = voice_id or ai33_provider.default_voice_id(client, api_key)
     logger.info("Requesting voiceover from ai33.pro /v3/text-to-speech...")

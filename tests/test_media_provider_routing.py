@@ -3,12 +3,12 @@ import httpx
 import pytest
 
 from src.pipeline import voiceover, music, images
-from src.utils import app_settings, media_providers, provider_status
+from src.utils import app_settings, media_providers, provider_status, provider_keys
 
 
 @pytest.fixture
 def keys(monkeypatch):
-    monkeypatch.setattr(provider_status, '_get_effective_key', lambda p, env='': {'ai33pro': 'ai33-db-key', 'izivoice': 'izi-db-key'}.get(p, ''))
+    monkeypatch.setattr(provider_keys, 'key', lambda p, env='': {'ai33pro': 'ai33-db-key', 'izivoice': 'izi-db-key'}.get(p, ''))
     monkeypatch.setattr(app_settings, 'paid_apis_disabled', lambda: False)
 
 
@@ -26,7 +26,7 @@ def test_tts_uses_saved_source_even_with_old_personal_key(monkeypatch, tmp_path,
     monkeypatch.setattr(voiceover, 'log_usage', lambda *a, **kw: None)
     path, _ = voiceover.generate_voiceover('Bonjour', tmp_path / 'voice.mp3', voice_id='v', api_key='old-personal-key', transcribe=False)
     assert path.read_bytes() == b'audio'
-    assert calls == ['ai33-db-key' if provider == 'ai33pro' else 'old-personal-key']
+    assert calls == ['ai33-db-key' if provider == 'ai33pro' else 'izi-db-key']
 
 
 def test_transcription_obeys_kappgen_selection(monkeypatch, tmp_path, keys):
@@ -42,7 +42,7 @@ def test_transcription_obeys_kappgen_selection(monkeypatch, tmp_path, keys):
 def test_no_implicit_izivoice_fallback(monkeypatch, tmp_path, order):
     monkeypatch.setattr(app_settings, 'voiceover_provider_order', lambda: order)
     monkeypatch.setattr(app_settings, 'music_provider_order', lambda: order)
-    monkeypatch.setattr(provider_status, '_get_effective_key', lambda p, env='': 'old-izi-key' if p == 'izivoice' else '')
+    monkeypatch.setattr(provider_keys, 'key', lambda p, env='': 'old-izi-key' if p == 'izivoice' else '')
     assert voiceover._configured_providers('old-personal-key') == []
     assert music._configured_music_providers() == []
     with pytest.raises(RuntimeError, match='générateur vocal'):

@@ -1,3 +1,4 @@
+from src.utils.provider_keys import rotating, key as provider_key_value
 import base64
 import json
 import re
@@ -101,7 +102,9 @@ MUSIC_PROMPT_INSTRUCTION = (
 # credits, ...) so the fallback chain below can just try the next one.
 # ---------------------------------------------------------------------------
 
+@rotating("anthropic")
 def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
+    ANTHROPIC_API_KEY = provider_key_value("anthropic")
     import anthropic
 
     if not ANTHROPIC_API_KEY:
@@ -148,10 +151,12 @@ def _analyze_many_with_anthropic(images: list, instruction: str) -> str:
     raise RuntimeError("Anthropic vision analysis returned no text content.")
 
 
+@rotating("fal")
 def _analyze_many_with_fal(images: list, instruction: str) -> str:
     """Runs Claude through fal.ai's OpenRouter vision router — a fallback that
     burns fal.ai credits instead of Anthropic's, for when the Anthropic
     account is out of credit."""
+    FAL_API_KEY = provider_key_value("fal")
     if not FAL_API_KEY:
         raise RuntimeError("FAL_API_KEY is not configured on the server.")
 
@@ -176,7 +181,9 @@ def _analyze_many_with_fal(images: list, instruction: str) -> str:
     return output.strip()
 
 
+@rotating("openai")
 def _analyze_many_with_openai(images: list, instruction: str) -> str:
+    OPENAI_API_KEY = provider_key_value("openai")
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
 
@@ -203,12 +210,14 @@ def _analyze_many_with_openai(images: list, instruction: str) -> str:
     return text.strip()
 
 
+@rotating("groq")
 def _analyze_many_with_groq(images: list, instruction: str) -> str:
     """Free-tier vision fallback. Groq serves multimodal Llama models on an
     OpenAI-compatible endpoint, with a free tier that needs no card — the only
     provider in this chain that still answers when every paid balance is dry
     (which is exactly what happened: Anthropic out of credit, fal.ai locked
     pending top-up, OpenAI returning 429/insufficient_quota)."""
+    GROQ_API_KEY = provider_key_value("groq")
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not configured on the server.")
 
@@ -239,7 +248,9 @@ def _analyze_many_with_groq(images: list, instruction: str) -> str:
     return text.strip()
 
 
+@rotating("anthropic")
 def _generate_music_prompt_with_anthropic(user_text: str) -> str:
+    ANTHROPIC_API_KEY = provider_key_value("anthropic")
     import anthropic
 
     if not ANTHROPIC_API_KEY:
@@ -261,7 +272,9 @@ def _generate_music_prompt_with_anthropic(user_text: str) -> str:
     raise RuntimeError("Anthropic music prompt generation returned no text content.")
 
 
+@rotating("fal")
 def _generate_music_prompt_with_fal(user_text: str) -> str:
+    FAL_API_KEY = provider_key_value("fal")
     if not FAL_API_KEY:
         raise RuntimeError("FAL_API_KEY is not configured on the server.")
 
@@ -278,7 +291,9 @@ def _generate_music_prompt_with_fal(user_text: str) -> str:
     return output.strip()
 
 
+@rotating("openai")
 def _generate_music_prompt_with_openai(user_text: str) -> str:
+    OPENAI_API_KEY = provider_key_value("openai")
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
 

@@ -1,3 +1,4 @@
+from src.utils.provider_keys import rotating, key as provider_key_value
 import json
 import random
 import time
@@ -69,6 +70,7 @@ def _poll_izivoice_task(task_id: str, client: httpx.Client) -> Dict[str, Any]:
     raise TimeoutError(f"Izivoice music task {task_id} did not complete within {TASK_POLL_TIMEOUT_SECONDS}s")
 
 
+@rotating("izivoice")
 def _music_via_izivoice(
     client: httpx.Client, prompt: str, output_path: Path,
     lyrics: Optional[str] = None, title: Optional[str] = None,
@@ -89,6 +91,7 @@ def _music_via_izivoice(
     Returns {success, task_id}, polled via GET /tasks/{task_id} until status
     == "done", at which point metadata.audio_url holds the track.
     """
+    IZIVOICE_API_KEY = provider_key_value("izivoice")
     if lyrics:
         payload = {"create_mode": "custom", "title": title or "", "lyrics": lyrics}
         if tags:
@@ -124,6 +127,7 @@ def _music_via_izivoice(
     return output_path
 
 
+@rotating("ai33pro")
 def _music_via_ai33(
     client: httpx.Client, prompt: str, output_path: Path,
     lyrics: Optional[str] = None, title: Optional[str] = None,
@@ -133,6 +137,7 @@ def _music_via_ai33(
     src/pipeline/ai33_provider.py) — bypasses Izivoice's own account/quota
     entirely rather than changing what's generated (Izivoice's own /music
     route is itself a thin passthrough to this same upstream endpoint)."""
+    AI33PRO_API_KEY = provider_key_value("ai33pro")
     from src.pipeline import ai33_provider
     task_id = ai33_provider.submit_music_generation(
         client, prompt, make_instrumental=(not lyrics), api_key=provider_key("ai33pro"),
@@ -150,6 +155,7 @@ def _music_via_ai33(
     return output_path
 
 
+@rotating("kie")
 def _music_via_kie(
     client: httpx.Client, prompt: str, output_path: Path,
     lyrics: Optional[str] = None, title: Optional[str] = None,
@@ -168,6 +174,7 @@ def _music_via_kie(
     real callback — a placeholder URL is passed since nothing needs to
     reach it.
     """
+    KIE_API_KEY = provider_key_value("kie")
     api_key = KIE_API_KEY
     if not api_key:
         raise RuntimeError("KIE_API_KEY is not configured on the server.")

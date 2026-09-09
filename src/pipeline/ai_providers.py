@@ -57,7 +57,8 @@ def ids_for(capability: str) -> List[str]:
 
 def is_configured(provider_id: str) -> bool:
     entry = _BY_ID.get(provider_id)
-    return bool(entry and getattr(config, entry["key"], ""))
+    from src.utils.provider_keys import key
+    return bool(entry and key(provider_id))
 
 
 def configured_map() -> dict:

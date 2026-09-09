@@ -4,6 +4,7 @@ from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, 
 from sqlalchemy.orm import relationship, backref
 from src.db.session import Base
 from src.models.project import VideoStatus
+from src.utils.provider_secret_storage import ProviderSecret
 
 class User(Base):
     __tablename__ = "users"
@@ -871,7 +872,7 @@ class HuggingFaceAccount(Base):
     # this key belongs to. Defaults to "huggingface" for rows created before
     # this column existed.
     provider = Column(String(20), nullable=False, default="huggingface")
-    token = Column(String(255), nullable=False, unique=True)
+    token = Column(ProviderSecret(), nullable=False, unique=True)
     label = Column(String(255), nullable=True)
     # "active" (last use succeeded or never tried), "quota_exhausted" (401/402/429
     # from the provider), "invalid" (any other hard failure) — purely informational,
@@ -888,7 +889,7 @@ class HuggingFaceAccount(Base):
         return {
             "id": self.id,
             "provider": self.provider,
-            "token_preview": f"{self.token[:8]}...{self.token[-4:]}" if len(self.token) > 12 else self.token,
+            "token_preview": f"{self.token[:8]}...{self.token[-4:]}" if len(self.token) > 12 else "••••",
             "label": self.label,
             "status": self.status,
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,

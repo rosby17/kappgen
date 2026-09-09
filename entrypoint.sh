@@ -16,6 +16,10 @@ ROLE="${ROLE:-all}"
 # default trimmed to 2 to fit the real budget, still overridable.
 API_UVICORN_WORKERS="${API_UVICORN_WORKERS:-2}"
 
+# Fail before starting API or worker if the shared encryption secret or
+# credential migration is missing. This command performs no database writes.
+python -m scripts.encrypt_provider_keys --check
+
 case "$ROLE" in
   api)
     # Multiple worker processes instead of a single one: route handlers make

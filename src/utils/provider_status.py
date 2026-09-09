@@ -18,28 +18,8 @@ PROBE_TIMEOUT = 15.0
 
 
 def _get_effective_key(provider: str, env_key: str = "") -> str:
-    """Returns the environment key if non-empty, otherwise searches for an
-    enabled key in the database pool (HuggingFaceAccount table)."""
-    if env_key:
-        return env_key
-    try:
-        from src.db.session import SessionLocal
-        from src.db.models import HuggingFaceAccount
-        db = SessionLocal()
-        try:
-            account = (
-                db.query(HuggingFaceAccount)
-                .filter(HuggingFaceAccount.provider == provider, HuggingFaceAccount.is_enabled == True)  # noqa: E712
-                .order_by(HuggingFaceAccount.last_used_at.asc().nullsfirst())
-                .first()
-            )
-            if account and account.token:
-                return account.token
-        finally:
-            db.close()
-    except Exception:
-        pass
-    return ""
+    from src.utils.provider_keys import key
+    return key(provider)
 
 
 def _check_anthropic():
@@ -73,7 +53,7 @@ def _check_openai():
         if resp.status_code in (402, 429) or "insufficient_quota" in resp.text.lower() or "quota" in resp.text.lower():
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits insuffisants sur le compte OpenAI."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide et solde disponible."}
     except httpx.HTTPStatusError as exc:
@@ -98,7 +78,7 @@ def _check_deepseek():
         if resp.status_code in (402, 429) or "insufficient" in resp.text.lower():
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde insuffisant sur le compte DeepSeek — à recharger sur platform.deepseek.com."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide et compte crédité."}
     except httpx.HTTPStatusError as exc:
@@ -123,7 +103,7 @@ def _check_groq():
         if resp.status_code in (402, 429):
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais quota/solde insuffisant sur le compte Groq."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide. Gratuit."}
     except httpx.HTTPStatusError as exc:
@@ -193,7 +173,7 @@ def _check_fal():
             timeout=PROBE_TIMEOUT,
         )
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou non reconnue par fal.ai."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou non reconnue par fal.ai."}
         if resp.status_code in (402, 429) or "credit" in resp.text.lower() or "payment" in resp.text.lower():
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits insuffisants sur le compte fal.ai."}
         if resp.status_code in (200, 404):
@@ -235,10 +215,10 @@ def _check_ai33pro():
             headers={"xi-api-key": key},
             timeout=PROBE_TIMEOUT,
         )
-        if resp.status_code in (402, 429) or "credits" in resp.text.lower():
+        if resp.status_code in (402, 429) or (resp.is_error and "credits" in resp.text.lower()):
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde/crédits insuffisants sur le compte ai33.pro."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide et opérationnelle."}
     except httpx.HTTPStatusError as exc:
@@ -263,7 +243,7 @@ def _check_xai():
         if resp.status_code in (402, 429):
             return {"configured": True, "status": "quota_exhausted", "detail": "Clé valide mais solde insuffisant sur le compte xAI."}
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
+            return {"configured": True, "status": "invalid", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
         return {"configured": True, "status": "ok", "detail": "Clé valide."}
     except Exception as exc:
@@ -282,7 +262,7 @@ def _check_ollama():
         headers = request_headers()
         resp = httpx.get(f"{base_url}/api/tags", headers=headers, timeout=PROBE_TIMEOUT)
         if resp.status_code == 401:
-            return {"configured": True, "status": "error", "detail": "Authentification refusée par le serveur Ollama."}
+            return {"configured": True, "status": "invalid", "detail": "Authentification refusée par le serveur Ollama."}
         resp.raise_for_status()
         data = resp.json()
         models = data.get("models") or []

@@ -13,7 +13,7 @@ elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+ps
 logger.info(f"Connecting database engine: {'PostgreSQL / Supabase' if 'postgresql' in db_url else 'SQLite (' + db_url + ')'}")
 
 # Engine configuration for SQLite or PostgreSQL (Supabase)
-engine_kwargs = {}
+engine_kwargs = {"hide_parameters": True}
 if db_url.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
