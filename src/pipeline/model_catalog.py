@@ -103,6 +103,11 @@ MODEL_CATALOG = {
         "image": ["black-forest-labs/FLUX.1-schnell"],
         "thumbnail": ["black-forest-labs/FLUX.1-schnell"],
     },
+    "ollama": {
+        "label": "Ollama (Mac)",
+        "text": ["qwen3.5:latest", "qwen3-coder:30b", "qwen3-coder:latest"],
+        "vision": ["qwen3.5:latest"],
+    },
 }
 
 TASKS = ("text", "image", "thumbnail", "music", "voice")
@@ -216,6 +221,11 @@ MODEL_PRICING = {
 
     # Hugging Face
     "huggingface:black-forest-labs/FLUX.1-schnell": {"free_tier": True},
+
+    # Ollama (Local / Mac — Free)
+    "ollama:qwen3.5:latest": {"free_tier": True},
+    "ollama:qwen3-coder:30b": {"free_tier": True},
+    "ollama:qwen3-coder:latest": {"free_tier": True},
 }
 
 

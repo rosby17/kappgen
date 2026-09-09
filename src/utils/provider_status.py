@@ -11,6 +11,7 @@ from src.config import (
     AI33PRO_API_KEY, AI33PRO_BASE_URL,
     XAI_API_KEY, XAI_BASE_URL,
     GEMINI_API_KEY,
+    OLLAMA_BASE_URL, OLLAMA_API_KEY, OLLAMA_MODEL,
 )
 
 PROBE_TIMEOUT = 15.0
@@ -244,6 +245,30 @@ def _check_xai():
         return {"configured": True, "status": "error", "detail": f"xAI injoignable : {exc}"}
 
 
+def _check_ollama():
+    raw_url = _get_effective_key("ollama", OLLAMA_BASE_URL)
+    if not raw_url:
+        return {"configured": False, "status": "not_configured", "detail": "URL du serveur Ollama non configurée."}
+    base_url = raw_url.rstrip("/")
+    if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        base_url = f"https://{base_url}"
+    headers = {}
+    if OLLAMA_API_KEY:
+        headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
+    try:
+        resp = httpx.get(f"{base_url}/api/tags", headers=headers, timeout=PROBE_TIMEOUT)
+        if resp.status_code == 401:
+            return {"configured": True, "status": "error", "detail": "Authentification refusée par le serveur Ollama."}
+        resp.raise_for_status()
+        data = resp.json()
+        models = data.get("models") or []
+        names = [m.get("name", "") for m in models if m.get("name")]
+        detail = f"En ligne. Modèles : {', '.join(names[:3])}" if names else "En ligne (aucun modèle téléchargé)."
+        return {"configured": True, "status": "ok", "detail": detail}
+    except Exception as exc:
+        return {"configured": True, "status": "error", "detail": f"Ollama injoignable : {exc}"}
+
+
 def check_all_providers() -> list:
     checks = [
         ("anthropic", "Anthropic (Claude)", _check_anthropic),
@@ -255,6 +280,7 @@ def check_all_providers() -> list:
         ("izivoice", "Izivoice", _check_izivoice),
         ("ai33pro", "KappGen", _check_ai33pro),
         ("xai", "xAI (Grok)", _check_xai),
+        ("ollama", "Ollama (Mac)", _check_ollama),
     ]
     results = []
     for provider_id, label, fn in checks:

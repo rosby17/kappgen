@@ -14,6 +14,7 @@ from src.config import (
     ANTHROPIC_API_KEY, FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, GROQ_API_KEY, GEMINI_API_KEY, GEMINI_API_KEYS,
     KIE_API_KEY, KIE_BASE_URL, KIE_CLAUDE_MODEL, XAI_API_KEY, XAI_BASE_URL,
+    OLLAMA_BASE_URL, OLLAMA_API_KEY, OLLAMA_MODEL,
 )
 from src.utils.logger import logger
 from src.utils.cost_tracking import log_usage, estimate_anthropic_cost, estimate_openai_cost, estimate_deepseek_cost, estimate_kie_claude_cost, PRICING
@@ -388,7 +389,58 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
         except Exception as exc:
             last_error = exc
             continue
-    raise RuntimeError(f"All Gemini keys failed: {last_error}")
+def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
+    """Ollama local or tunneled OpenAI-compatible completions endpoint."""
+    from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
+    accounts = _provider_accounts_from_db("ollama", env_fallback_keys=[OLLAMA_BASE_URL] if OLLAMA_BASE_URL else [])
+    if not accounts:
+        raise RuntimeError("OLLAMA_BASE_URL is not configured on the server.")
+    last_exc = None
+    for account in accounts:
+        base_url = account["token"].rstrip("/")
+        if not base_url.startswith("http://") and not base_url.startswith("https://"):
+            base_url = f"https://{base_url}"
+        headers = {"Content-Type": "application/json"}
+        if OLLAMA_API_KEY:
+            headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
+        try:
+            resp = httpx.post(
+                f"{base_url}/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": OLLAMA_MODEL,
+                    "max_tokens": max(max_tokens, 1500),
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=180.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            choice = (data.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            text = message.get("content") or ""
+            if text:
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            if not text:
+                reasoning = message.get("reasoning") or ""
+                text = re.sub(r"<think>.*?</think>", "", reasoning, flags=re.DOTALL).strip()
+            if not text:
+                raise RuntimeError(f"Ollama ({OLLAMA_MODEL}) returned no text content.")
+            usage = data.get("usage") or {}
+            in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+            log_usage(
+                "ollama", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
+                0.0,
+                user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
+                meta={"model": OLLAMA_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
+            )
+            _mark_provider_account(account["id"], "active")
+            return text, 0.0
+        except Exception as exc:
+            _mark_provider_account(account["id"], "error", str(exc)[:300])
+            last_exc = exc
+            continue
+    raise RuntimeError(f"All Ollama endpoints failed: {last_exc}")
 
 
 def _openrouter_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> str:
@@ -517,6 +569,7 @@ def generate_text(
         "groq": lambda: _groq_complete(prompt, max_tokens, usage_ctx),
         "xai": lambda: _xai_complete(prompt, max_tokens, usage_ctx),
         "gemini": lambda: _gemini_complete(prompt, max_tokens, usage_ctx),
+        "ollama": lambda: _ollama_complete(prompt, max_tokens, usage_ctx),
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]

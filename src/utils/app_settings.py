@@ -142,7 +142,7 @@ AI_TEXT_PROVIDER_ORDER_KEY = "ai_text_provider_order"
 # appends every capable-but-unranked provider behind the ranked ones — this
 # order list alone can only reorder, never actually remove a provider from
 # the chain.
-AI_TEXT_FREE_PROVIDERS = {"groq", "gemini"}
+AI_TEXT_FREE_PROVIDERS = {"groq", "gemini", "ollama"}
 
 
 def ai_text_provider_order() -> List[str]:

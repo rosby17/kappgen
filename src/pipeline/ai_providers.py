@@ -29,6 +29,7 @@ PROVIDERS = [
     {"id": "groq",      "label": "Groq",               "key": "GROQ_API_KEY",      "capabilities": {"text", "vision"}},
     {"id": "xai",       "label": "xAI (Grok)",          "key": "XAI_API_KEY",       "capabilities": {"text"}},
     {"id": "gemini",    "label": "Google Gemini",      "key": "GEMINI_API_KEY",    "capabilities": {"text", "vision"}},
+    {"id": "ollama",    "label": "Ollama (Local / Mac)", "key": "OLLAMA_BASE_URL", "capabilities": {"text", "vision"}},
 ]
 
 ALL_IDS = [p["id"] for p in PROVIDERS]
