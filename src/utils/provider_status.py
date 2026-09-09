@@ -252,10 +252,9 @@ def _check_ollama():
     base_url = raw_url.rstrip("/")
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = f"https://{base_url}"
-    headers = {}
-    if OLLAMA_API_KEY:
-        headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
+    from src.utils.ollama import request_headers
     try:
+        headers = request_headers()
         resp = httpx.get(f"{base_url}/api/tags", headers=headers, timeout=PROBE_TIMEOUT)
         if resp.status_code == 401:
             return {"configured": True, "status": "error", "detail": "Authentification refusée par le serveur Ollama."}
@@ -263,7 +262,18 @@ def _check_ollama():
         data = resp.json()
         models = data.get("models") or []
         names = [m.get("name", "") for m in models if m.get("name")]
-        detail = f"En ligne. Modèles : {', '.join(names[:3])}" if names else "En ligne (aucun modèle téléchargé)."
+        if OLLAMA_MODEL not in names:
+            return {"configured": True, "status": "error", "detail": f"Modèle absent : {OLLAMA_MODEL}."}
+        probe = httpx.post(
+            f"{base_url}/api/chat", headers=headers,
+            json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "Hi"}],
+                  "options": {"num_predict": 8}, "stream": False, "think": False}, timeout=60.0,
+        )
+        probe.raise_for_status()
+        content = (probe.json().get("message") or {}).get("content")
+        if not str(content or "").strip():
+            raise ValueError("Réponse de génération Ollama invalide.")
+        detail = f"Génération vérifiée. Modèles : {', '.join(names[:3])}" if names else "En ligne (aucun modèle téléchargé)."
         return {"configured": True, "status": "ok", "detail": detail}
     except Exception as exc:
         return {"configured": True, "status": "error", "detail": f"Ollama injoignable : {exc}"}

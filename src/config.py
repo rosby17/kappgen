@@ -197,6 +197,9 @@ GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(","
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:latest")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen3.5:latest")
+OLLAMA_ACCESS_CLIENT_ID = os.getenv("OLLAMA_ACCESS_CLIENT_ID", "")
+OLLAMA_ACCESS_CLIENT_SECRET = os.getenv("OLLAMA_ACCESS_CLIENT_SECRET", "")
 
 # NOTE: NicheCut's database must always be its own, dedicated instance — never
 # shared with another project (see incident: an earlier setup pointed this at

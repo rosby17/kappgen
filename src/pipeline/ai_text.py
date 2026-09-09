@@ -389,50 +389,63 @@ def _gemini_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
         except Exception as exc:
             last_error = exc
             continue
-def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
-    """Ollama local or tunneled OpenAI-compatible completions endpoint."""
+def _ollama_complete(prompt: str, max_tokens: int, usage_ctx: dict, *, images=None) -> tuple:
+    """Ollama local or tunneled native chat endpoint.
+
+    The native endpoint is used because it reliably honors ``think: false``
+    with the installed Qwen model, unlike its OpenAI-compatibility endpoint.
+    """
     from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
     accounts = _provider_accounts_from_db("ollama", env_fallback_keys=[OLLAMA_BASE_URL] if OLLAMA_BASE_URL else [])
     if not accounts:
         raise RuntimeError("OLLAMA_BASE_URL is not configured on the server.")
+    from src.utils.ollama import request_headers
+    from src.config import OLLAMA_VISION_MODEL
+    selected_model = OLLAMA_VISION_MODEL if images else OLLAMA_MODEL
+    message = {"role": "user", "content": prompt}
+    if images:
+        import base64
+        message["images"] = [base64.b64encode(data).decode() for data, _mime in images]
     last_exc = None
     for account in accounts:
         base_url = account["token"].rstrip("/")
         if not base_url.startswith("http://") and not base_url.startswith("https://"):
             base_url = f"https://{base_url}"
-        headers = {"Content-Type": "application/json"}
-        if OLLAMA_API_KEY:
-            headers["Authorization"] = f"Bearer {OLLAMA_API_KEY}"
+        headers = request_headers()
         try:
             resp = httpx.post(
-                f"{base_url}/v1/chat/completions",
+                f"{base_url}/api/chat",
                 headers=headers,
                 json={
-                    "model": OLLAMA_MODEL,
-                    "max_tokens": max(max_tokens, 1500),
-                    "messages": [{"role": "user", "content": prompt}],
+                    "model": selected_model,
+                    "messages": [message],
+                    "stream": False,
+                    # Qwen otherwise spends a small response budget in its
+                    # private reasoning field, which is never usable output.
+                    "think": False,
+                    "options": {"num_predict": max_tokens},
                 },
                 timeout=180.0,
             )
             resp.raise_for_status()
             data = resp.json()
-            choice = (data.get("choices") or [{}])[0]
-            message = choice.get("message") or {}
-            text = message.get("content") or ""
+            response_message = data.get("message") or {}
+            text = response_message.get("content") or ""
             if text:
                 text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL).strip()
             if not text:
-                reasoning = message.get("reasoning") or ""
-                text = re.sub(r"<think>.*?</think>", "", reasoning, flags=re.DOTALL).strip()
-            if not text:
-                raise RuntimeError(f"Ollama ({OLLAMA_MODEL}) returned no text content.")
+                raise RuntimeError(f"Ollama ({selected_model}) returned no text content.")
             usage = data.get("usage") or {}
-            in_tok, out_tok = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+            # Native Ollama returns these counters at the response root;
+            # retain the nested fallback for proxies that normalize them.
+            in_tok = data.get("prompt_eval_count", usage.get("prompt_eval_count", 0))
+            out_tok = data.get("eval_count", usage.get("eval_count", 0))
             log_usage(
                 "ollama", usage_ctx.get("operation", "text"), in_tok + out_tok, "tokens",
                 0.0,
                 user_id=usage_ctx.get("user_id"), channel_id=usage_ctx.get("channel_id"), video_id=usage_ctx.get("video_id"),
-                meta={"model": OLLAMA_MODEL, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
+                meta={"model": selected_model, "input_tokens": in_tok, "output_tokens": out_tok, "free_tier": True},
             )
             _mark_provider_account(account["id"], "active")
             return text, 0.0

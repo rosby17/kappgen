@@ -329,7 +329,13 @@ def _diagnose_provider_error(exc: Exception) -> str:
 
 # Vision-capable providers only. DeepSeek is in the admin's provider list but
 # has no image input, so it's simply skipped here rather than failing a slot.
+def _analyze_many_with_ollama(images: list, instruction: str) -> str:
+    from src.pipeline.ai_text import _ollama_complete
+    return _ollama_complete(instruction, 1500, {"operation": "vision"}, images=images)[0]
+
+
 _VISION_PROVIDERS = {
+    "ollama": _analyze_many_with_ollama,
     "anthropic": _analyze_many_with_anthropic,
     "fal": _analyze_many_with_fal,
     "openai": _analyze_many_with_openai,
