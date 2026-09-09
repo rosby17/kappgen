@@ -37,7 +37,7 @@ MODEL_CATALOG = {
         "image": ["imagen-4", "gemini-2.5-flash-image"],
         "voice": ["gemini-2.5-flash-tts"],
     },
-    "izivoice": {"label": "Moteur KappGen", "voice": ["default"], "music": ["default"]},
+    "izivoice": {"label": "Izivoice", "voice": ["default"], "music": ["default"]},
     "ai33pro": {"label": "ai33.pro", "voice": ["default"], "music": ["default"]},
 }
 
