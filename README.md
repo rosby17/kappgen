@@ -1,4 +1,4 @@
-# Cahier des charges — NicheCut (MVP à jour)
+# Cahier des charges — KappGen (MVP à jour)
 
 > Destiné à un développeur ou un outil de codage IA. Contient tout le nécessaire pour démarrer sans allers-retours.
 
@@ -12,7 +12,7 @@ SaaS qui transforme un script texte ou un fichier audio déjà prêt en vidéo l
 
 Objectif d'usage typique : l'utilisateur soumet dix ou vingt scripts/audios le soir, ferme l'ordinateur, et retrouve ses vidéos prêtes le lendemain matin.
 
-**Ce que ce n'est PAS** : pas un éditeur vidéo manuel complet (pas de CapCut-like avec toutes les fonctionnalités de montage). NicheCut résout un seul problème de montage bien précis, répété en masse, pour un format de vidéo spécifique — pas de réglages à refaire à chaque vidéo, pas de synchronisation mot-à-mot, pas de format vertical, pas de découpage en segments parallèles pour le MVP.
+**Ce que ce n'est PAS** : pas un éditeur vidéo manuel complet (pas de CapCut-like avec toutes les fonctionnalités de montage). KappGen résout un seul problème de montage bien précis, répété en masse, pour un format de vidéo spécifique — pas de réglages à refaire à chaque vidéo, pas de synchronisation mot-à-mot, pas de format vertical, pas de découpage en segments parallèles pour le MVP.
 
 ---
 
@@ -27,7 +27,7 @@ Objectif d'usage typique : l'utilisateur soumet dix ou vingt scripts/audios le s
 | Moteur de rendu | FFmpeg (binaire local) | Gratuit, open source, filtres avancés |
 | Sous-titres | Génération ASS (libass) / Burn-in Pillow | Style avancé et karaoké mot-à-mot (`{\k...}`) |
 | Stockage fichiers | Système de fichiers local | Pas de coût cloud tant qu'on est en local/VPS unique |
-| Frontend Web UI | React + Vite + Tailwind CSS | Interface NicheCut moderne dark mode |
+| Frontend Web UI | React + Vite + Tailwind CSS | Interface KappGen moderne dark mode |
 
 ---
 
@@ -124,7 +124,7 @@ pip install -r requirements.txt
 # 2. Exécuter les tests automatisés
 .venv/bin/pytest tests/test_pipeline_end_to_end.py
 
-# 3. Démarrer l'application NicheCut (API FastAPI + Web UI)
+# 3. Démarrer l'application KappGen (API FastAPI + Web UI)
 ./scripts/run_local_test.sh
 ```
 

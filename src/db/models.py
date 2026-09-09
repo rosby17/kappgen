@@ -246,7 +246,7 @@ class Channel(Base):
     #   channel's own `timezone`), publish_schedule_day_offset days after the
     #   render finishes.
     # "manual" (default): never auto-publish — the creator downloads and
-    #   posts it themselves, or publishes on demand from NicheCut.
+    #   posts it themselves, or publishes on demand from KappGen.
     publish_mode = Column(String(20), nullable=False, default="manual")
     youtube_made_for_kids = Column(Boolean, nullable=False, default=False)
     youtube_default_description = Column(Text, nullable=True)

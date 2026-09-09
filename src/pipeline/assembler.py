@@ -458,7 +458,7 @@ def assemble_final_video(
             "opacity": item.get("opacity") if item.get("opacity") is not None else 1.0,
         })
 
-    # Free-tier NicheCut watermark. The official horizontal logo is deliberately
+    # Free-tier KappGen watermark. The official horizontal logo is deliberately
     # large and centered: a corner mark can be removed with a trivial crop or
     # covered by another logo. Paid plans disable it through watermark_enabled.
     has_watermark = bool(effects.get("watermark_enabled", True) and WATERMARK_PATH.exists())

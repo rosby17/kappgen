@@ -703,7 +703,7 @@ def process_single_queued_video() -> bool:
         # How this finished video actually reaches YouTube is always the
         # creator's own choice (channel.publish_mode), independent of whether
         # the *script* was auto-generated. A failure here never fails the
-        # render — the video stays available in NicheCut either way.
+        # render — the video stays available in KappGen either way.
         if output_finalized and channel.youtube_refresh_token:
             if channel.publish_mode in ("auto", "scheduled"):
                 video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
@@ -713,7 +713,7 @@ def process_single_queued_video() -> bool:
                 db.commit()
                 logger.info(f"Video {video.id} scheduled to publish at {video.scheduled_publish_at} (channel {channel.id}).")
             # "manual": leave the video as-is — the creator downloads it or
-            # publishes on demand from NicheCut.
+            # publishes on demand from KappGen.
 
         return True
 
@@ -2550,7 +2550,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         process_single_queued_video()
         return
 
-    logger.info(f"Starting Nichecut Background Queue Worker ({pool_size} render lane(s) available, admin-controlled active count)...")
+    logger.info(f"Starting KappGen Background Queue Worker ({pool_size} render lane(s) available, admin-controlled active count)...")
     lanes = [
         threading.Thread(target=_render_worker_loop, args=(f"lane-{i+1}", i + 1, poll_interval_seconds), daemon=True)
         for i in range(pool_size)

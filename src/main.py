@@ -22,7 +22,7 @@ def run_phase0_test(test_script: str = None):
         )
         
     logger.info("==========================================")
-    logger.info("   Nichecut - Phase 0 CLI Pipeline Test   ")
+    logger.info("   KappGen - Phase 0 CLI Pipeline Test   ")
     logger.info("==========================================")
     
     test_channel_config = {
@@ -69,7 +69,7 @@ def run_phase0_test(test_script: str = None):
     logger.info("==========================================")
 
 def main():
-    parser = argparse.ArgumentParser(description="Nichecut CLI Pipeline & Runner")
+    parser = argparse.ArgumentParser(description="KappGen CLI Pipeline & Runner")
     parser.add_argument("--test", action="store_true", help="Run Phase 0 isolated pipeline test")
     parser.add_argument("--script", type=str, default=None, help="Custom text script for Phase 0 test")
     parser.add_argument("--worker", action="store_true", help="Run background queue runner worker daemon")

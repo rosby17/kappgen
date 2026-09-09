@@ -1611,7 +1611,7 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
 
 @router.post("/{video_id}/thumbnail/regenerate")
 def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Kicks off regeneration of this video's NicheCut card thumbnail
+    """Kicks off regeneration of this video's KappGen card thumbnail
     (output_mp4's sibling thumbnail.jpg) — for videos stuck with a near-black
     one from before the fallback frame-grab was fixed to pick a representative
     frame instead of a fixed timestamp. Independent of YouTube publishing

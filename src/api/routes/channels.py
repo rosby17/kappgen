@@ -169,7 +169,7 @@ def _fill_logo_from_youtube_avatar(channel: Channel, thumbnail_url: Optional[str
 
 @router.get("/izivoice/status")
 def izivoice_status(current_user: User = Depends(get_current_user)):
-    return {"connected": bool(current_user.izivoice_api_key_encrypted), "key_prefix": current_user.izivoice_key_prefix, "mode": "personal" if current_user.izivoice_api_key_encrypted else "nichecut"}
+    return {"connected": bool(current_user.izivoice_api_key_encrypted), "key_prefix": current_user.izivoice_key_prefix, "mode": "personal" if current_user.izivoice_api_key_encrypted else "kappgen"}
 
 
 @router.post("/izivoice/connect")
@@ -198,7 +198,7 @@ def disconnect_izivoice(user: User = Depends(get_current_user), db: Session = De
     user.izivoice_key_prefix = None
     user.izivoice_connected_at = None
     db.commit()
-    return {"connected": False, "key_prefix": None, "mode": "nichecut"}
+    return {"connected": False, "key_prefix": None, "mode": "kappgen"}
 
 
 @router.get("/voice/catalog")
@@ -3070,7 +3070,7 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
 def refresh_youtube_identity(channel_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Re-fetches the connected YouTube channel's name/handle/avatar — the
     creator may have renamed the channel or changed its photo directly on
-    YouTube since the initial connection, and NicheCut only ever pulled that
+    YouTube since the initial connection, and KappGen only ever pulled that
     info once (at connect time) until now."""
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:

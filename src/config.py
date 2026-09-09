@@ -111,7 +111,7 @@ MAKETOU_API_KEY = os.getenv("MAKETOU_API_KEY", "")
 MAKETOU_PRODUCT_ID = os.getenv("MAKETOU_PRODUCT_ID", "")
 TARA_API_KEY = os.getenv("TARA_API_KEY", "")
 TARA_BUSINESS_ID = os.getenv("TARA_BUSINESS_ID", "")
-# Not reused from izivoice — this only has to match what NicheCut itself
+# Not reused from izivoice — this only has to match what KappGen itself
 # sends as the webHookUrl query param at checkout time.
 TARA_WEBHOOK_SECRET = os.getenv("TARA_WEBHOOK_SECRET", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -134,7 +134,7 @@ CORS_ORIGINS = [
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "https://api.kappgen.com")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
 BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "")
-BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "NicheCut")
+BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "KappGen")
 
 # Claude-powered pipeline steps (vision analysis, music prompts, ...) try
 # providers in order: Anthropic direct -> fal.ai (Claude via OpenRouter,
@@ -201,12 +201,12 @@ OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen3.5:latest")
 OLLAMA_ACCESS_CLIENT_ID = os.getenv("OLLAMA_ACCESS_CLIENT_ID", "")
 OLLAMA_ACCESS_CLIENT_SECRET = os.getenv("OLLAMA_ACCESS_CLIENT_SECRET", "")
 
-# NOTE: NicheCut's database must always be its own, dedicated instance — never
+# NOTE: KappGen's database must always be its own, dedicated instance — never
 # shared with another project (see incident: an earlier setup pointed this at
 # Izivoice's production Supabase Postgres and polluted its public schema).
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or "sqlite:///./data/app.db"
 
-# Kept for backward compatibility with code that still imports these; NicheCut
+# Kept for backward compatibility with code that still imports these; KappGen
 # does not use Supabase's Auth/Storage/Realtime layers, only a plain Postgres DB.
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")

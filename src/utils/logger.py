@@ -1,7 +1,7 @@
 import logging
 import sys
 
-def get_logger(name: str = "nichecut") -> logging.Logger:
+def get_logger(name: str = "kappgen") -> logging.Logger:
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.setLevel(logging.INFO)

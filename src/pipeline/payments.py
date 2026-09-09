@@ -26,7 +26,7 @@ def create_maketou_checkout(order_id: str, amount_fcfa: int, user_email: str, us
         "lastName": last_name or "",
         "redirectURL": f"{FRONTEND_BASE_URL}/billing/success?order_id={order_id}&provider=maketou",
         "customerPrice": amount_fcfa,
-        "meta": {"source": "nichecut_app", "order_id": order_id},
+        "meta": {"source": "kappgen_app", "order_id": order_id},
     }
     resp = httpx.post(
         f"{MAKETOU_BASE_URL}/cart/checkout",

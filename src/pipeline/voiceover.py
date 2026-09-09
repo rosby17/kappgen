@@ -125,7 +125,7 @@ def _get_default_voice_id(client: httpx.Client, api_key: Optional[str] = None) -
     global _cached_voice_id
     if IZIVOICE_VOICE_ID:
         return IZIVOICE_VOICE_ID
-    # The global cache belongs only to NicheCut's shared account. Reusing it
+    # The global cache belongs only to KappGen's shared account. Reusing it
     # for BYOK accounts could select a voice that does not exist for that user.
     is_personal_key = bool(api_key and api_key != IZIVOICE_API_KEY)
     if _cached_voice_id and not is_personal_key:

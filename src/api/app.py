@@ -230,7 +230,7 @@ def get_db_status(admin=Depends(get_current_admin)):
     is_postgres = "postgresql" in DATABASE_URL or "postgres" in DATABASE_URL
     if is_postgres:
         parsed = urlparse(DATABASE_URL)
-        db_name = parsed.path.lstrip('/') or "nichecut"
+        db_name = parsed.path.lstrip('/') or "kappgen"
         host = f"{parsed.hostname}:{parsed.port}" if parsed.port else (parsed.hostname or "VPS")
         service = f"PostgreSQL Dedicated ({db_name})"
     else:
