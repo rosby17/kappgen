@@ -359,6 +359,10 @@ def clone_voice_status(job_id: str, current_user: User = Depends(get_current_use
     return job.to_dict()
 
 
+class RenameVoiceRequest(BaseModel):
+    name: str
+
+
 @router.get("/my-cloned-voices")
 def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Lists all personal clones available to the current creator.
@@ -382,7 +386,14 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
         if job.voice_id in seen:
             continue
         seen.add(job.voice_id)
-        voices.append({"id": job.voice_id, "name": job.name, "gender": job.gender, "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None})
+        prov = "ai33pro" if str(job.voice_id).startswith("clone_") else "izivoice"
+        voices.append({
+            "id": job.voice_id,
+            "name": job.name,
+            "gender": job.gender,
+            "provider": prov,
+            "preview_url": f"/channels/voice/{job.voice_id}/preview" if job.preview_url else None,
+        })
 
     # When ai33.pro is configured, list custom/cloned voices directly from ai33.pro
     if AI33PRO_API_KEY:
@@ -399,6 +410,7 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
                         "id": voice_id,
                         "name": voice.get("name") or f"Voix {voice_id[:8]}",
                         "gender": (voice.get("labels") or {}).get("gender") or "neutral",
+                        "provider": "ai33pro",
                         "preview_url": voice.get("preview_url") or f"/channels/voice/{voice_id}/preview",
                     })
         except Exception as exc:
@@ -432,6 +444,7 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
                             "id": voice_id,
                             "name": voice.get("name") or f"Voix {voice_id[:8]}",
                             "gender": voice.get("gender") or "neutral",
+                            "provider": "izivoice",
                             "preview_url": voice.get("preview_url"),
                         })
                     if not data.get("has_more") or not batch:
@@ -442,6 +455,44 @@ def list_my_cloned_voices(current_user: User = Depends(get_current_user), db: Se
         except Exception as exc:  # Existing KappGen clones must remain usable offline.
             logger.warning("Izivoice clone sync failed for user %s: %s", current_user.id, exc)
     return {"voices": voices}
+
+
+@router.patch("/my-cloned-voices/{voice_id}")
+def rename_my_cloned_voice(voice_id: str, payload: RenameVoiceRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Renames a cloned voice for the creator across all records."""
+    new_name = payload.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Le nom de la voix ne peut pas être vide.")
+
+    jobs = (
+        db.query(VoiceCloneJob)
+        .filter(VoiceCloneJob.user_id == current_user.id, VoiceCloneJob.voice_id == voice_id)
+        .all()
+    )
+    if jobs:
+        for job in jobs:
+            job.name = new_name
+    else:
+        # If created outside or no previous job record, create a persistent reference
+        job = VoiceCloneJob(
+            user_id=current_user.id,
+            voice_id=voice_id,
+            name=new_name,
+            status="done",
+            audio_path="",
+        )
+        db.add(job)
+
+    channels = (
+        db.query(Channel)
+        .filter(Channel.user_id == current_user.id, Channel.voice_id == voice_id)
+        .all()
+    )
+    for ch in channels:
+        ch.voice_name = new_name
+
+    db.commit()
+    return {"success": True, "voice_id": voice_id, "name": new_name}
 
 
 @router.delete("/my-cloned-voices/{voice_id}")
