@@ -188,7 +188,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # chain as DeepSeek/Groq: optional, and never the only text provider.
 KIE_API_KEY = os.getenv("KIE_API_KEY", "")
 KIE_BASE_URL = os.getenv("KIE_BASE_URL", "https://api.kie.ai")
-KIE_CLAUDE_MODEL = os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-4-6")
+KIE_CLAUDE_MODEL = os.getenv("KIE_CLAUDE_MODEL", "claude-sonnet-5")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")

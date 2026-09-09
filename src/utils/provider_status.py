@@ -148,6 +148,16 @@ def _check_kie():
         if resp.status_code == 401:
             return {"configured": True, "status": "error", "detail": "Clé invalide, révoquée, ou service injoignable."}
         resp.raise_for_status()
+        data = resp.json()
+        internal_code = data.get("code")
+        if internal_code not in (None, 0, 200):
+            detail = data.get("msg") or data.get("message") or "Erreur Kie.ai inconnue."
+            if internal_code == 401:
+                return {"configured": True, "status": "error", "detail": f"Authentification Kie.ai refusée : {detail}"}
+            return {"configured": True, "status": "error", "detail": f"Kie.ai erreur {internal_code} : {detail}"}
+        content = data.get("content") or []
+        if not any(block.get("text") for block in content if isinstance(block, dict)):
+            return {"configured": True, "status": "error", "detail": "Kie.ai a accepté la requête mais n'a renvoyé aucun texte."}
         return {"configured": True, "status": "ok", "detail": f"Clé valide. Modèle configuré : {KIE_CLAUDE_MODEL}."}
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (402, 429) or "insufficient" in exc.response.text.lower() or "credit" in exc.response.text.lower():

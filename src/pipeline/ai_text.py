@@ -118,10 +118,8 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
     NOT the Anthropic API: kie.ai exposes its own wrapper
     (POST /claude/v1/messages) with a much smaller surface — no `system`
     prompt, no extended-thinking effort controls, no prompt caching,
-    max_tokens capped low by default. Deliberately pinned to
-    KIE_CLAUDE_MODEL (defaults to the older claude-sonnet-4-6, not
-    whatever kie.ai lists as newest) since that's the admin's own choice
-    of which Claude generation to route here.
+    max_tokens capped low by default. The exact model comes from
+    KIE_CLAUDE_MODEL so deployments can pin a supported Kie model.
     """
     from src.pipeline.images import _provider_accounts_from_db, _mark_provider_account
 
@@ -144,6 +142,13 @@ def _kie_complete(prompt: str, max_tokens: int, usage_ctx: dict) -> tuple:
             )
             resp.raise_for_status()
             data = resp.json()
+            # Kie may return HTTP 200 while reporting an API failure inside
+            # its JSON envelope (observed with code 401). Surface that real
+            # cause instead of misreporting a generic empty-text response.
+            internal_code = data.get("code")
+            if internal_code not in (None, 0, 200):
+                detail = data.get("msg") or data.get("message") or "unknown error"
+                raise RuntimeError(f"Kie.ai error {internal_code}: {detail}")
             text_blocks = [block.get("text", "") for block in (data.get("content") or []) if block.get("type") == "text"]
             text = "\n".join(t for t in text_blocks if t).strip()
             if not text:

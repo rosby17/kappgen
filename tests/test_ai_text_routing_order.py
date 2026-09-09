@@ -1,4 +1,5 @@
 from src.pipeline import ai_providers, ai_text, script_writer
+from src.utils import provider_status
 
 
 def test_numbered_text_order_is_complete_chain(monkeypatch):
@@ -48,3 +49,23 @@ def test_script_usage_receives_channel_and_video_ids(monkeypatch):
     assert calls[0]["user_id"] == "user-1"
     assert calls[0]["channel_id"] == "channel-1"
     assert calls[0]["video_id"] == "video-1"
+
+
+def test_kie_health_rejects_internal_unauthorized_response(monkeypatch):
+    class Response:
+        status_code = 200
+        text = '{"code":401}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 401, "msg": "Unauthorized"}
+
+    monkeypatch.setattr(provider_status, "_get_effective_key", lambda *args: "secret")
+    monkeypatch.setattr(provider_status.httpx, "post", lambda *args, **kwargs: Response())
+
+    result = provider_status._check_kie()
+
+    assert result["status"] == "error"
+    assert "Authentification" in result["detail"]

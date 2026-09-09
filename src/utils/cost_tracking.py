@@ -51,10 +51,10 @@ PRICING = {
         "output_per_token": 0.0,
     },
     "kie_claude": {
-        # kie.ai's published rate for claude-sonnet-4-6 (their reseller
+        # kie.ai's published rate for Claude Sonnet (their reseller
         # proxy, not Anthropic direct) as of writing: ~28.3%/28.5% of
-        # Anthropic's own $3/$15 Sonnet 4.6 rate. Re-check
-        # https://kie.ai/claude-sonnet-4-6 if KIE_CLAUDE_MODEL changes —
+        # the upstream rate. Re-check https://kie.ai/fr/pricing whenever
+        # KIE_CLAUDE_MODEL changes —
         # this rate is per-model, not a flat kie.ai-wide discount.
         "input_per_token": 0.850 / 1_000_000,
         "output_per_token": 4.275 / 1_000_000,
