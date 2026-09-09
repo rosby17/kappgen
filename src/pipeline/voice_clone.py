@@ -74,13 +74,41 @@ def transcode_to_clean_audio(contents: bytes, filename: str) -> bytes:
             return contents
 
 
+def _clone_via_izivoice(name: str, clean_audio: bytes, api_key: Optional[str]) -> str:
+    """Helper: clone voice via Izivoice /clone. Returns voice_id."""
+    if len(clean_audio) > 4 * 1024 * 1024:
+        raise ValueError(
+            "Cet échantillon est trop long une fois nettoyé (limite Izivoice : 4 Mo). "
+            "Utilisez un extrait plus court (~30-45 s)."
+        )
+    effective_key = api_key or IZIVOICE_API_KEY
+    if not effective_key:
+        raise RuntimeError("Aucune clé Izivoice configurée.")
+    response = httpx.post(
+        f"{IZIVOICE_BASE_URL}/clone",
+        headers={"Authorization": f"Bearer {effective_key}"},
+        files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
+        data={"name": name, "removeNoise": "true", "optimizeAccent": "true"},
+        timeout=280,
+    )
+    response.raise_for_status()
+    data = response.json()
+    voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
+    if not voice_id:
+        raise RuntimeError("Izivoice n'a retourné aucun identifiant de voix.")
+    return voice_id
+
+
 def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = None) -> None:
     """Runs one claimed clone job (already flipped to "processing" and
     committed by the caller) to completion (or failure), updating the row in
     place. Always leaves the job in a terminal status ("done" or "error").
-    Uses ai33.pro directly if ai33pro is configured / prioritized in
-    voiceover_provider_order(), otherwise uses Izivoice."""
-    from src.utils.app_settings import voiceover_provider_order
+
+    Strategy (both providers remain operational):
+    1. Essaie ai33.pro  POST /v3/text-to-speech/voice-clone  (si AI33PRO_API_KEY dispo)
+       → retourne voice_id préfixé clone_<id> pour le TTS v3.
+    2. Si ai33.pro échoue OU si la clé n'est pas configurée,
+       bascule automatiquement sur Izivoice POST /clone."""
     from src.pipeline import ai33_provider
 
     audio_path = STORAGE_PATH / job.audio_path
@@ -94,48 +122,46 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = Non
 
     try:
         clean_audio = transcode_to_clean_audio(contents, job.audio_path)
-        if len(clean_audio) > 8 * 1024 * 1024:
-            job.status = "error"
-            job.error_message = "Cet échantillon est trop volumineux une fois nettoyé (> 8 Mo). Utilisez un extrait plus court (~20-45 s)."
-            db.commit()
-            return
+        voice_id: Optional[str] = None
 
-        primary_provider = "ai33pro" if AI33PRO_API_KEY else "izivoice"
-        voice_id = None
+        # ── 1. Tentative via ai33.pro ───────────────────────────────────────
+        if AI33PRO_API_KEY:
+            if len(clean_audio) > 10 * 1024 * 1024:
+                logger.warning("Sample too large for ai33.pro (>10 MB), skipping to Izivoice.")
+            else:
+                try:
+                    logger.info(f"[ai33.pro] Cloning voice '{job.name}' ...")
+                    with httpx.Client() as client:
+                        voice_id = ai33_provider.submit_voice_clone(
+                            client=client,
+                            name=job.name,
+                            audio_bytes=clean_audio,
+                            filename="voice-sample.flac",
+                            api_key=AI33PRO_API_KEY,
+                        )
+                    logger.info(f"[ai33.pro] Clone success: {voice_id}")
+                except Exception as exc:
+                    logger.warning(f"[ai33.pro] Clone failed ({exc}), falling back to Izivoice ...")
+                    voice_id = None
 
-        if primary_provider == "ai33pro" and AI33PRO_API_KEY:
-            logger.info(f"Cloning voice '{job.name}' directly on ai33.pro...")
-            with httpx.Client() as client:
-                voice_id = ai33_provider.submit_voice_clone(
-                    client=client,
-                    name=job.name,
-                    audio_bytes=clean_audio,
-                    filename="voice-sample.flac",
-                    description="Clonée via KappGen",
-                    api_key=AI33PRO_API_KEY,
+        # ── 2. Fallback Izivoice ────────────────────────────────────────────
+        if not voice_id:
+            izivoice_key = api_key or IZIVOICE_API_KEY
+            if not izivoice_key:
+                raise RuntimeError(
+                    "Le clonage ai33.pro a échoué et aucune clé Izivoice n'est configurée en secours."
                 )
-        else:
-            effective_key = api_key or IZIVOICE_API_KEY
-            if not effective_key:
-                raise RuntimeError("Aucune clé API configurée pour le clonage de voix (ni ai33.pro, ni Izivoice).")
-            logger.info(f"Cloning voice '{job.name}' via Izivoice...")
-            response = httpx.post(
-                f"{IZIVOICE_BASE_URL}/clone",
-                headers={"Authorization": f"Bearer {effective_key}"},
-                files={"file": ("voice-sample.flac", clean_audio, "audio/flac")},
-                data={"name": job.name, "removeNoise": "true", "optimizeAccent": "true"},
-                timeout=280,
-            )
-            response.raise_for_status()
-            data = response.json()
-            voice_id = data.get("voice_id") or ((data.get("data") or {}).get("voice_id"))
+            logger.info(f"[Izivoice] Cloning voice '{job.name}' ...")
+            voice_id = _clone_via_izivoice(job.name, clean_audio, izivoice_key)
+            logger.info(f"[Izivoice] Clone success: {voice_id}")
 
         if not voice_id:
             job.status = "error"
-            job.error_message = f"{primary_provider} n'a retourné aucun identifiant de voix."
+            job.error_message = "Aucun fournisseur n'a pu cloner la voix."
             db.commit()
             return
 
+        # Best-effort preview TTS
         preview_url = None
         try:
             preview_path = STORAGE_PATH / "voice_previews" / f"{voice_id}.mp3"
@@ -154,12 +180,25 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = Non
     except httpx.HTTPStatusError as exc:
         try:
             upstream_detail = exc.response.json()
-            upstream_detail = upstream_detail.get("message") or upstream_detail.get("detail") or upstream_detail.get("error") or exc.response.text
+            upstream_detail = (
+                upstream_detail.get("message")
+                or upstream_detail.get("detail")
+                or upstream_detail.get("error")
+                or exc.response.text
+            )
         except Exception:
             upstream_detail = exc.response.text
-        logger.error(f"Voice clone failed ({exc.response.status_code}): {upstream_detail}")
+        logger.error(f"Voice clone HTTP error ({exc.response.status_code}): {upstream_detail}")
         job.status = "error"
-        job.error_message = f"Le fournisseur a refusé le clonage ({exc.response.status_code}) : {upstream_detail or 'erreur inconnue'}"
+        if "failed to parse duration" in str(upstream_detail).lower():
+            job.error_message = (
+                "Le fichier audio n'a pas pu être lu (en-tête non standard). "
+                "Réexportez-le en MP3 ou WAV propre (ex. via Audacity) puis réessayez."
+            )
+        else:
+            job.error_message = (
+                f"Le clonage a été refusé ({exc.response.status_code}) : {upstream_detail or 'erreur inconnue'}"
+            )
         db.commit()
     except Exception as exc:
         logger.error(f"Voice clone crashed: {exc}")
@@ -171,3 +210,4 @@ def process_voice_clone_job(db, job: VoiceCloneJob, api_key: Optional[str] = Non
             audio_path.unlink(missing_ok=True)
         except OSError:
             pass
+

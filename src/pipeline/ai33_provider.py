@@ -133,18 +133,20 @@ def default_voice_id(client: httpx.Client, api_key: Optional[str] = None) -> str
 
 
 def list_user_voices(client: httpx.Client, api_key: Optional[str] = None) -> List[Dict[str, Any]]:
-    """GET /v1/voices — returns the user's own custom/cloned voices on ai33.pro."""
+    """GET /v3/voices?provider=clone — returns the user's own cloned voices on ai33.pro.
+    The returned voice_id values are already prefixed (clone_<id>) as required by v3 TTS."""
     try:
         resp = client.get(
-            f"{AI33PRO_BASE_URL}/v1/voices",
+            f"{AI33PRO_BASE_URL}/v3/voices",
             headers=_headers(api_key),
+            params={"provider": "clone", "page_size": 100},
             timeout=30.0,
         )
         if resp.status_code == 200:
-            return resp.json().get("voices") or []
+            return (resp.json().get("data") or [])
         return []
     except Exception as exc:
-        logger.warning(f"ai33.pro /v1/voices fetch failed: {exc}")
+        logger.warning(f"ai33.pro /v3/voices fetch failed: {exc}")
         return []
 
 
@@ -153,36 +155,39 @@ def submit_voice_clone(
     name: str,
     audio_bytes: bytes,
     filename: str = "voice-sample.flac",
-    description: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> str:
-    """POST /v1/voices/add (FormData with files) — instant voice cloning on ai33.pro.
-    Returns the newly created voice_id."""
-    files = [("files", (filename, audio_bytes, "audio/flac" if filename.endswith(".flac") else "audio/mpeg"))]
-    data = {"name": name}
-    if description:
-        data["description"] = description
+    """POST /v3/text-to-speech/voice-clone — instant voice cloning on ai33.pro.
+    Returns the full prefixed voice_id (clone_<id>) ready for use directly
+    in submit_tts() without any further transformation.
+    Fields per the v3 docs: voice_name (required), audio_file (required, max 10 MB)."""
+    media_type = "audio/flac" if filename.endswith(".flac") else "audio/mpeg"
     resp = _post_with_retry(
         client,
-        f"{AI33PRO_BASE_URL}/v1/voices/add",
+        f"{AI33PRO_BASE_URL}/v3/text-to-speech/voice-clone",
         headers=_headers(api_key),
-        data=data,
-        files=files,
+        data={"voice_name": name},
+        files={"audio_file": (filename, audio_bytes, media_type)},
         timeout=120.0,
     )
-    _raise_for_status_with_detail(resp, "ai33.pro POST /v1/voices/add")
+    _raise_for_status_with_detail(resp, "ai33.pro POST /v3/text-to-speech/voice-clone")
     res_data = resp.json()
-    voice_id = res_data.get("voice_id") or ((res_data.get("data") or {}).get("voice_id"))
-    if not voice_id:
+    raw_id = (res_data.get("data") or {}).get("voice_id") or res_data.get("voice_id")
+    if not raw_id:
         raise RuntimeError(f"ai33.pro voice clone returned no voice_id: {res_data}")
-    return str(voice_id)
+    # v3 TTS requires cloned voices to be addressed as clone_<id>
+    prefixed = str(raw_id) if str(raw_id).startswith("clone_") else f"clone_{raw_id}"
+    logger.info(f"ai33.pro voice cloned successfully: {prefixed}")
+    return prefixed
 
 
 def delete_voice(client: httpx.Client, voice_id: str, api_key: Optional[str] = None) -> bool:
-    """DELETE /v1/voices/{voice_id} — deletes a cloned voice on ai33.pro."""
+    """DELETE /v3/text-to-speech/voice-clone/{id} — deletes a cloned voice on ai33.pro.
+    Strips the clone_ prefix if present since the endpoint takes the raw numeric id."""
+    raw_id = voice_id.removeprefix("clone_")
     try:
         resp = client.delete(
-            f"{AI33PRO_BASE_URL}/v1/voices/{voice_id}",
+            f"{AI33PRO_BASE_URL}/v3/text-to-speech/voice-clone/{raw_id}",
             headers=_headers(api_key),
             timeout=30.0,
         )
@@ -199,19 +204,25 @@ def submit_tts(
     voice_settings: Optional[Dict[str, Any]] = None,
     api_key: Optional[str] = None,
 ) -> str:
-    """POST /v3/text-to-speech (FormData, not JSON) — returns task_id. Poll
-    with poll_task(); result's metadata.audio_url is populated the same way
-    Izivoice's own wrapper relays it."""
+    """POST /v3/text-to-speech (FormData) — returns task_id. Poll with poll_task();
+    result's metadata.audio_url is the generated audio.
+
+    Per the v3 API docs, voice_id MUST carry a provider prefix:
+    elevenlabs_, minimax_, clone_, edge_, kokoro_, vbee_, fishaudio_.
+    Cloned voices (from submit_voice_clone) are already stored as clone_<id>.
+    Shared/catalog voices from /v1/shared-voices are returned without prefix;
+    those are ElevenLabs voices so we prepend elevenlabs_ automatically."""
+    # Ensure voice_id has the required v3 provider prefix
+    KNOWN_PREFIXES = ("elevenlabs_", "minimax_", "clone_", "edge_", "kokoro_", "vbee_", "fishaudio_")
+    if not any(voice_id.startswith(p) for p in KNOWN_PREFIXES):
+        voice_id = f"elevenlabs_{voice_id}"
+        logger.debug(f"ai33.pro v3 TTS: auto-prefixed voice_id to {voice_id}")
     settings = voice_settings or {}
     form = {
         "text": text,
         "voice_id": voice_id,
-        "speed": str(settings.get("speed", 0.845)),
+        "speed": str(settings.get("speed", 1.0)),
         "with_transcript": "false",
-        "stability": str(settings.get("stability", 0.8)),
-        "similarity_boost": str(settings.get("similarity_boost", 0.9)),
-        "style": str(settings.get("style", 0.0)),
-        "use_speaker_boost": str(settings.get("use_speaker_boost", True)).lower(),
     }
     resp = _post_with_retry(
         client, f"{AI33PRO_BASE_URL}/v3/text-to-speech",
