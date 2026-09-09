@@ -43,6 +43,20 @@ MODEL_CATALOG = {
 
 TASKS = ("text", "image", "music", "voice")
 
+# USD per million tokens. Kept separate from the model ids because the same
+# model may cost differently depending on the reseller/source.
+MODEL_PRICING = {
+    "anthropic:claude-opus-5": {"input": 2.0, "output": 10.0},
+    "openai:gpt-6-astra": {"input": 2.80, "output": 14.0},
+    "openai:gpt-5.6-sol": {"input": 1.40, "output": 8.40},
+    "openai:gpt-5.6-terra": {"input": 0.56, "output": 3.36},
+    "openai:gpt-5.6-luna": {"output": 0.336},
+    "gemini:gemini-3.8-flash": {"input": 0.225, "output": 1.125},
+    "gemini:gemini-3.7-flash": {"input": 0.225, "output": 1.125},
+    "gemini:gemini-3.6-flash": {"input": 0.225, "output": 1.125},
+    "groq:openai/gpt-oss-120b": {"free_tier": True},
+}
+
 
 def catalog_for(task: str | None = None) -> dict:
     if task is None:

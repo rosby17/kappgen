@@ -1818,10 +1818,10 @@ from src.pipeline.ai_providers import ALL_IDS as AI_TEXT_PROVIDERS
 @router.get("/settings/model-catalog")
 def get_model_catalog(task: str | None = None, admin: User = Depends(get_current_admin)):
     """Return the model catalog grouped by provider and generation task."""
-    from src.pipeline.model_catalog import catalog_for, TASKS
+    from src.pipeline.model_catalog import catalog_for, TASKS, MODEL_PRICING
     if task is not None and task not in TASKS:
         raise HTTPException(status_code=400, detail=f"Tâche invalide : {task}")
-    return {"task": task, "tasks": TASKS, "providers": catalog_for(task)}
+    return {"task": task, "tasks": TASKS, "providers": catalog_for(task), "pricing": MODEL_PRICING}
 
 
 @router.get("/settings/ai-text-provider")
