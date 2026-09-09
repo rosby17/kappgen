@@ -138,10 +138,8 @@ AI_TEXT_PROVIDER_ORDER_KEY = "ai_text_provider_order"
 # free tier", "Gemini before any paid provider") — Anthropic, DeepSeek, fal.ai
 # and OpenAI are all pay-per-token. The actual enforcement point is
 # ai_providers.py's ids_for() (the single choke point every text AND vision
-# call in the app goes through) rather than here, since ordered_ids() always
-# appends every capable-but-unranked provider behind the ranked ones — this
-# order list alone can only reorder, never actually remove a provider from
-# the chain.
+# call in the app goes through). A non-empty text order is the complete active
+# chain; providers absent from it are not called.
 AI_TEXT_FREE_PROVIDERS = {"groq", "gemini", "ollama"}
 
 

@@ -73,12 +73,11 @@ def any_configured(capability: str = "text") -> bool:
 
 
 def ordered_ids(capability: str = "text") -> List[str]:
-    """The admin's priority order (Ressources tab) filtered to providers that
-    can serve this capability, with everything unranked appended behind.
+    """Return the admin's active routing order for a capability.
 
-    The chain is reordered, never emptied: a provider the admin didn't rank
-    still trails as a fallback, so an exhausted balance degrades to the next
-    provider instead of failing the request.
+    For text generation, a non-empty numbered list is the complete chain.
+    Other capabilities retain the legacy appended fallbacks until they have
+    their own independent persisted routing settings.
     """
     capable = ids_for(capability)
     try:
@@ -92,4 +91,10 @@ def ordered_ids(capability: str = "text") -> List[str]:
         from src.utils.logger import logger
         logger.warning(f"[ai_providers] could not read the admin provider order ({exc}); using the default order.")
         ranked = []
+    # For text, the chips selected by the admin are the complete routing
+    # chain, not merely a preferred prefix.  Silently appending every other
+    # provider made disabled providers (notably Gemini) write parts of a
+    # script despite not appearing in the active numbered list.
+    if capability == "text" and ranked:
+        return ranked
     return ranked + [pid for pid in capable if pid not in ranked]

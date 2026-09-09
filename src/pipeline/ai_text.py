@@ -563,10 +563,8 @@ def generate_text(
     appended to it — used by callers (e.g. auto script generation) that need
     to know the actual cost incurred to bill the creator for it.
 
-    `preferred_provider`, when set, moves one configured provider to the front
-    for this call while preserving the normal fallback chain. This is useful
-    for low-risk tasks such as stock-search keywords that should use Gemini
-    before any paid provider.
+    `preferred_provider` is retained for compatibility with older call sites.
+    The admin's numbered routing order remains authoritative for every call.
 
     `enable_web_search` only applies to the Anthropic path (its server-side
     web_search tool) — every other provider ignores it; if Anthropic isn't
@@ -586,8 +584,9 @@ def generate_text(
     }
     from src.pipeline.ai_providers import ordered_ids
     order = [pid for pid in ordered_ids("text") if pid in providers]
-    if preferred_provider in order:
-        order = [preferred_provider] + [pid for pid in order if pid != preferred_provider]
+    # The admin's numbered routing order is authoritative.  Call sites used
+    # to move Gemini to the front for small/cheap operations, which made a
+    # title or short script section bypass the order shown in Resources.
     if enable_web_search and order and order[0] != "anthropic" and "anthropic" in order:
         # Web search only works through Anthropic's server-side tool (see the
         # docstring) — every other provider silently ignores it. Anthropic

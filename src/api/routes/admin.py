@@ -1862,9 +1862,9 @@ def set_render_concurrency(payload: RenderConcurrencyPayload, admin: User = Depe
 
 # --- AI text-generation provider switch --------------------------------
 # Which of Anthropic/DeepSeek/fal.ai/OpenAI/Groq (see src/pipeline/ai_text.py)
-# is tried FIRST for every text-generation call (script writing, topic
-# selection, titles, thumbnail concepts, music style suggestions...). The
-# rest of the chain still runs as automatic fallback behind it. Built for
+# defines the complete ordered chain for every text-generation call (script
+# writing, topic selection, titles, thumbnail concepts, music style
+# suggestions...). Built for
 # exactly this situation: an exhausted Anthropic balance with no time to
 # redeploy — flip to a configured provider from the "Ressources" tab and
 # every call picks it up immediately, no restart needed.
@@ -1889,9 +1889,7 @@ def get_ai_text_provider(admin: User = Depends(get_current_admin)):
     from src.pipeline.ai_providers import configured_map
     configured = configured_map()
     custom_order = [p for p in ai_text_provider_order() if p in AI_TEXT_PROVIDERS]
-    # Providers not explicitly ranked by the admin still trail behind, in the
-    # module's default order, so the "available" list always covers all five.
-    full_order = custom_order + [p for p in AI_TEXT_PROVIDERS if p not in custom_order]
+    full_order = custom_order or AI_TEXT_PROVIDERS
     return {"order": custom_order, "available": AI_TEXT_PROVIDERS, "effective_order": full_order, "configured": configured}
 
 

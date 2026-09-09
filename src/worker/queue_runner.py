@@ -1824,6 +1824,8 @@ def generate_and_queue_auto_video(db, channel: Channel) -> Optional[Video]:
         on_title=_on_title_picked,
         on_partial_script=_on_partial_script,
         user_id=owner.id,
+        channel_id=channel.id,
+        video_id=video.id,
     )
     if not result:
         db.delete(video)
@@ -2070,6 +2072,8 @@ def retry_auto_video_script_background(video_id: str):
             on_partial_script=_on_partial_script,
             preset_title=(video.title or "").strip() if not (video.title or "").endswith(" — nouvelle vidéo") else None,
             user_id=owner.id,
+            channel_id=channel.id,
+            video_id=video.id,
         )
         if not result:
             video.status = VideoStatus.FAILED.value
