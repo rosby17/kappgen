@@ -548,7 +548,7 @@ def _generate_ai_thumbnail_background(text: str, channel, destination: Path, vid
     # explicit opt-in to spend money on thumbnails, in the order chosen.
     from src.utils.app_settings import thumbnail_provider_order
     provider_order = thumbnail_provider_order()
-    allow_paid_fallback = any(p in ("fal", "izivoice") for p in provider_order)
+    allow_paid_fallback = any(p in ("fal", "izivoice", "ai33pro") for p in provider_order)
 
     # Billed like the per-scene AI images: debited BEFORE calling out to the
     # provider, so an insufficient balance never places the real (paid) call

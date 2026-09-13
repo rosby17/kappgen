@@ -653,6 +653,15 @@ def generate_thumbnail_image(
     counts toward MAX_THUMBNAIL_REGENERATIONS (videos.py) only when a paid
     provider was the one that succeeded, never Hugging Face."""
     order = [p for p in (provider_order if provider_order is not None else ["ai33pro"]) if p in ("izivoice", "fal", "huggingface", "ai33pro", "kie")]
+    # A thumbnail with uploaded references has an explicit visual contract.
+    # Kie and Hugging Face are text-to-image only here: treating either as a
+    # successful fallback would silently discard the channel's reference
+    # images and produce a generic, off-brand result. Keep only providers that
+    # accept image conditioning for this request.
+    if reference_image_paths:
+        order = [p for p in order if p in ("ai33pro", "izivoice", "fal")]
+        if not order:
+            raise RuntimeError("No configured thumbnail provider supports this channel's reference images.")
     funcs = {
         "huggingface": lambda: _generate_with_huggingface_flux(prompt, output_path, client, operation="thumbnail"),
         "fal": lambda: _generate_with_key_pool("fal", FAL_API_KEY, lambda key: _generate_with_fal_gpt_image_2(prompt, output_path, client, reference_image_paths, api_key=key)),
