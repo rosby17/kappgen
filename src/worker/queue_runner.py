@@ -90,15 +90,14 @@ _BILLING_ERROR_MARKERS = (
 
 
 def _client_facing_error_message(exc: Exception) -> str:
-    """Never surfaces a raw exception/traceback to a creator — those are for
-    server logs only. A billing/quota-shaped error from any paid provider
-    becomes the same generic outage message (see SERVICE_UNAVAILABLE_MESSAGE);
-    anything else keeps its own message (still no traceback) since it's
-    usually something the creator CAN act on (e.g. a corrupt upload)."""
-    text = str(exc)
-    if any(marker in text.lower() for marker in _BILLING_ERROR_MARKERS):
-        return SERVICE_UNAVAILABLE_MESSAGE
-    return text
+    """Return the only render-failure detail that may leave the server.
+
+    Provider names, HTTP responses, quotas and credentials are operational
+    diagnostics. They stay in the server log; a creator only needs a clear
+    recovery action. This also protects against a new provider accidentally
+    returning a sensitive error string in the future.
+    """
+    return SERVICE_UNAVAILABLE_MESSAGE
 
 def _channel_config_for_render(db, channel: Channel) -> dict:
     """channel.to_dict() with watermark_enabled decided by the owner's actual
@@ -1237,10 +1236,7 @@ def _finalize_output_storage_or_fail(db, video: Video, output_mp4: Path) -> bool
         logger.error(f"_finalize_output_storage failed for video {video.id} — marking failed instead of leaving a brokenly-'done' row: {exc}")
         db.rollback()
         video.status = VideoStatus.FAILED.value
-        video.error_message = (
-            "Le montage a réussi mais l'enregistrement du fichier final a échoué. "
-            "Relance cette vidéo — le rendu repartira du début."
-        )
+        video.error_message = SERVICE_UNAVAILABLE_MESSAGE
         video.progress_stage = "Échec de l'enregistrement"
         db.commit()
         return False
