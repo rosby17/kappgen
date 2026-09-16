@@ -76,44 +76,29 @@ DEFAULT_SCRIPT_STRUCTURE = {
 # with the previous tail for continuity; the final script length is unchanged.
 MAX_PART_WORD_COUNT_PER_CALL = 180
 
-# Confirmed live (Sept 2026): a channel's script_structure ended up with
-# word_count: 0 on four of its five parts and word_count: 9000 on the fifth
-# (the numbers the creator actually wanted — "trois mille mots" per part —
-# only existed as prose inside the guidance text, never in the structured
-# word_count field), which every future auto-generated script silently
-# inherited: an ~17,000-word script, a 100+ minute render, TTS and render
-# costs for a video nobody asked for. Nothing anywhere capped a single
-# part's or a whole script's length, so a bad value — however it got there
-# (a malformed AI-parsed structure, a manual edit, a copy/paste slip) — just
-# flowed straight through into production. MIN/MAX_PART_WORD_COUNT and
-# MAX_TOTAL_SCRIPT_WORDS are enforced by _sanitize_parts below every single
-# time a script is generated, not just when a structure is saved, so a
-# channel whose bad data predates this fix is protected too.
+# Confirmed live (Sept 2026): a creator set a 60-minute target on a channel
+# whose parts all happened to be at word_count 0 at that moment. The
+# frontend's redistributePartsToTotal divided each part's 0-share by a
+# divide-by-zero guard that changed the math instead of just avoiding the
+# crash, so every part but the last got 0 and the last part absorbed the
+# *entire* 9000-word target alone (real bug, now fixed in App.jsx) — the
+# creator's configured length was never actually respected, just dumped
+# entirely into one section. This left word_count: 0 stored on every other
+# part, which the writer below turns into a lower-bound default rather than
+# silently generating nothing for that section.
 MIN_PART_WORD_COUNT = 20
-MAX_PART_WORD_COUNT = 3500
-MAX_TOTAL_SCRIPT_WORDS = 12000
 
 
 def _sanitize_parts(parts: List[dict]) -> List[dict]:
-    """Clamps every part's word_count into [MIN_PART_WORD_COUNT,
-    MAX_PART_WORD_COUNT], then scales the whole set down proportionally if
-    their total still exceeds MAX_TOTAL_SCRIPT_WORDS — preserves the
-    creator's relative weighting between parts (a long main section stays
-    longer than a short intro) instead of clipping arbitrarily."""
+    """Only floors a missing/zero word_count to a sane minimum default — the
+    creator's configured length (however long) is otherwise respected
+    exactly as entered. This is not where a runaway script length should be
+    caught; see the redistributePartsToTotal fix in App.jsx for the actual
+    bug that produced one."""
     sanitized = []
     for part in parts:
         word_count = int(part.get("word_count") or 0) or 300
-        clamped = max(MIN_PART_WORD_COUNT, min(word_count, MAX_PART_WORD_COUNT))
-        sanitized.append({**part, "word_count": clamped})
-    total = sum(p["word_count"] for p in sanitized)
-    if total > MAX_TOTAL_SCRIPT_WORDS:
-        scale = MAX_TOTAL_SCRIPT_WORDS / total
-        for p in sanitized:
-            p["word_count"] = max(MIN_PART_WORD_COUNT, int(p["word_count"] * scale))
-        logger.warning(
-            f"script_structure requested {total} words total across {len(sanitized)} part(s) — "
-            f"scaled down to fit the {MAX_TOTAL_SCRIPT_WORDS}-word ceiling."
-        )
+        sanitized.append({**part, "word_count": max(MIN_PART_WORD_COUNT, word_count)})
     return sanitized
 
 
