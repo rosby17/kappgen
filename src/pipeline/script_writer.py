@@ -76,6 +76,46 @@ DEFAULT_SCRIPT_STRUCTURE = {
 # with the previous tail for continuity; the final script length is unchanged.
 MAX_PART_WORD_COUNT_PER_CALL = 180
 
+# Confirmed live (Sept 2026): a channel's script_structure ended up with
+# word_count: 0 on four of its five parts and word_count: 9000 on the fifth
+# (the numbers the creator actually wanted — "trois mille mots" per part —
+# only existed as prose inside the guidance text, never in the structured
+# word_count field), which every future auto-generated script silently
+# inherited: an ~17,000-word script, a 100+ minute render, TTS and render
+# costs for a video nobody asked for. Nothing anywhere capped a single
+# part's or a whole script's length, so a bad value — however it got there
+# (a malformed AI-parsed structure, a manual edit, a copy/paste slip) — just
+# flowed straight through into production. MIN/MAX_PART_WORD_COUNT and
+# MAX_TOTAL_SCRIPT_WORDS are enforced by _sanitize_parts below every single
+# time a script is generated, not just when a structure is saved, so a
+# channel whose bad data predates this fix is protected too.
+MIN_PART_WORD_COUNT = 20
+MAX_PART_WORD_COUNT = 3500
+MAX_TOTAL_SCRIPT_WORDS = 12000
+
+
+def _sanitize_parts(parts: List[dict]) -> List[dict]:
+    """Clamps every part's word_count into [MIN_PART_WORD_COUNT,
+    MAX_PART_WORD_COUNT], then scales the whole set down proportionally if
+    their total still exceeds MAX_TOTAL_SCRIPT_WORDS — preserves the
+    creator's relative weighting between parts (a long main section stays
+    longer than a short intro) instead of clipping arbitrarily."""
+    sanitized = []
+    for part in parts:
+        word_count = int(part.get("word_count") or 0) or 300
+        clamped = max(MIN_PART_WORD_COUNT, min(word_count, MAX_PART_WORD_COUNT))
+        sanitized.append({**part, "word_count": clamped})
+    total = sum(p["word_count"] for p in sanitized)
+    if total > MAX_TOTAL_SCRIPT_WORDS:
+        scale = MAX_TOTAL_SCRIPT_WORDS / total
+        for p in sanitized:
+            p["word_count"] = max(MIN_PART_WORD_COUNT, int(p["word_count"] * scale))
+        logger.warning(
+            f"script_structure requested {total} words total across {len(sanitized)} part(s) — "
+            f"scaled down to fit the {MAX_TOTAL_SCRIPT_WORDS}-word ceiling."
+        )
+    return sanitized
+
 
 def _extract_json(text: str) -> dict:
     text = text.strip()
@@ -306,6 +346,7 @@ def generate_daily_script(
     structure = script_structure or DEFAULT_SCRIPT_STRUCTURE
     language = structure.get("language") or default_language or "English"
     raw_parts = structure.get("parts") or DEFAULT_SCRIPT_STRUCTURE["parts"]
+    raw_parts = _sanitize_parts(raw_parts)
     parts = _split_oversized_parts(raw_parts)
     formatting_rules = structure.get("formatting_rules") or DEFAULT_SCRIPT_STRUCTURE["formatting_rules"]
     cta_style = structure.get("cta_style") or DEFAULT_SCRIPT_STRUCTURE["cta_style"]

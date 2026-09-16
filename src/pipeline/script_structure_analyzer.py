@@ -5,6 +5,7 @@ import json
 import re
 
 from src.pipeline.ai_text import generate_text
+from src.pipeline.script_writer import _sanitize_parts
 from src.utils.logger import logger
 
 
@@ -56,11 +57,17 @@ Réponds uniquement avec ce JSON, rien d'autre :
     if not isinstance(new_parts, list) or not new_parts:
         raise ValueError("L'IA n'a renvoyé aucune partie, réessaie.")
 
-    return [
+    parts_out = [
         {
             "name": str(p.get("name") or f"part_{i + 1}").strip(),
-            "word_count": max(20, int(p.get("word_count") or 0) or 300),
+            "word_count": int(p.get("word_count") or 0) or 300,
             "guidance": str(p.get("guidance") or "").strip(),
         }
         for i, p in enumerate(new_parts)
     ]
+    # The AI sometimes writes the word count it means as prose inside
+    # guidance ("en trois mille mots") while leaving the structured
+    # word_count field at 0 or wildly off — confirmed live, this alone
+    # produced a 17,000-word script from a single malformed analysis.
+    # _sanitize_parts clamps per-part and total length regardless.
+    return _sanitize_parts(parts_out)

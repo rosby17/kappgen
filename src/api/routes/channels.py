@@ -1580,7 +1580,11 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
     if payload.script_generation_days is not None:
         channel.script_generation_days = payload.script_generation_days
     if payload.script_structure is not None:
-        channel.script_structure = payload.script_structure
+        structure = dict(payload.script_structure)
+        if isinstance(structure.get("parts"), list):
+            from src.pipeline.script_writer import _sanitize_parts
+            structure["parts"] = _sanitize_parts(structure["parts"])
+        channel.script_structure = structure
     if payload.voice_id is not None:
         channel.voice_id = payload.voice_id
     if payload.voice_name is not None:
