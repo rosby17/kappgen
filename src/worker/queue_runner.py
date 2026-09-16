@@ -1047,6 +1047,23 @@ FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 300
 MAX_THUMBNAIL_AUTO_RETRIES = 3
 THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 900
 
+# A video can reach status='done' (committed as soon as the render itself
+# finishes — see process_single_queued_video) and then never get its
+# output_path set at all: _finalize_output_storage_or_fail runs several
+# minutes later, after the SD-variant/metadata/thumbnail steps, and confirmed
+# in production (Sept 2026, "Rivière de Grâce") an upload can fully succeed
+# server-side — local output.mp4 already deleted by _finalize_output_storage
+# once B2 accepted it — while the DB commit that was supposed to record
+# output_path/storage_backend never lands (an infra hiccup between the
+# upload finishing and that commit). The result: a permanently "done" row
+# with an empty output_path and no local file left to retry from, which
+# looks and behaves exactly like the "Finalisation…" stuck state to a
+# creator, and is invisible to every RENDERING-status sweep above since the
+# row is already 'done'. UNFINALIZED_DONE_GRACE_MINUTES avoids racing an
+# upload that's still genuinely in flight.
+UNFINALIZED_DONE_GRACE_MINUTES = 10
+UNFINALIZED_DONE_CHECK_INTERVAL_SECONDS = 600
+
 
 def _wait_for_auto_video_turn(db, video: Video) -> bool:
     """Hold automatic script preparation in the same FIFO as rendering.
@@ -1290,6 +1307,81 @@ def retry_eligible_failed_videos():
             db.commit()
     except Exception as e:
         logger.warning(f"Failed-video auto-retry pass failed: {e}")
+    finally:
+        db.close()
+
+
+def retry_unfinalized_done_videos():
+    """Recovers a video stuck 'done' with an empty output_path (see
+    UNFINALIZED_DONE_GRACE_MINUTES above for the exact failure mode this
+    catches — confirmed live on "Rivière de Grâce", Sept 2026). Three cases,
+    checked in order of how much work they save:
+    1. The local output.mp4 is still on disk (the finalize attempt never got
+       as far as uploading) — just re-run _finalize_output_storage_or_fail.
+    2. It's gone locally (a B2 upload did succeed and deleted it — only
+       _finalize_output_storage does that) but the object is actually
+       sitting in the bucket — recover output_path/storage_backend directly
+       from B2's own HEAD response, no data lost, no re-render needed.
+    3. Neither exists — the render output is genuinely gone. Mark FAILED
+       (with a refund) so the ordinary auto-retry path re-renders it; the
+       pipeline's on-disk checkpoints (voiceover, clips, audio — see
+       orchestrator.py) mean this only redoes the cheap final assembly step,
+       not the expensive generation, as long as those checkpoint files
+       weren't purged."""
+    from src.utils import b2_storage
+
+    db = SessionLocal()
+    try:
+        grace_cutoff = datetime.utcnow() - timedelta(minutes=UNFINALIZED_DONE_GRACE_MINUTES)
+        stuck = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(or_(Video.output_path.is_(None), Video.output_path == ""))
+            .filter(Video.finished_at.isnot(None))
+            .filter(Video.finished_at <= grace_cutoff)
+            .with_for_update(skip_locked=True)
+            .all()
+        )
+        for video in stuck:
+            video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+            output_mp4 = video_dir / "output.mp4"
+            if output_mp4.exists():
+                logger.warning(f"Video {video.id} was 'done' with no output_path but output.mp4 is still local — re-finalizing.")
+                _finalize_output_storage_or_fail(db, video, output_mp4)
+                continue
+
+            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+            recovered_url = None
+            if channel and b2_storage.is_b2_configured():
+                channel_short = b2_storage.short_id(video.channel_id)
+                channel_slug = b2_storage.slugify(channel.name)
+                video_short = b2_storage.short_id(video.id)
+                object_key = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/output.mp4"
+                size_bytes = b2_storage.object_size_if_exists(object_key)
+                if size_bytes is not None:
+                    from src.config import B2_PUBLIC_URL_BASE
+                    recovered_url = f"{B2_PUBLIC_URL_BASE}/{object_key}"
+                    video.output_path = recovered_url
+                    video.storage_backend = "b2"
+                    video.output_size_bytes = size_bytes
+                    logger.warning(f"Recovered video {video.id}: output.mp4 was already on B2, only the DB row was missing it.")
+
+            if not recovered_url:
+                logger.error(f"Video {video.id} stuck 'done' with no output_path and no recoverable file (local or B2) — marking failed.")
+                video.status = VideoStatus.FAILED.value
+                video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+                video.progress_stage = "Échec de l'enregistrement"
+                if not video.is_reassembly:
+                    try:
+                        from src.utils.billing import refund_video_credits
+                        refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo perdue ({video.title or video.id})")
+                        if refunded:
+                            logger.info(f"Refunded {refunded} credits for unrecoverable video {video.id}.")
+                    except Exception as refund_err:
+                        logger.error(f"Failed to refund credits for video {video.id}: {refund_err}")
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Unfinalized-done recovery pass failed: {e}")
     finally:
         db.close()
 
@@ -2767,6 +2859,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_youtube_identity_sync = 0.0
     last_community_tagging = 0.0
     last_stuck_render_check = 0.0
+    last_unfinalized_done_check = 0.0
     last_failure_retry_check = 0.0
     last_thumbnail_retry_check = 0.0
     while not _shutdown_requested:
@@ -2774,6 +2867,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_stuck_render_check > STUCK_RENDER_CHECK_INTERVAL_SECONDS:
             requeue_stuck_rendering_videos()
             last_stuck_render_check = now
+        if now - last_unfinalized_done_check > UNFINALIZED_DONE_CHECK_INTERVAL_SECONDS:
+            retry_unfinalized_done_videos()
+            last_unfinalized_done_check = now
         if now - last_failure_retry_check > FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
             retry_eligible_failed_videos()
             last_failure_retry_check = now

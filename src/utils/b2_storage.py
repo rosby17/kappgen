@@ -144,6 +144,21 @@ def download_file(object_key: str, local_path: Path) -> bool:
         return False
 
 
+def object_size_if_exists(object_key: str) -> Optional[int]:
+    """HEADs an object and returns its size in bytes, or None if it doesn't
+    exist (or B2 isn't configured) — used to recover a video whose upload
+    actually succeeded but whose DB row never got updated to reflect it (see
+    retry_unfinalized_done_videos, queue_runner.py)."""
+    if not is_b2_configured():
+        return None
+    try:
+        client = _get_client()
+        head = client.head_object(Bucket=B2_BUCKET_NAME, Key=object_key)
+        return head.get("ContentLength")
+    except Exception:
+        return None
+
+
 def delete_video(object_key: str) -> None:
     """Best-effort delete — a failed cleanup here just leaves an orphaned
     object in the bucket, never something worth failing a purge pass over."""
