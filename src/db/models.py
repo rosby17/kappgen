@@ -600,6 +600,16 @@ class Video(Base):
     # youtube_metadata.py). Cleared automatically the moment a regeneration
     # (auto-retry or the manual "Régénérer" button) succeeds.
     thumbnail_error = Column(Text, nullable=True)
+    # True once a real AI-styled thumbnail (from the channel's configured
+    # reference images) is on disk; False when the current thumbnail.jpg is
+    # only a plain video-frame-grab fallback — which used to look identical
+    # to a success in the DB (no thumbnail_error set, since the post-render
+    # retry accepts a fallback as "done") and was therefore invisible to any
+    # automated retry. Null for rows written before this column existed.
+    # retry_missing_thumbnails (queue_runner.py) keeps retrying for real
+    # until this is True, for as long as the channel still has a reference
+    # style configured.
+    thumbnail_is_ai = Column(Boolean, nullable=True)
     # Set for recurring automatic/scheduled publication — the worker leaves
     # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)

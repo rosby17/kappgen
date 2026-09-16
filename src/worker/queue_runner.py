@@ -342,7 +342,11 @@ def process_single_queued_video() -> bool:
             # directory" against a file already moved to B2 (see queue_runner
             # commit history, Sept 2026 B2 migration).
             try_ensure_sd_variant(output_mp4)
-            await_parallel_thumbnail()
+            if not thumbnail_already_exists and thumbnail_enabled:
+                _, reassembly_ai_used = await_parallel_thumbnail()
+                video.thumbnail_is_ai = reassembly_ai_used
+            else:
+                await_parallel_thumbnail()
             _finalize_output_storage_or_fail(db, video, output_mp4)
             return True
 
@@ -436,7 +440,11 @@ def process_single_queued_video() -> bool:
 
             # Before _finalize_output_storage — see the reassembly branch
             # above for why the order matters.
-            await_parallel_thumbnail()
+            if not thumbnail_already_exists and thumbnail_enabled:
+                _, music_thumbnail_ai_used = await_parallel_thumbnail()
+                video.thumbnail_is_ai = music_thumbnail_ai_used
+            else:
+                await_parallel_thumbnail()
             if _finalize_output_storage_or_fail(db, video, output_mp4) and channel.youtube_refresh_token:
                 if channel.publish_mode in ("auto", "scheduled"):
                     video.scheduled_publish_at = compute_scheduled_publish_at(channel, video_id=video.id)
@@ -641,31 +649,47 @@ def process_single_queued_video() -> bool:
             logger.warning(f"Could not pre-generate YouTube title/description for video {video.id}: {e}")
 
         _, thumbnail_ai_used = await_parallel_thumbnail()
+        if thumbnail_already_exists:
+            pass  # kept from a previous attempt (retry/retry-visuals) — leave thumbnail_is_ai as whatever it already was.
+        elif thumbnail_enabled:
+            video.thumbnail_is_ai = thumbnail_ai_used
         # Every finished video must have a visible card thumbnail. Channels
         # without a reference style skip the parallel AI job, but still get a
         # representative frame from the finished MP4 here.
         if not thumbnail_ai_used and not thumbnail_already_exists and not (thumbnail_destination.exists() and thumbnail_destination.stat().st_size > 1000):
             # The parallel attempt above started before the video existed and
-            # failed its AI call — strict=True means it raised rather than
-            # writing a generic, unstyled placeholder (see
-            # generate_thumbnail's docstring: publishing something with none
-            # of the creator's actual reference style was worse than a clear
-            # "couldn't make one" state). Retry once for real now that
-            # output_mp4 exists — transient AI timeouts do happen — still
-            # strict, so a second failure leaves no thumbnail file at all
-            # rather than a mediocre one.
+            # failed its AI call. Retry once for real now that output_mp4
+            # exists — transient AI timeouts do happen. strict=False here is
+            # deliberate: it guarantees the creator sees *some* thumbnail
+            # immediately (a frame-grab) rather than none at all, matching
+            # "there must always be at least one thumbnail" — but a
+            # frame-grab is not what a channel with a configured reference
+            # style actually asked for, so it must never be silently treated
+            # as success. thumbnail_is_ai=False (recorded below regardless of
+            # outcome) is what retry_missing_thumbnails uses to keep trying
+            # for a real one in the background, on a schedule, until it
+            # succeeds — this call is not the last word on this thumbnail.
             try:
-                youtube_metadata.generate_thumbnail(
+                _, retry_ai_used, _ = youtube_metadata.generate_thumbnail(
                     output_mp4, thumbnail_destination,
                     video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
                     channel if thumbnail_enabled else None, video.id, strict=False,
                 )
-                video.thumbnail_error = None
-                logger.info(f"Post-render thumbnail retry for video {video.id} succeeded.")
+                video.thumbnail_is_ai = retry_ai_used if thumbnail_enabled else None
+                if retry_ai_used or not thumbnail_enabled:
+                    video.thumbnail_error = None
+                    logger.info(f"Post-render thumbnail retry for video {video.id} succeeded (ai_used={retry_ai_used}).")
+                else:
+                    video.thumbnail_error = (
+                        "La miniature IA n'a pas pu être générée dans le style de la chaîne pour l'instant — "
+                        "une image de secours est utilisée en attendant. Nouvelle tentative automatique en arrière-plan."
+                    )
+                    logger.warning(f"Post-render thumbnail retry for video {video.id} fell back to a frame-grab (no AI thumbnail yet).")
             except Exception as exc:
+                video.thumbnail_is_ai = False
                 video.thumbnail_error = (
                     "La miniature n'a pas pu être générée dans le style de la chaîne. "
-                    "Réessaie dans quelques minutes, ou régénère-la manuellement."
+                    "Nouvelle tentative automatique en arrière-plan."
                 )
                 logger.warning(f"Post-render thumbnail retry failed for video {video.id}, leaving no thumbnail: {exc}")
             db.commit()
@@ -1044,7 +1068,13 @@ MAX_FAILURE_AUTO_RETRIES = 3
 FAILURE_AUTO_RETRY_COOLDOWN_MINUTES = 10
 FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 300
 
-MAX_THUMBNAIL_AUTO_RETRIES = 3
+# No cap here on purpose: a creator who configured a reference thumbnail
+# style is owed a real AI thumbnail eventually, however long an upstream
+# provider outage lasts (confirmed live, Sept 2026: ai33.pro image
+# generation stalled for a full 10-minute poll window with no result) — a
+# frame-grab is an acceptable stand-in meanwhile, never a permanent
+# replacement. thumbnail_retry_count is still tracked for observability,
+# just never used to stop retrying.
 THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 900
 
 # A video can reach status='done' (committed as soon as the render itself
@@ -1426,26 +1456,35 @@ def _local_copy_of_video_output(video: Video, video_dir: Path):
 
 
 def retry_missing_thumbnails():
-    """A finished video whose thumbnail generation failed (video.thumbnail_error
-    set by the post-render retry in process_single_queued_video, leaving the
-    generic fallback thumbnail permanently in place) otherwise never gets
-    another attempt — nothing else ever came back to try again. Sweeps those
-    up periodically, up to MAX_THUMBNAIL_AUTO_RETRIES times each, using the
-    same non-strict generate_thumbnail call the original post-render retry
-    uses (best-effort: a frame-grab fallback beats no thumbnail retry at all)."""
+    """A finished video on a channel with a configured reference thumbnail
+    style must eventually get a real AI thumbnail — never permanently settle
+    for the plain video-frame-grab fallback. Targets thumbnail_is_ai is not
+    True (False, meaning the last attempt fell back to a frame-grab, or NULL
+    for rows predating this column) rather than just thumbnail_error, since
+    a frame-grab fallback used to report success (no error at all) while
+    still not being what the creator actually asked for. Retries forever,
+    on THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS, for as long as the
+    channel still wants one — a channel that has since disabled thumbnails
+    or removed its reference images is left alone."""
     db = SessionLocal()
     try:
         candidates = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
-            .filter(Video.thumbnail_error.isnot(None))
-            .filter(Video.thumbnail_retry_count < MAX_THUMBNAIL_AUTO_RETRIES)
+            .filter(Video.thumbnail_is_ai.isnot(True))
             .all()
         )
         for video in candidates:
             channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
             if not channel:
                 continue
+            thumbnail_style = channel.thumbnail_style or {}
+            thumbnail_enabled = (not thumbnail_style.get("disabled")) and bool(
+                thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path")
+            )
+            if not thumbnail_enabled:
+                continue
+
             video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
             thumbnail_destination = video_dir / "thumbnail.jpg"
             try:
@@ -1455,16 +1494,37 @@ def retry_missing_thumbnails():
                 continue
             if not local_output:
                 continue
+
+            # generate_thumbnail short-circuits and reuses whatever file is
+            # already at `destination` if it's non-trivially sized — which
+            # would just re-report the existing frame-grab fallback as a
+            # fresh "success" without ever actually calling the AI provider.
+            # Move it aside first; restored below if this attempt fails too,
+            # so the creator always keeps seeing at least one thumbnail.
+            fallback_backup = thumbnail_destination.with_suffix(".fallback.jpg")
+            had_fallback = thumbnail_destination.exists()
+            if had_fallback:
+                thumbnail_destination.replace(fallback_backup)
+
             video.thumbnail_retry_count = (video.thumbnail_retry_count or 0) + 1
             try:
                 youtube_metadata.generate_thumbnail(
                     local_output, thumbnail_destination,
                     video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
-                    channel, video.id, strict=False,
+                    channel, video.id, strict=True,
                 )
+                video.thumbnail_is_ai = True
                 video.thumbnail_error = None
+                if had_fallback:
+                    fallback_backup.unlink(missing_ok=True)
                 logger.info(f"Scheduled thumbnail retry succeeded for video {video.id} (attempt {video.thumbnail_retry_count}).")
             except Exception as exc:
+                if had_fallback:
+                    fallback_backup.replace(thumbnail_destination)
+                video.thumbnail_error = (
+                    "La miniature IA n'a pas encore pu être générée dans le style de la chaîne — "
+                    "nouvelle tentative automatique plus tard, l'image actuelle reste affichée en attendant."
+                )
                 logger.warning(f"Scheduled thumbnail retry failed for video {video.id} (attempt {video.thumbnail_retry_count}): {exc}")
             finally:
                 cleanup()

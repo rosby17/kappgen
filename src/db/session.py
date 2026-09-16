@@ -100,6 +100,7 @@ def init_db():
             # their own cap instead of retrying a genuinely broken video forever.
             "failure_retry_count": "ALTER TABLE videos ADD COLUMN failure_retry_count INTEGER DEFAULT 0 NOT NULL",
             "thumbnail_retry_count": "ALTER TABLE videos ADD COLUMN thumbnail_retry_count INTEGER DEFAULT 0 NOT NULL",
+            "thumbnail_is_ai": "ALTER TABLE videos ADD COLUMN thumbnail_is_ai BOOLEAN",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
