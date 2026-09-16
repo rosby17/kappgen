@@ -2653,10 +2653,16 @@ def run_daily_automation():
     """
     db = SessionLocal()
     try:
-        channels = db.query(Channel).filter(
-            Channel.automation_mode == "auto",
-            Channel.is_active.is_(True),
-        ).all()
+        channels = (
+            db.query(Channel)
+            .join(User, User.id == Channel.user_id)
+            .filter(
+                Channel.automation_mode == "auto",
+                Channel.is_active.is_(True),
+                User.automation_paused.is_(False),
+            )
+            .all()
+        )
         for channel in channels:
             # Re-fetch this channel's current state right before using it —
             # the sweep loads every eligible channel once up front, then

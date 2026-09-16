@@ -140,6 +140,7 @@ def init_db():
             "beta_status": "ALTER TABLE users ADD COLUMN beta_status VARCHAR(20) DEFAULT 'pending' NOT NULL",
             "beta_status_updated_at": "ALTER TABLE users ADD COLUMN beta_status_updated_at TIMESTAMP",
             "maintenance_access": "ALTER TABLE users ADD COLUMN maintenance_access BOOLEAN DEFAULT FALSE NOT NULL",
+            "automation_paused": "ALTER TABLE users ADD COLUMN automation_paused BOOLEAN DEFAULT FALSE NOT NULL",
         }
         is_new_verified_column = "email_verified" not in existing_user_columns
         is_new_beta_column = "beta_status" not in existing_user_columns

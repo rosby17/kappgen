@@ -459,6 +459,7 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     locale: Optional[str] = None
+    automation_paused: Optional[bool] = None
 
 
 @router.patch("/me/{user_id}")
@@ -479,6 +480,11 @@ def update_user_profile(user_id: str, payload: ProfileUpdate, current_user: User
         if payload.locale not in SUPPORTED_LOCALES:
             raise HTTPException(status_code=400, detail="Langue non supportée.")
         user.locale = payload.locale
+    if payload.automation_paused is not None:
+        # Self-service kill switch for every one of this creator's own
+        # auto-mode channels at once — see User.automation_paused's own
+        # docstring (models.py) for exactly what it does and doesn't stop.
+        user.automation_paused = payload.automation_paused
     db.commit()
     db.refresh(user)
     return user.to_dict()

@@ -35,6 +35,17 @@ class User(Base):
     # Explicit allow-list used only while the platform-wide maintenance gate
     # is active. It is managed by an administrator from Demandes bêta.
     maintenance_access = Column(Boolean, nullable=False, default=False)
+    # Self-service kill switch for THIS creator's own automation only — the
+    # "maintenance" flag above is a platform-wide, admin-only gate. A
+    # creator running many auto-mode channels who can't keep up with
+    # reviewing/publishing what's already generating needs to stop every
+    # channel from starting anything NEW without touching each channel's
+    # own automation_mode individually. Checked by run_daily_automation
+    # (queue_runner.py), which skips script/video generation entirely for
+    # every channel owned by a paused user — deliberately NOT checked by the
+    # render picker or any thumbnail/finalization step, so a video already
+    # queued or rendering when this flips on always finishes normally.
+    automation_paused = Column(Boolean, nullable=False, default=False)
     email_verified = Column(Boolean, nullable=False, default=False)
     email_verify_token = Column(String(64), nullable=True)
     email_verify_sent_at = Column(DateTime, nullable=True)
@@ -65,6 +76,7 @@ class User(Base):
             "is_admin": self.is_admin,
             "beta_status": self.beta_status,
             "maintenance_access": self.maintenance_access,
+            "automation_paused": self.automation_paused,
             "email_verified": self.email_verified,
             "free_video_quota_granted": self.free_video_quota_granted,
             "free_videos_used": self.free_videos_used,
