@@ -1013,6 +1013,40 @@ def try_publish_to_youtube(db, channel: Channel, video: Video, output_mp4: Path)
 
 MAX_AUTO_RESTARTS = 4
 
+# A video legitimately spends this whole time in status='rendering' — the
+# render itself, then the "Finalisation" stages (SD transcode, thumbnail
+# frame-grab, B2 upload, YouTube publish) all run before status flips to
+# 'done'/'failed'. requeue_orphaned_videos only catches a video orphaned by a
+# process that actually died (crash/redeploy) — it runs once, at startup.
+# Nothing used to catch the other failure mode: a thread that's still alive
+# but wedged on a network call with no timeout (see the B2 client fix in
+# b2_storage.py), which never raises and so never reaches the except block
+# that would mark it failed. RENDER_STUCK_TIMEOUT_MINUTES is a generous
+# ceiling — well past any real render — past which we stop trusting the
+# thread to ever finish and surface a clear failure instead of leaving the
+# creator staring at "Finalisation..." for days.
+RENDER_STUCK_TIMEOUT_MINUTES = 180
+STUCK_RENDER_CHECK_INTERVAL_SECONDS = 600
+
+# Substrings of error_message set by process_single_queued_video's except
+# block (or by the ValueError checks earlier in that same function) when the
+# failure is something only the creator can act on — retrying automatically
+# would just spend a render slot to fail again, identically, every time.
+NON_RETRYABLE_FAILURE_MARKERS = (
+    "crédits KappGen est épuisé",  # CREDIT_INSUFFICIENT_MESSAGE
+    "contrôle de conformité",  # script/audio compliance preflight blockers
+    "contrôle avant montage",  # active_preflight blocker re-raised on retry
+    "droits sur l’audio",  # audio_rights_confirmed not set
+    "introuvable sur le serveur",  # source audio file missing — retry fails identically
+    "script de cette vidéo est vide",  # empty/too-short script backstop
+)
+MAX_FAILURE_AUTO_RETRIES = 3
+FAILURE_AUTO_RETRY_COOLDOWN_MINUTES = 10
+FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 300
+
+MAX_THUMBNAIL_AUTO_RETRIES = 3
+THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 900
+
 
 def _wait_for_auto_video_turn(db, video: Video) -> bool:
     """Hold automatic script preparation in the same FIFO as rendering.
@@ -1164,6 +1198,178 @@ def requeue_orphaned_voice_clone_jobs():
             job.status = "pending"
         if orphaned:
             db.commit()
+    finally:
+        db.close()
+
+
+def requeue_stuck_rendering_videos():
+    """Runs continuously (unlike requeue_orphaned_videos, which only runs
+    once at worker startup) to catch a render lane whose thread is still
+    alive but wedged on a network call that never raises — see
+    RENDER_STUCK_TIMEOUT_MINUTES above for why this exists and why crash-only
+    recovery isn't enough. Marks the video FAILED directly rather than
+    re-queuing it: the original thread may still be running and could commit
+    over a re-queued row the moment it finally wakes up, so putting it back
+    in front of another render lane risks two lanes touching the same video
+    at once. A clean re-render is left to the ordinary FAILED-video path
+    (manual retry, or retry_eligible_failed_videos below) instead."""
+    db = SessionLocal()
+    try:
+        stuck_cutoff = datetime.utcnow() - timedelta(minutes=RENDER_STUCK_TIMEOUT_MINUTES)
+        stuck = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.RENDERING.value)
+            .filter(Video.started_at.isnot(None))
+            .filter(Video.started_at < stuck_cutoff)
+            .with_for_update(skip_locked=True)
+            .all()
+        )
+        for video in stuck:
+            logger.error(
+                f"Video {video.id} stuck in status='rendering' (stage: {video.progress_stage!r}) "
+                f"for over {RENDER_STUCK_TIMEOUT_MINUTES} minutes — marking failed."
+            )
+            video.status = VideoStatus.FAILED.value
+            video.finished_at = datetime.utcnow()
+            video.error_message = (
+                f"Échec à l'étape « {video.progress_stage or 'Rendu'} » : {SERVICE_UNAVAILABLE_MESSAGE}"
+            )
+            video.progress_stage = "Échec du rendu"
+            if not video.is_reassembly:
+                try:
+                    from src.utils.billing import refund_video_credits
+                    refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo bloquée ({video.title or video.id})")
+                    if refunded:
+                        logger.info(f"Refunded {refunded} credits for stuck video {video.id}.")
+                except Exception as refund_err:
+                    logger.error(f"Failed to refund credits for stuck video {video.id}: {refund_err}")
+        if stuck:
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Stuck-render watchdog pass failed: {e}")
+    finally:
+        db.close()
+
+
+def retry_eligible_failed_videos():
+    """Automatically re-queues a FAILED video up to MAX_FAILURE_AUTO_RETRIES
+    times, after a cooldown, unless its error_message matches
+    NON_RETRYABLE_FAILURE_MARKERS (something only the creator can fix).
+    Credits were already refunded when the video first failed, so this retry
+    costs the creator nothing extra — it's on us to actually get them a
+    finished video instead of leaving a permanent "Échec — relancer" card
+    that nobody but the creator will ever notice and click."""
+    db = SessionLocal()
+    try:
+        cooldown_cutoff = datetime.utcnow() - timedelta(minutes=FAILURE_AUTO_RETRY_COOLDOWN_MINUTES)
+        candidates = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.FAILED.value)
+            .filter(Video.failure_retry_count < MAX_FAILURE_AUTO_RETRIES)
+            .filter(Video.finished_at.isnot(None))
+            .filter(Video.finished_at <= cooldown_cutoff)
+            .with_for_update(skip_locked=True)
+            .all()
+        )
+        retried = 0
+        for video in candidates:
+            error_text = video.error_message or ""
+            if any(marker in error_text for marker in NON_RETRYABLE_FAILURE_MARKERS):
+                continue
+            video.failure_retry_count = (video.failure_retry_count or 0) + 1
+            video.status = VideoStatus.QUEUED.value
+            video.started_at = None
+            video.finished_at = None
+            video.error_message = None
+            video.restart_count = 0
+            video.progress_stage = f"Nouvelle tentative automatique ({video.failure_retry_count}/{MAX_FAILURE_AUTO_RETRIES})"
+            video.progress_percent = 0
+            logger.info(f"Auto-retrying failed video {video.id} (attempt {video.failure_retry_count}/{MAX_FAILURE_AUTO_RETRIES}).")
+            retried += 1
+        if retried:
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Failed-video auto-retry pass failed: {e}")
+    finally:
+        db.close()
+
+
+def _local_copy_of_video_output(video: Video, video_dir: Path):
+    """Returns (local_path, cleanup_temp_dir) for video.output_path — the
+    path directly if the render is still local, or a throwaway temp download
+    if it already moved to B2 (see _finalize_output_storage, which deletes
+    the local copy once the upload succeeds). Caller must call
+    cleanup_temp_dir() (a no-op lambda when nothing was downloaded) once done
+    with local_path. Returns (None, no-op) if there's nothing to fetch."""
+    output_ref = str(video.output_path or "")
+    if not output_ref:
+        return None, (lambda: None)
+    if video.storage_backend == "local":
+        local_path = STORAGE_PATH / output_ref
+        return (local_path if local_path.exists() else None), (lambda: None)
+
+    import tempfile
+    import httpx
+    temp_dir = tempfile.TemporaryDirectory(prefix="kappgen-thumbnail-retry-")
+    local_path = Path(temp_dir.name) / "output.mp4"
+    try:
+        with httpx.stream("GET", output_ref, timeout=120.0, follow_redirects=True) as response:
+            response.raise_for_status()
+            with local_path.open("wb") as handle:
+                for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                    handle.write(chunk)
+    except Exception:
+        temp_dir.cleanup()
+        raise
+    return local_path, temp_dir.cleanup
+
+
+def retry_missing_thumbnails():
+    """A finished video whose thumbnail generation failed (video.thumbnail_error
+    set by the post-render retry in process_single_queued_video, leaving the
+    generic fallback thumbnail permanently in place) otherwise never gets
+    another attempt — nothing else ever came back to try again. Sweeps those
+    up periodically, up to MAX_THUMBNAIL_AUTO_RETRIES times each, using the
+    same non-strict generate_thumbnail call the original post-render retry
+    uses (best-effort: a frame-grab fallback beats no thumbnail retry at all)."""
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.thumbnail_error.isnot(None))
+            .filter(Video.thumbnail_retry_count < MAX_THUMBNAIL_AUTO_RETRIES)
+            .all()
+        )
+        for video in candidates:
+            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+            if not channel:
+                continue
+            video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+            thumbnail_destination = video_dir / "thumbnail.jpg"
+            try:
+                local_output, cleanup = _local_copy_of_video_output(video, video_dir)
+            except Exception as exc:
+                logger.warning(f"Could not fetch a local copy of video {video.id} to retry its thumbnail: {exc}")
+                continue
+            if not local_output:
+                continue
+            video.thumbnail_retry_count = (video.thumbnail_retry_count or 0) + 1
+            try:
+                youtube_metadata.generate_thumbnail(
+                    local_output, thumbnail_destination,
+                    video.thumbnail_text or video.title or channel.name or channel.niche or "Nouvelle vidéo",
+                    channel, video.id, strict=False,
+                )
+                video.thumbnail_error = None
+                logger.info(f"Scheduled thumbnail retry succeeded for video {video.id} (attempt {video.thumbnail_retry_count}).")
+            except Exception as exc:
+                logger.warning(f"Scheduled thumbnail retry failed for video {video.id} (attempt {video.thumbnail_retry_count}): {exc}")
+            finally:
+                cleanup()
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Thumbnail auto-retry pass failed: {e}")
     finally:
         db.close()
 
@@ -2560,8 +2766,20 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_scheduled_publish_check = 0.0
     last_youtube_identity_sync = 0.0
     last_community_tagging = 0.0
+    last_stuck_render_check = 0.0
+    last_failure_retry_check = 0.0
+    last_thumbnail_retry_check = 0.0
     while not _shutdown_requested:
         now = time.time()
+        if now - last_stuck_render_check > STUCK_RENDER_CHECK_INTERVAL_SECONDS:
+            requeue_stuck_rendering_videos()
+            last_stuck_render_check = now
+        if now - last_failure_retry_check > FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
+            retry_eligible_failed_videos()
+            last_failure_retry_check = now
+        if now - last_thumbnail_retry_check > THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
+            retry_missing_thumbnails()
+            last_thumbnail_retry_check = now
         if now - last_purge > PURGE_INTERVAL_SECONDS:
             # REINSTATED Sept 2026 alongside VIDEO_RETENTION_HOURS above —
             # warn first so a creator has VIDEO_EXPIRY_WARNING_HOURS_BEFORE

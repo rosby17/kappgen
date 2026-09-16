@@ -486,6 +486,15 @@ class Video(Base):
     # warning and the actual deletion (see warn_expiring_videos, queue_runner.py).
     expiry_warning_sent_at = Column(DateTime, nullable=True)
     restart_count = Column(Integer, nullable=False, default=0)
+    # How many times retry_eligible_failed_videos (queue_runner.py) has
+    # automatically re-queued this video after a FAILED status caused by our
+    # own infrastructure — capped at MAX_FAILURE_AUTO_RETRIES so a genuinely
+    # broken video doesn't loop forever burning render slots.
+    failure_retry_count = Column(Integer, nullable=False, default=0)
+    # Same idea as failure_retry_count but for retry_missing_thumbnails —
+    # counts automatic background attempts at a thumbnail that failed after
+    # the render itself already succeeded (video.thumbnail_error set).
+    thumbnail_retry_count = Column(Integer, nullable=False, default=0)
     # Admin override that jumps a queued video ahead of the normal FIFO render
     # order (see queue_runner.py's
     # process_single_queued_video and admin.py's _queued_video_positions,

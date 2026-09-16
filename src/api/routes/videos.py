@@ -1804,8 +1804,10 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
         # A manual retry starts a new interruption budget. Without this reset,
         # a video that already reached the automatic-restart ceiling fails
         # immediately on the very next server restart, making the Retry button
-        # effectively useless.
+        # effectively useless. Also resets the automatic-failure-retry budget
+        # (queue_runner.py's retry_eligible_failed_videos) for the same reason.
         video.restart_count = 0
+        video.failure_retry_count = 0
         video.error_message = None
         video.progress_stage = "En attente dans la file"
         video.progress_percent = 0
@@ -1819,6 +1821,7 @@ def retry_video(video_id: str, current_user: User = Depends(get_current_user), d
 
     video.status = VideoStatus.QUEUED.value
     video.restart_count = 0
+    video.failure_retry_count = 0
     video.error_message = None
     video.progress_stage = "En attente du moteur de rendu"
     video.progress_percent = 0
@@ -1864,6 +1867,7 @@ def retry_video_visuals(video_id: str, current_user: User = Depends(get_current_
     video.status = VideoStatus.QUEUED.value
     video.is_reassembly = False
     video.restart_count = 0
+    video.failure_retry_count = 0
     # This video already finished once — a creator retrying its visuals
     # shouldn't wait behind every freshly launched video ahead of it.
     video.admin_priority = max(video.admin_priority or 0, 1)

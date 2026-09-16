@@ -56,12 +56,22 @@ def _get_client():
     if _client is not None:
         return _client
     import boto3
+    from botocore.config import Config
+    # Without an explicit timeout, a stalled connection (a frozen upload,
+    # B2 hanging mid-response) blocks this call — and the single worker
+    # thread behind it — indefinitely: no exception is ever raised, so
+    # nothing in queue_runner.py ever gets a chance to mark the video
+    # failed and move on. This is exactly the "stuck in Finalisation for
+    # days" symptom seen in production. connect_timeout covers the initial
+    # handshake; read_timeout covers a stalled transfer once connected —
+    # generous enough for a full-length video upload, but finite.
     _client = boto3.client(
         "s3",
         endpoint_url=f"https://{B2_ENDPOINT}",
         aws_access_key_id=B2_KEY_ID,
         aws_secret_access_key=B2_APPLICATION_KEY,
         region_name=B2_REGION,
+        config=Config(connect_timeout=15, read_timeout=600, retries={"max_attempts": 2}),
     )
     return _client
 

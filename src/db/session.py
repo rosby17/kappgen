@@ -95,6 +95,11 @@ def init_db():
             "admin_priority": "ALTER TABLE videos ADD COLUMN admin_priority INTEGER DEFAULT 0 NOT NULL",
             "priority_paid_at": "ALTER TABLE videos ADD COLUMN priority_paid_at TIMESTAMP",
             "priority_credits_paid": "ALTER TABLE videos ADD COLUMN priority_credits_paid INTEGER",
+            # Reliability sweeps (queue_runner.py): how many times each has
+            # already auto-retried this video, so both stop for good past
+            # their own cap instead of retrying a genuinely broken video forever.
+            "failure_retry_count": "ALTER TABLE videos ADD COLUMN failure_retry_count INTEGER DEFAULT 0 NOT NULL",
+            "thumbnail_retry_count": "ALTER TABLE videos ADD COLUMN thumbnail_retry_count INTEGER DEFAULT 0 NOT NULL",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():
