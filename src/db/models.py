@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer, Boolean, UniqueConstraint
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, JSON, Float, Integer, BigInteger, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship, backref
 from src.db.session import Base
 from src.models.project import VideoStatus
@@ -466,7 +466,10 @@ class Video(Base):
     # QA-motivated admin retry never charges the creator again for KappGen's
     # own judgment call. See debit_credits in utils/billing.py.
     admin_free_retry = Column(Boolean, nullable=False, default=False)
-    output_size_bytes = Column(Integer, nullable=True)  # output.mp4 size — feeds current_b2_usage_bytes()
+    # Plain Integer overflowed (Postgres int4 caps at ~2.14GB) for any video
+    # over ~35-40 minutes at this bitrate — confirmed live on an 81-minute
+    # render (~2.65GB) that crashed retry_unfinalized_done_videos mid-sweep.
+    output_size_bytes = Column(BigInteger, nullable=True)  # output.mp4 size — feeds current_b2_usage_bytes()
     # Opt-in per-video: skip the default retention purge entirely and prefer
     # uploading to R2 instead of local disk (see _finalize_output_storage /
     # purge_old_videos_and_uploads, queue_runner.py). Meant to be a paid

@@ -107,6 +107,19 @@ def init_db():
                     logger.info(f"Migrating videos table: adding {col_name} column.")
                     conn.execute(text(ddl))
 
+        # output_size_bytes started as a plain Integer (Postgres int4, caps at
+        # ~2.14GB) — confirmed live to overflow and crash on an 81-minute
+        # render (~2.65GB). Widen it in place rather than via the ADD COLUMN
+        # map above, which only handles columns that don't exist yet.
+        if not db_url.startswith("sqlite"):
+            existing_output_size_col = next(
+                (col for col in inspector.get_columns("videos") if col["name"] == "output_size_bytes"), None
+            )
+            if existing_output_size_col is not None and str(existing_output_size_col["type"]).upper() != "BIGINT":
+                logger.info("Migrating videos table: widening output_size_bytes to BIGINT.")
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE videos ALTER COLUMN output_size_bytes TYPE BIGINT"))
+
     if "users" in inspector.get_table_names():
         existing_user_columns = {col["name"] for col in inspector.get_columns("users")}
         migrations = {

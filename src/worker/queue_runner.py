@@ -1343,43 +1343,52 @@ def retry_unfinalized_done_videos():
             .all()
         )
         for video in stuck:
-            video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
-            output_mp4 = video_dir / "output.mp4"
-            if output_mp4.exists():
-                logger.warning(f"Video {video.id} was 'done' with no output_path but output.mp4 is still local — re-finalizing.")
-                _finalize_output_storage_or_fail(db, video, output_mp4)
-                continue
+            # Each video commits independently and any failure here rolls
+            # back and moves on — one bad row (confirmed live: an
+            # output_size_bytes overflow on an 81-minute render) must never
+            # abort the whole sweep and leave every other video behind it
+            # untouched until the next tick.
+            try:
+                video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+                output_mp4 = video_dir / "output.mp4"
+                if output_mp4.exists():
+                    logger.warning(f"Video {video.id} was 'done' with no output_path but output.mp4 is still local — re-finalizing.")
+                    _finalize_output_storage_or_fail(db, video, output_mp4)
+                    continue
 
-            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
-            recovered_url = None
-            if channel and b2_storage.is_b2_configured():
-                channel_short = b2_storage.short_id(video.channel_id)
-                channel_slug = b2_storage.slugify(channel.name)
-                video_short = b2_storage.short_id(video.id)
-                object_key = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/output.mp4"
-                size_bytes = b2_storage.object_size_if_exists(object_key)
-                if size_bytes is not None:
-                    from src.config import B2_PUBLIC_URL_BASE
-                    recovered_url = f"{B2_PUBLIC_URL_BASE}/{object_key}"
-                    video.output_path = recovered_url
-                    video.storage_backend = "b2"
-                    video.output_size_bytes = size_bytes
-                    logger.warning(f"Recovered video {video.id}: output.mp4 was already on B2, only the DB row was missing it.")
+                channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+                recovered_url = None
+                if channel and b2_storage.is_b2_configured():
+                    channel_short = b2_storage.short_id(video.channel_id)
+                    channel_slug = b2_storage.slugify(channel.name)
+                    video_short = b2_storage.short_id(video.id)
+                    object_key = f"channels/{channel_short}-{channel_slug}/videos/{video_short}-{video.id}/output.mp4"
+                    size_bytes = b2_storage.object_size_if_exists(object_key)
+                    if size_bytes is not None:
+                        from src.config import B2_PUBLIC_URL_BASE
+                        recovered_url = f"{B2_PUBLIC_URL_BASE}/{object_key}"
+                        video.output_path = recovered_url
+                        video.storage_backend = "b2"
+                        video.output_size_bytes = size_bytes
+                        logger.warning(f"Recovered video {video.id}: output.mp4 was already on B2, only the DB row was missing it.")
 
-            if not recovered_url:
-                logger.error(f"Video {video.id} stuck 'done' with no output_path and no recoverable file (local or B2) — marking failed.")
-                video.status = VideoStatus.FAILED.value
-                video.error_message = SERVICE_UNAVAILABLE_MESSAGE
-                video.progress_stage = "Échec de l'enregistrement"
-                if not video.is_reassembly:
-                    try:
-                        from src.utils.billing import refund_video_credits
-                        refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo perdue ({video.title or video.id})")
-                        if refunded:
-                            logger.info(f"Refunded {refunded} credits for unrecoverable video {video.id}.")
-                    except Exception as refund_err:
-                        logger.error(f"Failed to refund credits for video {video.id}: {refund_err}")
-            db.commit()
+                if not recovered_url:
+                    logger.error(f"Video {video.id} stuck 'done' with no output_path and no recoverable file (local or B2) — marking failed.")
+                    video.status = VideoStatus.FAILED.value
+                    video.error_message = SERVICE_UNAVAILABLE_MESSAGE
+                    video.progress_stage = "Échec de l'enregistrement"
+                    if not video.is_reassembly:
+                        try:
+                            from src.utils.billing import refund_video_credits
+                            refunded = refund_video_credits(db, video.id, f"Remboursement — vidéo perdue ({video.title or video.id})")
+                            if refunded:
+                                logger.info(f"Refunded {refunded} credits for unrecoverable video {video.id}.")
+                        except Exception as refund_err:
+                            logger.error(f"Failed to refund credits for video {video.id}: {refund_err}")
+                db.commit()
+            except Exception as video_err:
+                logger.error(f"Unfinalized-done recovery failed for video {video.id}, skipping it this pass: {video_err}")
+                db.rollback()
     except Exception as e:
         logger.warning(f"Unfinalized-done recovery pass failed: {e}")
     finally:
