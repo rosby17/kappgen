@@ -496,7 +496,19 @@ def estimate_video_cost_breakdown(
     images = 0.0
     images_count = 0
     from src.pipeline.images import resolve_enabled_image_sources
-    if "ai_generated" in resolve_enabled_image_sources(image_style):
+    from src.utils.app_settings import scene_image_provider_order, SCENE_IMAGE_FREE_PROVIDERS
+    # This priced every AI-generated scene image at the paid-provider rate
+    # unconditionally — including for the admin's actual configured provider
+    # order, which defaults to Hugging Face only (genuinely free, no credit
+    # ever debited — see _generate_with_huggingface_flux). Confirmed live:
+    # a brand-new channel with ai_generated enabled and no max_unique_images
+    # cap got quoted 100 100 credits (100 images × 1001) against a 10 000-
+    # credit starter balance, for a render that would have actually cost
+    # ~0 credits for images. Only assume the paid rate when a paid provider
+    # could actually be reached.
+    scene_providers = scene_image_provider_order()
+    scene_images_are_free = bool(scene_providers) and all(p in SCENE_IMAGE_FREE_PROVIDERS for p in scene_providers)
+    if "ai_generated" in resolve_enabled_image_sources(image_style) and not scene_images_are_free:
         # Mirrors orchestrator.py's own real generation budget exactly (see
         # ai_unique_scene_count there) — was previously always
         # duration/6 uncapped by the creator's own max_unique_images, which
