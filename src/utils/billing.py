@@ -732,23 +732,28 @@ def refund_video_credits(db: Session, video_id: str, reason: str) -> int:
     specific video. Called when a video ultimately fails and is never
     delivered, so a creator doesn't pay for a video they never got.
 
-    Idempotent: a video already refunded (a prior 'refund' CreditTransaction
-    exists for it) is skipped — the worker's retry/orphan-requeue logic can
-    reach the failure path more than once for the same video, and refunding
-    twice would just be free money. Returns the amount refunded (0 if
-    nothing to refund or already refunded)."""
-    already_refunded = db.query(CreditTransaction).filter(
-        CreditTransaction.video_id == video_id,
-        CreditTransaction.transaction_type == "refund",
-    ).first()
-    if already_refunded:
-        return 0
-
+    Idempotent by NET amount, not by "has any refund ever happened": a video
+    that failed, got partially refunded, then retried and spent fresh
+    credits on that retry only has the *new* spend refunded — confirmed live
+    as a real bug (Sept 2026) where a video refunded once for an earlier
+    failed attempt then silently kept its later retry's TTS+STT spend
+    (~33,884 credits) undebited-back forever, since the old
+    any-prior-refund-exists check short-circuited before ever looking at
+    what had been spent since. Returns the amount refunded (0 if nothing
+    new to refund)."""
     spent = db.query(CreditTransaction).filter(
         CreditTransaction.video_id == video_id,
         CreditTransaction.transaction_type == "debit",
     ).all()
-    total = -sum(t.amount for t in spent)  # debit amounts are stored negative
+    if not spent:
+        return 0
+    total_debited = -sum(t.amount for t in spent)  # debit amounts are stored negative
+    already_refunded_total = db.query(CreditTransaction).filter(
+        CreditTransaction.video_id == video_id,
+        CreditTransaction.transaction_type == "refund",
+    ).with_entities(CreditTransaction.amount).all()
+    total_refunded = sum(a for (a,) in already_refunded_total)
+    total = total_debited - total_refunded
     if total <= 0:
         return 0
 
