@@ -1507,6 +1507,14 @@ def retry_missing_thumbnails():
                 thumbnail_destination.replace(fallback_backup)
 
             video.thumbnail_retry_count = (video.thumbnail_retry_count or 0) + 1
+            # Same flag the manual "Régénérer" button sets (videos.py) — the
+            # card UI already shows an animated "Régénération de la
+            # miniature…" overlay whenever this is true, so a creator sees
+            # this automatic sweep actively working instead of a card that
+            # just looks permanently stuck on "indisponible" between ticks.
+            video.thumbnail_regenerating = True
+            video.thumbnail_regenerating_started_at = datetime.utcnow()
+            db.commit()
             try:
                 youtube_metadata.generate_thumbnail(
                     local_output, thumbnail_destination,
@@ -1515,6 +1523,7 @@ def retry_missing_thumbnails():
                 )
                 video.thumbnail_is_ai = True
                 video.thumbnail_error = None
+                video.thumbnail_updated_at = datetime.utcnow()
                 if had_fallback:
                     fallback_backup.unlink(missing_ok=True)
                 logger.info(f"Scheduled thumbnail retry succeeded for video {video.id} (attempt {video.thumbnail_retry_count}).")
@@ -1527,6 +1536,7 @@ def retry_missing_thumbnails():
                 )
                 logger.warning(f"Scheduled thumbnail retry failed for video {video.id} (attempt {video.thumbnail_retry_count}): {exc}")
             finally:
+                video.thumbnail_regenerating = False
                 cleanup()
             db.commit()
     except Exception as e:
