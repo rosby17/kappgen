@@ -1075,7 +1075,7 @@ FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 300
 # frame-grab is an acceptable stand-in meanwhile, never a permanent
 # replacement. thumbnail_retry_count is still tracked for observability,
 # just never used to stop retrying.
-THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 900
+THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 60
 
 # A video can reach status='done' (committed as soon as the render itself
 # finishes — see process_single_queued_video) and then never get its
