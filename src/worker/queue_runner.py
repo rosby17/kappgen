@@ -51,6 +51,8 @@ VIDEO_EXPIRY_WARNING_HOURS_BEFORE = 48
 EDIT_ASSETS_RETENTION_DAYS = 3
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
+THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS = 120
+THUMBNAIL_QUALITY_AUDIT_BATCH_SIZE = 3
 
 # Shown to the creator instead of a raw exception/traceback when a render
 # fails because of an underlying paid-provider outage (exhausted API
@@ -1524,6 +1526,9 @@ def retry_missing_thumbnails():
                 video.thumbnail_is_ai = True
                 video.thumbnail_error = None
                 video.thumbnail_updated_at = datetime.utcnow()
+                video.thumbnail_quality_status = None
+                video.thumbnail_quality_reason = None
+                video.thumbnail_quality_reviewed_at = None
                 if had_fallback:
                     fallback_backup.unlink(missing_ok=True)
                 logger.info(f"Scheduled thumbnail retry succeeded for video {video.id} (attempt {video.thumbnail_retry_count}).")
@@ -1541,6 +1546,87 @@ def retry_missing_thumbnails():
             db.commit()
     except Exception as e:
         logger.warning(f"Thumbnail auto-retry pass failed: {e}")
+    finally:
+        db.close()
+
+
+def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZE):
+    """Visually review a small batch of legacy thumbnails.
+
+    A provider success only proves that an image file was returned. It does
+    not prove that the image is relevant to the title or resembles the
+    channel's chosen thumbnail style. This controlled audit repairs legacy
+    false positives without flooding the vision provider: each eligible video
+    is reviewed exactly once, then receives an explicit quality state.
+    """
+    from src.pipeline.vision import assess_thumbnail_quality
+
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.thumbnail_quality_status.is_(None))
+            .order_by(Video.finished_at.asc(), Video.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+        for video in candidates:
+            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+            style = (channel.thumbnail_style or {}) if channel else {}
+            reference_paths = list(style.get("reference_image_paths") or [])
+            if not reference_paths and style.get("reference_image_path"):
+                reference_paths = [style["reference_image_path"]]
+            # Without a creator-selected style reference there is no honest
+            # basis for calling a representative frame "wrong".
+            if not channel or not reference_paths:
+                video.thumbnail_quality_status = "needs_review"
+                video.thumbnail_quality_reason = "Aucun style de miniature de référence configuré pour cette chaîne."
+                video.thumbnail_quality_reviewed_at = datetime.utcnow()
+                db.commit()
+                continue
+
+            is_remote = video.storage_backend in ("b2", "r2") or str(video.output_path or "").startswith(("http://", "https://"))
+            thumbnail_path = (
+                STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+                if is_remote else (STORAGE_PATH / str(video.output_path or "")).with_name("thumbnail.jpg")
+            )
+            if not thumbnail_path.exists() or thumbnail_path.stat().st_size <= 1000:
+                video.thumbnail_quality_status = "needs_review"
+                video.thumbnail_quality_reason = "Fichier de miniature introuvable pour l'audit visuel."
+                video.thumbnail_quality_reviewed_at = datetime.utcnow()
+                db.commit()
+                continue
+
+            references = []
+            for rel_path in reference_paths[:2]:
+                reference = STORAGE_PATH / rel_path
+                if reference.exists():
+                    references.append((reference.read_bytes(), "image/jpeg" if reference.suffix.lower() in (".jpg", ".jpeg") else "image/png"))
+            try:
+                verdict = assess_thumbnail_quality(
+                    (thumbnail_path.read_bytes(), "image/jpeg"),
+                    video.title or video.thumbnail_text or "",
+                    str(style.get("style_prompt") or style.get("analysis_summary") or ""),
+                    references,
+                )
+            except Exception as exc:
+                logger.warning(f"Thumbnail quality audit failed for video {video.id}: {exc}")
+                continue
+
+            video.thumbnail_quality_status = verdict["status"]
+            video.thumbnail_quality_reason = verdict["reason"]
+            video.thumbnail_quality_reviewed_at = datetime.utcnow()
+            if verdict["status"] == "approved":
+                video.thumbnail_is_ai = True
+                video.thumbnail_error = None
+            elif verdict["status"] == "fallback":
+                video.thumbnail_is_ai = False
+                video.thumbnail_error = "Cette miniature est une image de secours et doit être régénérée dans le style de la chaîne."
+            db.commit()
+            logger.info(f"Thumbnail quality audit for video {video.id}: {verdict['status']}")
+    except Exception as exc:
+        logger.warning(f"Thumbnail quality audit pass failed: {exc}")
     finally:
         db.close()
 
@@ -2947,6 +3033,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_unfinalized_done_check = 0.0
     last_failure_retry_check = 0.0
     last_thumbnail_retry_check = 0.0
+    last_thumbnail_quality_audit = 0.0
     while not _shutdown_requested:
         now = time.time()
         if now - last_stuck_render_check > STUCK_RENDER_CHECK_INTERVAL_SECONDS:
@@ -2961,6 +3048,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_thumbnail_retry_check > THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
             retry_missing_thumbnails()
             last_thumbnail_retry_check = now
+        if now - last_thumbnail_quality_audit > THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS:
+            audit_thumbnail_quality_batch()
+            last_thumbnail_quality_audit = now
         if now - last_purge > PURGE_INTERVAL_SECONDS:
             # REINSTATED Sept 2026 alongside VIDEO_RETENTION_HOURS above —
             # warn first so a creator has VIDEO_EXPIRY_WARNING_HOURS_BEFORE

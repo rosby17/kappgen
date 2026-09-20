@@ -622,6 +622,14 @@ class Video(Base):
     # until this is True, for as long as the channel still has a reference
     # style configured.
     thumbnail_is_ai = Column(Boolean, nullable=True)
+    # Separate the provider's technical result from the creator-facing visual
+    # verdict. An image can have been produced by an AI provider and still be
+    # the wrong thumbnail for the channel; conversely an older successful
+    # thumbnail can retain a stale generation error. Values are "approved",
+    # "fallback" or "needs_review" (NULL means not audited yet).
+    thumbnail_quality_status = Column(String(24), nullable=True)
+    thumbnail_quality_reason = Column(Text, nullable=True)
+    thumbnail_quality_reviewed_at = Column(DateTime, nullable=True)
     # Set for recurring automatic/scheduled publication — the worker leaves
     # this video alone until the next weekly slot in the channel's timezone.
     scheduled_publish_at = Column(DateTime, nullable=True)
@@ -687,6 +695,10 @@ class Video(Base):
             "thumbnail_regenerating": self.thumbnail_regenerating,
             "thumbnail_updated_at": self.thumbnail_updated_at.isoformat() if self.thumbnail_updated_at else None,
             "thumbnail_error": self.thumbnail_error,
+            "thumbnail_is_ai": self.thumbnail_is_ai,
+            "thumbnail_quality_status": self.thumbnail_quality_status,
+            "thumbnail_quality_reason": self.thumbnail_quality_reason,
+            "thumbnail_quality_reviewed_at": self.thumbnail_quality_reviewed_at.isoformat() if self.thumbnail_quality_reviewed_at else None,
             "scheduled_publish_at": self.scheduled_publish_at.isoformat() if self.scheduled_publish_at else None,
             "approved_for_publish": self.approved_for_publish,
             "youtube_compliance_report": self.youtube_compliance_report,

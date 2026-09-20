@@ -101,6 +101,9 @@ def init_db():
             "failure_retry_count": "ALTER TABLE videos ADD COLUMN failure_retry_count INTEGER DEFAULT 0 NOT NULL",
             "thumbnail_retry_count": "ALTER TABLE videos ADD COLUMN thumbnail_retry_count INTEGER DEFAULT 0 NOT NULL",
             "thumbnail_is_ai": "ALTER TABLE videos ADD COLUMN thumbnail_is_ai BOOLEAN",
+            "thumbnail_quality_status": "ALTER TABLE videos ADD COLUMN thumbnail_quality_status VARCHAR(24)",
+            "thumbnail_quality_reason": "ALTER TABLE videos ADD COLUMN thumbnail_quality_reason TEXT",
+            "thumbnail_quality_reviewed_at": "ALTER TABLE videos ADD COLUMN thumbnail_quality_reviewed_at TIMESTAMP",
         }
         with engine.begin() as conn:
             for col_name, ddl in video_migrations.items():

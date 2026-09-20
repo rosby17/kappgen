@@ -1517,6 +1517,9 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
     current = None
     previous_thumbnail_bytes = None
     previous_thumbnail_is_ai = None
+    previous_thumbnail_quality_status = None
+    previous_thumbnail_quality_reason = None
+    previous_thumbnail_quality_reviewed_at = None
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
@@ -1556,6 +1559,9 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         # limit) once generate_thumbnail below has genuinely succeeded.
         previous_thumbnail_bytes = current.read_bytes() if current.exists() else None
         previous_thumbnail_is_ai = video.thumbnail_is_ai
+        previous_thumbnail_quality_status = getattr(video, "thumbnail_quality_status", None)
+        previous_thumbnail_quality_reason = getattr(video, "thumbnail_quality_reason", None)
+        previous_thumbnail_quality_reviewed_at = getattr(video, "thumbnail_quality_reviewed_at", None)
         # A manual thumbnail regeneration is explicitly a fresh creative
         # request. Re-read the actual script here instead of recycling the
         # previous caption (which may have been an old, title-derived draft).
@@ -1635,11 +1641,20 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
                     video.thumbnail_updated_at = datetime.utcnow()
                     video.thumbnail_is_ai = generated_is_ai
                     video.thumbnail_error = None
+                    # A newly rendered image must receive its own visual
+                    # review; an approval/rejection belongs only to the old
+                    # file that was replaced.
+                    video.thumbnail_quality_status = None
+                    video.thumbnail_quality_reason = None
+                    video.thumbnail_quality_reviewed_at = None
                 else:
                     # Preserve the classification of the image restored above.
                     # In particular, do not turn a known fallback into an AI
                     # success merely because the background thread finished.
                     video.thumbnail_is_ai = previous_thumbnail_is_ai
+                    video.thumbnail_quality_status = previous_thumbnail_quality_status
+                    video.thumbnail_quality_reason = previous_thumbnail_quality_reason
+                    video.thumbnail_quality_reviewed_at = previous_thumbnail_quality_reviewed_at
                     video.thumbnail_error = (
                         "La miniature n'a pas pu être régénérée dans le style de la chaîne. Réessaie dans quelques minutes."
                     )

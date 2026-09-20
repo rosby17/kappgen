@@ -503,6 +503,42 @@ def analyze_thumbnail_reference_images(images: list) -> str:
     return analyze_thumbnail_reference_profile(images)["style_prompt"]
 
 
+def assess_thumbnail_quality(thumbnail: tuple, title: str, style_prompt: str = "", references: list | None = None) -> dict:
+    """Judge whether a finished YouTube thumbnail is fit for its video.
+
+    The first supplied image is always the thumbnail to review; optional
+    following images are the channel's thumbnail references. This deliberately
+    evaluates *viewer-facing quality* instead of treating a provider response
+    as proof that the output was good.
+    """
+    images = [thumbnail] + list(references or [])[:2]
+    instruction = (
+        "You are reviewing a YouTube thumbnail for publication. The FIRST image is the "
+        "thumbnail under review. Any following images are style references for the same "
+        "channel. Assess whether the first image is a deliberate, legible, relevant "
+        "thumbnail for this exact video title, not merely whether it is an AI image. "
+        f"Video title: {title or 'unknown'}\n"
+        f"Channel style brief: {style_prompt or 'No reference style configured.'}\n\n"
+        "Reply ONLY with JSON in this exact shape: "
+        '{"status":"approved"|"fallback"|"needs_review","reason":"short French reason"}. '
+        "Use fallback when it is a generic video frame, visually unrelated, blank, poorly "
+        "composed, or clearly unlike the channel references. Use approved only when it is "
+        "a strong, intentional thumbnail. Use needs_review when image evidence is ambiguous."
+    )
+    raw = _run_with_fallback(_vision_chain(images, instruction))
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned)
+    try:
+        value = json.loads(cleaned)
+    except ValueError as exc:
+        raise RuntimeError("Thumbnail quality reviewer returned invalid JSON") from exc
+    status = str(value.get("status") or "needs_review").strip().lower()
+    if status not in {"approved", "fallback", "needs_review"}:
+        status = "needs_review"
+    reason = re.sub(r"\s+", " ", str(value.get("reason") or "")).strip()[:500]
+    return {"status": status, "reason": reason}
+
+
 def _thumbnail_analysis_instruction(images: list) -> str:
     return THUMBNAIL_STYLE_ANALYSIS_INSTRUCTION if len(images) == 1 else THUMBNAIL_MULTI_STYLE_ANALYSIS_INSTRUCTION
 
