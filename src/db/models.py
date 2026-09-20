@@ -653,6 +653,21 @@ class Video(Base):
     channel = relationship("Channel", back_populates="videos")
     folder = relationship("Folder", back_populates="videos")
 
+    def thumbnail_state(self):
+        """A truthful card state: never leave a missing asset looking like a
+        successful AI thumbnail just because its old DB flag survived."""
+        from pathlib import Path
+        from src.config import STORAGE_PATH
+        target = STORAGE_PATH / "channels" / str(self.channel_id) / "videos" / str(self.id) / "thumbnail.jpg"
+        output_ref = str(self.output_path or "")
+        if self.storage_backend not in ("b2", "r2") and output_ref and not output_ref.startswith(("http://", "https://")):
+            target = (STORAGE_PATH / output_ref).with_name("thumbnail.jpg")
+        if target.exists() and target.stat().st_size > 1000:
+            return "fallback" if self.thumbnail_is_ai is False or self.thumbnail_error else "active"
+        if self.thumbnail_storage_url or self.youtube_video_id:
+            return "restoring"
+        return "unavailable"
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -699,6 +714,7 @@ class Video(Base):
             "thumbnail_updated_at": self.thumbnail_updated_at.isoformat() if self.thumbnail_updated_at else None,
             "thumbnail_error": self.thumbnail_error,
             "thumbnail_is_ai": self.thumbnail_is_ai,
+            "thumbnail_state": self.thumbnail_state(),
             "thumbnail_quality_status": self.thumbnail_quality_status,
             "thumbnail_quality_reason": self.thumbnail_quality_reason,
             "thumbnail_quality_reviewed_at": self.thumbnail_quality_reviewed_at.isoformat() if self.thumbnail_quality_reviewed_at else None,
