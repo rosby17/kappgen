@@ -1052,7 +1052,9 @@ def download_video(video_id: str, quality: str = "hd", share: bool = False, db: 
         return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "fullhd"), content_disposition_type=disposition_type)
 
     cache_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
-    cached_path = cache_dir / f"output_{quality}.mp4"
+    # v2 prevents an older, lightly-compressed output_sd.mp4 cache from being
+    # served after the compact-export preset changed.
+    cached_path = cache_dir / f"output_{quality}_download_v2.mp4"
     if not cached_path.exists():
         with tempfile.TemporaryDirectory(prefix=f"kappgen-{quality}-") as tmp:
             if is_remote:
