@@ -1752,6 +1752,21 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
 @router.get("/{video_id}/thumbnail/regenerate/status")
 def get_thumbnail_regenerate_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
+    # Regeneration runs in a daemon thread inside the API process. A deploy or
+    # crash can terminate that thread before its finally-block clears the DB
+    # flag, leaving the card spinner stuck forever. Keep the UI truthful and
+    # release the orphaned job once the same five-minute takeover window used
+    # by the POST endpoint has elapsed.
+    stale_cutoff = datetime.utcnow() - timedelta(minutes=5)
+    if video.thumbnail_regenerating and (
+        video.thumbnail_regenerating_started_at is None
+        or video.thumbnail_regenerating_started_at <= stale_cutoff
+    ):
+        video.thumbnail_regenerating = False
+        video.thumbnail_regenerating_started_at = None
+        if not video.thumbnail_error:
+            video.thumbnail_error = "La régénération a été interrompue par le serveur. Tu peux réessayer."
+        db.commit()
     return {
         "regenerating": bool(video.thumbnail_regenerating),
         "thumbnail_is_ai": video.thumbnail_is_ai,
