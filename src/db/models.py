@@ -663,6 +663,15 @@ class Video(Base):
         if self.storage_backend not in ("b2", "r2") and output_ref and not output_ref.startswith(("http://", "https://")):
             target = (STORAGE_PATH / output_ref).with_name("thumbnail.jpg")
         if target.exists() and target.stat().st_size > 1000:
+            # The visual audit is authoritative once it exists.  Legacy
+            # imports and thumbnail restores often retain a stale provider
+            # error / thumbnail_is_ai flag even though the image a creator
+            # sees is a strong, deliberate thumbnail.  Showing “fallback”
+            # from that stale implementation detail made the badge lie.
+            if self.thumbnail_quality_status == "approved":
+                return "active"
+            if self.thumbnail_quality_status == "fallback":
+                return "fallback"
             return "fallback" if self.thumbnail_is_ai is False or self.thumbnail_error else "active"
         if self.thumbnail_storage_url or self.youtube_video_id:
             return "restoring"

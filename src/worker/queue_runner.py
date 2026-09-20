@@ -52,7 +52,11 @@ EDIT_ASSETS_RETENTION_DAYS = 3
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
 THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS = 120
-THUMBNAIL_QUALITY_AUDIT_BATCH_SIZE = 3
+# A backlog of historical thumbnails is deliberately processed at a useful
+# pace.  The audit is one image request per card and is rate-limited by the
+# worker interval, while a batch of 12 clears an entire channel in minutes
+# instead of leaving misleading fallback badges for days.
+THUMBNAIL_QUALITY_AUDIT_BATCH_SIZE = 12
 
 # Shown to the creator instead of a raw exception/traceback when a render
 # fails because of an underlying paid-provider outage (exhausted API
@@ -1656,6 +1660,12 @@ def recover_missing_published_thumbnails(limit: int = PUBLISHED_THUMBNAIL_RECOVE
             if youtube_publisher.recover_public_video_thumbnail(video.youtube_video_id, target):
                 video.thumbnail_updated_at = datetime.utcnow()
                 video.thumbnail_error = None
+                # A restored YouTube image is a different file from the one
+                # possibly audited before it vanished.  Its previous verdict
+                # cannot truthfully drive the card badge.
+                video.thumbnail_quality_status = None
+                video.thumbnail_quality_reason = None
+                video.thumbnail_quality_reviewed_at = None
                 restored += 1
                 db.commit()
             if attempted >= limit:
@@ -1716,7 +1726,18 @@ def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZ
         candidates = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
-            .filter(Video.thumbnail_quality_status.is_(None))
+            .filter(
+                or_(
+                    Video.thumbnail_quality_status.is_(None),
+                    and_(
+                        Video.thumbnail_updated_at.isnot(None),
+                        or_(
+                            Video.thumbnail_quality_reviewed_at.is_(None),
+                            Video.thumbnail_updated_at > Video.thumbnail_quality_reviewed_at,
+                        ),
+                    ),
+                )
+            )
             .order_by(Video.finished_at.asc(), Video.created_at.asc())
             .limit(limit)
             .all()
