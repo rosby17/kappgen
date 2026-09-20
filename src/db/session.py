@@ -1,4 +1,5 @@
 from sqlalchemy import create_engine
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import sessionmaker, declarative_base
 from src.config import DATABASE_URL
 from src.utils.logger import logger
@@ -109,7 +110,18 @@ def init_db():
             for col_name, ddl in video_migrations.items():
                 if col_name not in existing_columns:
                     logger.info(f"Migrating videos table: adding {col_name} column.")
-                    conn.execute(text(ddl))
+                    try:
+                        conn.execute(text(ddl))
+                    except ProgrammingError as exc:
+                        # Multiple API workers can initialize at the same
+                        # time during a rolling deploy. Another worker may
+                        # have added this column after the inspector snapshot
+                        # above but before this statement. Treat only that
+                        # specific race as success; surface all other schema
+                        # failures normally.
+                        if "already exists" not in str(exc).lower() and "duplicate column" not in str(exc).lower():
+                            raise
+                        logger.info(f"Migration raced for existing column {col_name}; continuing.")
 
         # output_size_bytes started as a plain Integer (Postgres int4, caps at
         # ~2.14GB) — confirmed live to overflow and crash on an 81-minute
