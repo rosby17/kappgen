@@ -603,6 +603,9 @@ class Video(Base):
     # read as "it didn't actually save". This field changes on every
     # regeneration so the URL always changes too.
     thumbnail_updated_at = Column(DateTime, nullable=True)
+    # Durable B2 copy of thumbnail.jpg. The local file remains the fast card
+    # cache; this URL is the recovery source if a host volume is replaced.
+    thumbnail_storage_url = Column(String(1024), nullable=True)
     # Set when a channel with a configured reference style (thumbnail_style)
     # couldn't get a real AI thumbnail after both the parallel attempt and
     # the post-render retry (see queue_runner.py). Deliberately no blank/

@@ -1138,6 +1138,8 @@ THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
 _thumbnail_ai_retry_not_before = 0.0
 PUBLISHED_THUMBNAIL_RECOVERY_INTERVAL_SECONDS = 5 * 60
 PUBLISHED_THUMBNAIL_RECOVERY_BATCH_SIZE = 50
+THUMBNAIL_B2_BACKUP_INTERVAL_SECONDS = 5 * 60
+THUMBNAIL_B2_BACKUP_BATCH_SIZE = 50
 
 # A video can reach status='done' (committed as soon as the render itself
 # finishes — see process_single_queued_video) and then never get its
@@ -1662,6 +1664,38 @@ def recover_missing_published_thumbnails(limit: int = PUBLISHED_THUMBNAIL_RECOVE
             logger.info("Restored %s missing published-video thumbnail(s) from YouTube.", restored)
     except Exception as exc:
         logger.warning("Published thumbnail recovery pass failed: %s", exc)
+    finally:
+        db.close()
+
+
+def backup_thumbnail_copies_to_b2(limit: int = THUMBNAIL_B2_BACKUP_BATCH_SIZE):
+    """Make the local thumbnail cache durable independently of the MP4.
+
+    This backfills legacy rows and protects every future card from a volume
+    loss. The DB keeps the exact B2 URL used to restore the local cache.
+    """
+    from src.utils import b2_storage
+    if not b2_storage.is_b2_configured():
+        return
+    db = SessionLocal()
+    try:
+        candidates = db.query(Video).filter(Video.thumbnail_storage_url.is_(None)).all()
+        backed_up = 0
+        for video in candidates:
+            path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+            if not path.exists() or path.stat().st_size <= 1000:
+                continue
+            url = b2_storage.upload_thumbnail(path, str(video.channel_id), str(video.id))
+            if url:
+                video.thumbnail_storage_url = url
+                db.commit()
+                backed_up += 1
+            if backed_up >= limit:
+                break
+        if backed_up:
+            logger.info("Backed up %s thumbnail(s) to B2.", backed_up)
+    except Exception as exc:
+        logger.warning("Thumbnail B2 backup pass failed: %s", exc)
     finally:
         db.close()
 
@@ -3150,6 +3184,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_failure_retry_check = 0.0
     last_thumbnail_retry_check = 0.0
     last_published_thumbnail_recovery = 0.0
+    last_thumbnail_b2_backup = 0.0
     last_thumbnail_quality_audit = 0.0
     recover_interrupted_auto_publishes()
     while not _shutdown_requested:
@@ -3169,6 +3204,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_published_thumbnail_recovery > PUBLISHED_THUMBNAIL_RECOVERY_INTERVAL_SECONDS:
             recover_missing_published_thumbnails()
             last_published_thumbnail_recovery = now
+        if now - last_thumbnail_b2_backup > THUMBNAIL_B2_BACKUP_INTERVAL_SECONDS:
+            backup_thumbnail_copies_to_b2()
+            last_thumbnail_b2_backup = now
         if now - last_thumbnail_quality_audit > THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS:
             audit_thumbnail_quality_batch()
             last_thumbnail_quality_audit = now

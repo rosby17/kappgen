@@ -120,6 +120,24 @@ def upload_file(local_path: Path, object_key: str) -> bool:
     assets it references, not just the raw files."""
     if not is_b2_configured():
         return False
+
+
+def thumbnail_object_key(channel_id: str, video_id: str) -> str:
+    return f"channels/{channel_id}/videos/{video_id}/thumbnail.jpg"
+
+
+def upload_thumbnail(local_path: Path, channel_id: str, video_id: str) -> Optional[str]:
+    """Persist a card thumbnail independently from its much larger MP4."""
+    key = thumbnail_object_key(channel_id, video_id)
+    if not is_b2_configured():
+        return None
+    try:
+        client = _get_client()
+        client.upload_file(str(local_path), B2_BUCKET_NAME, key, ExtraArgs={"ContentType": "image/jpeg"})
+        return f"{B2_PUBLIC_URL_BASE}/{key}"
+    except Exception as exc:
+        logger.warning(f"B2 thumbnail upload failed for {local_path} ({key}): {exc}")
+        return None
     try:
         client = _get_client()
         client.upload_file(str(local_path), B2_BUCKET_NAME, object_key)

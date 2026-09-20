@@ -47,6 +47,11 @@ def _ensure_local_thumbnail(video: Video) -> Path:
         target = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
     if target.exists():
         return target
+    if video.thumbnail_storage_url:
+        from src.utils import b2_storage
+        key = b2_storage.object_key_from_url(video.thumbnail_storage_url)
+        if key and b2_storage.download_file(key, target) and target.exists() and target.stat().st_size > 1000:
+            return target
     # A published video already has the creator-approved thumbnail on
     # YouTube. Restore that exact image first; do not silently replace it
     # with a new AI image or a random frame just because the local cache was
