@@ -858,6 +858,46 @@ def compute_scheduled_publish_at(channel: Channel, video_id: str = "") -> dateti
 SCHEDULED_PUBLISH_CHECK_INTERVAL_SECONDS = 300  # every 5 min is plenty for a daily-granularity schedule
 
 
+def recover_interrupted_auto_publishes():
+    """Requeue only auto-publishes interrupted after they were authorized.
+
+    API-side/manual uploads deliberately remain untouched: retrying those
+    could create an unexpected public duplicate. These rows are different —
+    their channel had explicitly selected automatic publication and their
+    recorded stage proves the worker had already begun that automatic job.
+    """
+    db = SessionLocal()
+    try:
+        interrupted_stages = (
+            "Préparation de la publication YouTube",
+            "Génération de la miniature",
+            "Publication sur YouTube",
+        )
+        candidates = (
+            db.query(Video)
+            .filter(Video.status == VideoStatus.DONE.value)
+            .filter(Video.youtube_video_id.is_(None))
+            .filter(Video.progress_stage.in_(interrupted_stages))
+            .all()
+        )
+        for video in candidates:
+            channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
+            if not channel or channel.publish_mode not in ("auto", "scheduled") or not channel.youtube_refresh_token:
+                continue
+            # It was already due when its original job began. Set a due time
+            # rather than recomputing the channel's next daily slot, which
+            # could postpone an interrupted upload for another day.
+            video.scheduled_publish_at = datetime.utcnow()
+            video.youtube_publish_error = None
+            video.progress_stage = "Publication YouTube relancée"
+            logger.info(f"Recovered interrupted auto-publish for video {video.id}.")
+        db.commit()
+    except Exception as exc:
+        logger.warning(f"Interrupted auto-publish recovery failed: {exc}")
+    finally:
+        db.close()
+
+
 def run_scheduled_publishes():
     """Publishes any video whose channel is in publish_mode='scheduled', whose
     scheduled_publish_at has arrived. The compliance gate decides whether it
@@ -3047,6 +3087,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_failure_retry_check = 0.0
     last_thumbnail_retry_check = 0.0
     last_thumbnail_quality_audit = 0.0
+    recover_interrupted_auto_publishes()
     while not _shutdown_requested:
         now = time.time()
         if now - last_stuck_render_check > STUCK_RENDER_CHECK_INTERVAL_SECONDS:
