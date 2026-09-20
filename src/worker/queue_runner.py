@@ -1642,7 +1642,6 @@ def recover_missing_published_thumbnails(limit: int = PUBLISHED_THUMBNAIL_RECOVE
         candidates = (
             db.query(Video)
             .filter(Video.youtube_video_id.isnot(None))
-            .filter(Video.output_path.isnot(None))
             .all()
         )
         restored = 0

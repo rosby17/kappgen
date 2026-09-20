@@ -1023,7 +1023,7 @@ def download_video(video_id: str, quality: str = "hd", share: bool = False, db: 
     # Intentionally unauthenticated: reached via a plain download link/window.open,
     # which can't carry a custom Authorization header. video_id is an opaque UUID.
     video = db.query(Video).filter(Video.id == video_id).first()
-    if not video or not video.output_path:
+    if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
     if quality not in {"sd", "hd", "fullhd"}:
@@ -1086,7 +1086,7 @@ def download_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     video they publish outside the app. Intentionally unauthenticated, same
     reasoning as /download above (opaque video_id, no custom header needed)."""
     video = db.query(Video).filter(Video.id == video_id).first()
-    if not video or not video.output_path:
+    if not video or (not video.output_path and not video.youtube_video_id):
         raise HTTPException(status_code=404, detail="Video not found")
 
     # output_path is a full B2 (or legacy R2) URL for videos stored there,
@@ -1107,7 +1107,11 @@ def serve_video_thumbnail(video_id: str, db: Session = Depends(get_db)):
     """Serve an inline card thumbnail, repairing legacy renders that never
     produced one by extracting a representative frame from their MP4."""
     video = db.query(Video).filter(Video.id == video_id).first()
-    if not video or not video.output_path:
+    # This endpoint is intentionally public for an <img> tag. A record with
+    # neither a stored render nor a YouTube publication remains inaccessible;
+    # published legacy videos are safe to restore from their public YouTube
+    # thumbnail even when their old output_path was lost.
+    if not video or (not video.output_path and not video.youtube_video_id):
         raise HTTPException(status_code=404, detail="Video not found")
     video_path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output.mp4"
     try:
