@@ -879,11 +879,24 @@ def run_scheduled_publishes():
                 continue
             if not video.output_path:
                 continue
-            output_mp4 = STORAGE_PATH / video.output_path
-            if not output_mp4.exists():
-                logger.warning(f"Scheduled publish skipped for video {video.id}: output file missing on disk.")
-                continue
-            try_publish_to_youtube(db, channel, video, output_mp4)
+            # B2/R2 renders intentionally no longer exist on the worker's
+            # disk after finalization. Treating their public object URL as a
+            # local path made every automatic YouTube publish silently skip
+            # forever, leaving the UI stuck at its last preparation stage.
+            video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+            cleanup = lambda: None
+            try:
+                output_mp4, cleanup = _local_copy_of_video_output(video, video_dir)
+                if not output_mp4:
+                    raise FileNotFoundError("Fichier vidéo introuvable dans le stockage KappGen.")
+                try_publish_to_youtube(db, channel, video, output_mp4)
+            except Exception as exc:
+                video.youtube_publish_error = str(exc)[:500]
+                video.progress_stage = "Échec de la publication YouTube"
+                db.commit()
+                logger.warning(f"Scheduled publish failed for video {video.id}: {exc}")
+            finally:
+                cleanup()
     except Exception as e:
         logger.warning(f"Scheduled-publish pass failed: {e}")
     finally:
