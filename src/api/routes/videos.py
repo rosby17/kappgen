@@ -1512,7 +1512,11 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
     from src.db.session import SessionLocal
     db = SessionLocal()
     succeeded = False
+    generated_is_ai = False
     temp_dir = None
+    current = None
+    previous_thumbnail_bytes = None
+    previous_thumbnail_is_ai = None
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
@@ -1551,6 +1555,7 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         # and only actually archive it (the thing that counts toward the
         # limit) once generate_thumbnail below has genuinely succeeded.
         previous_thumbnail_bytes = current.read_bytes() if current.exists() else None
+        previous_thumbnail_is_ai = video.thumbnail_is_ai
         # A manual thumbnail regeneration is explicitly a fresh creative
         # request. Re-read the actual script here instead of recycling the
         # previous caption (which may have been an old, title-derived draft).
@@ -1567,8 +1572,28 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         # clearly, not silently swap one mediocre image for another.
         thumbnail_style = channel.thumbnail_style or {}
         strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
-        _, ai_used, ai_provider_used = generate_thumbnail(video_path, current, video.thumbnail_text or video.title or channel.name, channel=channel, strict=strict)
-        succeeded = True
+        # generate_thumbnail normally reuses an existing destination as a
+        # render checkpoint. That is correct during pipeline retries, but a
+        # manual regeneration explicitly asks for a NEW image. Leaving the
+        # current file in place made this call return immediately, falsely
+        # mark an old frame-grab as AI-generated, and clear thumbnail_error
+        # without contacting any provider. Remove both the visible result and
+        # any cached AI intermediate before starting; the previous visible
+        # image is restored below if the provider fails.
+        current.unlink(missing_ok=True)
+        current.with_suffix(".ai.jpg").unlink(missing_ok=True)
+        _, ai_used, ai_provider_used = generate_thumbnail(
+            video_path,
+            current,
+            video.thumbnail_text or video.title or channel.name,
+            channel=channel,
+            video_id=video.id,
+            strict=strict,
+        )
+        generated_is_ai = bool(ai_used)
+        succeeded = generated_is_ai if strict else current.exists()
+        if not succeeded:
+            raise RuntimeError("La régénération n'a pas produit de nouvelle miniature IA.")
         # Only a genuine PAID-provider success counts toward
         # MAX_THUMBNAIL_REGENERATIONS — a channel with no reference style
         # configured (strict=False) falling back to a plain video-frame grab
@@ -1585,6 +1610,18 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             archive = history_dir / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
             archive.write_bytes(previous_thumbnail_bytes)
     except Exception as e:
+        # Never replace the creator's current visible image with a partial or
+        # failed generation. A failed retry is allowed to update the status,
+        # but not to make the card visually worse.
+        if current is not None:
+            try:
+                if previous_thumbnail_bytes is None:
+                    current.unlink(missing_ok=True)
+                else:
+                    current.write_bytes(previous_thumbnail_bytes)
+                current.with_suffix(".ai.jpg").unlink(missing_ok=True)
+            except Exception as restore_exc:
+                logger.error(f"Could not restore previous thumbnail for video {video_id}: {restore_exc}")
         logger.error(f"Thumbnail regeneration failed for video {video_id}: {e}")
     finally:
         try:
@@ -1596,8 +1633,13 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
                     # after regenerating never reuses the old, now-stale image
                     # URL (see the field's own comment in db/models.py).
                     video.thumbnail_updated_at = datetime.utcnow()
+                    video.thumbnail_is_ai = generated_is_ai
                     video.thumbnail_error = None
                 else:
+                    # Preserve the classification of the image restored above.
+                    # In particular, do not turn a known fallback into an AI
+                    # success merely because the background thread finished.
+                    video.thumbnail_is_ai = previous_thumbnail_is_ai
                     video.thumbnail_error = (
                         "La miniature n'a pas pu être régénérée dans le style de la chaîne. Réessaie dans quelques minutes."
                     )
@@ -1695,7 +1737,12 @@ def regenerate_video_thumbnail(video_id: str, current_user: User = Depends(get_c
 @router.get("/{video_id}/thumbnail/regenerate/status")
 def get_thumbnail_regenerate_status(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     video = _get_owned_video(db, video_id, current_user)
-    return {"regenerating": bool(video.thumbnail_regenerating)}
+    return {
+        "regenerating": bool(video.thumbnail_regenerating),
+        "thumbnail_is_ai": video.thumbnail_is_ai,
+        "thumbnail_error": video.thumbnail_error,
+        "thumbnail_updated_at": video.thumbnail_updated_at.isoformat() if video.thumbnail_updated_at else None,
+    }
 
 
 @router.get("/{video_id}/thumbnail/history")
