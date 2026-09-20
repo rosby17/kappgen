@@ -40,6 +40,43 @@ def is_configured() -> bool:
     return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and YOUTUBE_OAUTH_REDIRECT_URI)
 
 
+def recover_public_video_thumbnail(video_id: str, destination: Path) -> bool:
+    """Restore the thumbnail currently displayed by YouTube for a published video.
+
+    The card thumbnail is KappGen's local preservation copy.  Older cleanup
+    jobs could remove that file even though the creator's custom thumbnail was
+    still safely visible on YouTube.  Recover that exact public rendition
+    before ever considering a new AI generation.
+    """
+    if not video_id:
+        return False
+    for rendition in ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg", "mqdefault.jpg"):
+        try:
+            response = httpx.get(
+                f"https://i.ytimg.com/vi/{video_id}/{rendition}",
+                timeout=25,
+                headers={"User-Agent": "KappGen thumbnail recovery/1.0"},
+            )
+            if response.status_code != 200 or len(response.content) < 1000:
+                continue
+            # YouTube's tiny unavailable placeholder must not replace a real
+            # historical thumbnail.  A real card image is at least 16:9-ish;
+            # Pillow is already a rendering dependency of KappGen.
+            from PIL import Image
+            from io import BytesIO
+            image = Image.open(BytesIO(response.content))
+            if image.width < 320 or image.height < 180:
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(".restore.tmp")
+            temporary.write_bytes(response.content)
+            temporary.replace(destination)
+            return True
+        except Exception as exc:
+            logger.warning("Could not recover YouTube thumbnail %s (%s): %s", video_id, rendition, exc)
+    return False
+
+
 def build_auth_url(channel_id: str) -> str:
     """The URL the frontend redirects the user to, to grant KappGen upload
     access to their YouTube channel. `state` carries the KappGen channel_id

@@ -1136,6 +1136,8 @@ THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 60
 # them after the first 429 used to keep AI33 rate-limited indefinitely.
 THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
 _thumbnail_ai_retry_not_before = 0.0
+PUBLISHED_THUMBNAIL_RECOVERY_INTERVAL_SECONDS = 5 * 60
+PUBLISHED_THUMBNAIL_RECOVERY_BATCH_SIZE = 50
 
 # A video can reach status='done' (committed as soon as the render itself
 # finishes — see process_single_queued_video) and then never get its
@@ -1625,6 +1627,42 @@ def retry_missing_thumbnails():
                 break
     except Exception as e:
         logger.warning(f"Thumbnail auto-retry pass failed: {e}")
+    finally:
+        db.close()
+
+
+def recover_missing_published_thumbnails(limit: int = PUBLISHED_THUMBNAIL_RECOVERY_BATCH_SIZE):
+    """Restore missing local card thumbnails from their already-published
+    YouTube videos. This is deliberately separate from AI retry: recovery
+    preserves the historical custom thumbnail and works even while AI33 is
+    unavailable."""
+    from src.pipeline import youtube_publisher
+    db = SessionLocal()
+    try:
+        candidates = (
+            db.query(Video)
+            .filter(Video.youtube_video_id.isnot(None))
+            .filter(Video.output_path.isnot(None))
+            .all()
+        )
+        restored = 0
+        attempted = 0
+        for video in candidates:
+            target = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+            if target.exists() and target.stat().st_size > 1000:
+                continue
+            attempted += 1
+            if youtube_publisher.recover_public_video_thumbnail(video.youtube_video_id, target):
+                video.thumbnail_updated_at = datetime.utcnow()
+                video.thumbnail_error = None
+                restored += 1
+                db.commit()
+            if attempted >= limit:
+                break
+        if restored:
+            logger.info("Restored %s missing published-video thumbnail(s) from YouTube.", restored)
+    except Exception as exc:
+        logger.warning("Published thumbnail recovery pass failed: %s", exc)
     finally:
         db.close()
 
@@ -3112,6 +3150,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_unfinalized_done_check = 0.0
     last_failure_retry_check = 0.0
     last_thumbnail_retry_check = 0.0
+    last_published_thumbnail_recovery = 0.0
     last_thumbnail_quality_audit = 0.0
     recover_interrupted_auto_publishes()
     while not _shutdown_requested:
@@ -3128,6 +3167,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_thumbnail_retry_check > THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
             retry_missing_thumbnails()
             last_thumbnail_retry_check = now
+        if now - last_published_thumbnail_recovery > PUBLISHED_THUMBNAIL_RECOVERY_INTERVAL_SECONDS:
+            recover_missing_published_thumbnails()
+            last_published_thumbnail_recovery = now
         if now - last_thumbnail_quality_audit > THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS:
             audit_thumbnail_quality_batch()
             last_thumbnail_quality_audit = now

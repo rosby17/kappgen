@@ -47,6 +47,12 @@ def _ensure_local_thumbnail(video: Video) -> Path:
         target = (STORAGE_PATH / video.output_path).with_name("thumbnail.jpg")
     if target.exists():
         return target
+    # A published video already has the creator-approved thumbnail on
+    # YouTube. Restore that exact image first; do not silently replace it
+    # with a new AI image or a random frame just because the local cache was
+    # cleaned up.
+    if video.youtube_video_id and youtube_publisher.recover_public_video_thumbnail(video.youtube_video_id, target):
+        return target
     if not _video_is_remote(video) or not video.output_path:
         raise FileNotFoundError("Thumbnail not found")
     target.parent.mkdir(parents=True, exist_ok=True)
