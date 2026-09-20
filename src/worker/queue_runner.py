@@ -3198,15 +3198,18 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_failure_retry_check > FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
             retry_eligible_failed_videos()
             last_failure_retry_check = now
-        if now - last_thumbnail_retry_check > THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
-            retry_missing_thumbnails()
-            last_thumbnail_retry_check = now
         if now - last_published_thumbnail_recovery > PUBLISHED_THUMBNAIL_RECOVERY_INTERVAL_SECONDS:
             recover_missing_published_thumbnails()
             last_published_thumbnail_recovery = now
         if now - last_thumbnail_b2_backup > THUMBNAIL_B2_BACKUP_INTERVAL_SECONDS:
             backup_thumbnail_copies_to_b2()
             last_thumbnail_b2_backup = now
+        # Recovery and durable backup must win over a slow/limited AI retry:
+        # they can restore an existing creator-approved thumbnail without
+        # waiting on any image provider.
+        if now - last_thumbnail_retry_check > THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
+            retry_missing_thumbnails()
+            last_thumbnail_retry_check = now
         if now - last_thumbnail_quality_audit > THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS:
             audit_thumbnail_quality_batch()
             last_thumbnail_quality_audit = now
