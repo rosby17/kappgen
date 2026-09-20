@@ -1542,13 +1542,14 @@ def retry_missing_thumbnails():
 
             video_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
             thumbnail_destination = video_dir / "thumbnail.jpg"
-            try:
-                local_output, cleanup = _local_copy_of_video_output(video, video_dir)
-            except Exception as exc:
-                logger.warning(f"Could not fetch a local copy of video {video.id} to retry its thumbnail: {exc}")
-                continue
-            if not local_output:
-                continue
+            # This retry is strict because this channel has reference images:
+            # generate_thumbnail will either obtain a real AI result or raise;
+            # it will never use its video-frame fallback.  Do not make the
+            # retry wait for a huge B2 MP4 download before it can even call
+            # AI33.  The placeholder path is intentionally never read in
+            # strict mode, but preserves generate_thumbnail's API.
+            local_output = thumbnail_destination.with_name("__thumbnail_source_not_required__.mp4")
+            cleanup = lambda: None
 
             # generate_thumbnail short-circuits and reuses whatever file is
             # already at `destination` if it's non-trivially sized — which

@@ -1497,9 +1497,22 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         if not video:
             return
         channel = video.channel
+        # A styled thumbnail is strict: if the AI request fails we restore the
+        # existing image, never fall back to a video frame.  Consequently the
+        # MP4 is not an input at all in this path.  Downloading a 60–90 minute
+        # B2 object before calling AI33 made the UI look permanently stuck on
+        # "Régénération…", even though no thumbnail request had started yet.
+        thumbnail_style = channel.thumbnail_style or {} if channel else {}
+        strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
         output_ref = str(video.output_path or "")
         is_remote = video.storage_backend in ("b2", "r2") or output_ref.startswith(("http://", "https://"))
-        if is_remote:
+        if is_remote and strict:
+            # generate_thumbnail only consults video_path for its non-strict
+            # frame-grab fallback, which strict mode deliberately disables.
+            current = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+            current.parent.mkdir(parents=True, exist_ok=True)
+            video_path = current.with_name("__thumbnail_source_not_required__.mp4")
+        elif is_remote:
             temp_dir = tempfile.TemporaryDirectory(prefix="kappgen-thumbnail-")
             video_path = Path(temp_dir.name) / "output.mp4"
             with httpx.stream("GET", output_ref, timeout=600.0, follow_redirects=True) as response:
@@ -1517,7 +1530,7 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
             if not channel or not video_path or not video_path.exists():
                 return
             current = video_path.with_name("thumbnail.jpg")
-        if not channel or not video_path or not video_path.exists():
+        if not channel or (not strict and (not video_path or not video_path.exists())):
             return
         # Archiving used to happen unconditionally right here, before the
         # attempt even ran — so a failed generation (provider out of credits,
@@ -1548,8 +1561,6 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
         # same "no generic placeholder" rule as the automatic pipeline (see
         # queue_runner.py): a manual regeneration request should fail
         # clearly, not silently swap one mediocre image for another.
-        thumbnail_style = channel.thumbnail_style or {}
-        strict = bool(thumbnail_style.get("reference_image_paths") or thumbnail_style.get("reference_image_path"))
         # generate_thumbnail normally reuses an existing destination as a
         # render checkpoint. That is correct during pipeline retries, but a
         # manual regeneration explicitly asks for a NEW image. Leaving the
