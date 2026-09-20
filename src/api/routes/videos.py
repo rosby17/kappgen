@@ -19,14 +19,14 @@ from src.db.models import Channel, Video, User
 from src.models.project import VideoCreate, VideoStatus
 from src.utils.ffmpeg_runner import run_ffmpeg, validate_audio_file, get_audio_duration
 from src.config import STORAGE_PATH, IMAGE_UPLOAD_EXTENSIONS
-from src.pipeline.transcode import ensure_sd_variant
+from src.pipeline.transcode import ensure_export_variant
 from src.pipeline.audio_extract import ensure_extracted_audio
 from src.pipeline import youtube_publisher
 from src.pipeline.youtube_compliance import evaluate_youtube_compliance, evaluate_script_compliance, build_compliance_dossier
 from src.pipeline.youtube_metadata import generate_metadata, generate_thumbnail, generate_contextual_thumbnail_headline
 from src.utils.logger import logger
 from src.utils.auth import get_current_user
-from src.utils.billing import user_can_render, estimate_video_cost_credits, FOUR_K_EXPORT_CREDITS, debit_izivoice_usage_by_user_id, debit_credits, priority_render_quote
+from src.utils.billing import user_can_render, estimate_video_cost_credits, debit_izivoice_usage_by_user_id, debit_credits, priority_render_quote
 from src.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -1020,8 +1020,8 @@ def download_video(video_id: str, quality: str = "hd", share: bool = False, db: 
     if not video or not video.output_path:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    if quality not in {"hd", "sd", "4k"}:
-        raise HTTPException(status_code=400, detail="Qualité invalide. Choisis HD, SD ou 4K.")
+    if quality not in {"sd", "hd", "fullhd"}:
+        raise HTTPException(status_code=400, detail="Qualité invalide. Choisis SD, HD ou Full HD.")
 
     # share=1 : lien envoyé à un tiers (bouton "Partager", voir handleShareVideo
     # côté frontend) — on veut que ça joue directement dans le navigateur au
@@ -1030,72 +1030,42 @@ def download_video(video_id: str, quality: str = "hd", share: bool = False, db: 
     # client qui reçoit le lien).
     disposition_type = "inline" if share else "attachment"
 
-    # B2/R2 outputs are intentionally public and no longer exist on the
-    # worker's local disk after finalization. Redirect instead of prefixing
-    # STORAGE_PATH to an HTTPS URL (which caused "file not found on disk").
+    # B2/R2 outputs no longer exist on disk after finalization. Previously
+    # this branch streamed the remote master for BOTH SD and HD requests, so
+    # the UI claimed "854×480" while downloading a large 1080p MP4.
     is_remote = video.storage_backend in ("b2", "r2") or str(video.output_path).startswith(("http://", "https://"))
-    if is_remote and quality != "4k":
-        if not video.downloaded_at:
-            video.downloaded_at = datetime.utcnow()
-            db.commit()
-        filename = _download_filename(video, quality)
-        def remote_stream():
-            with httpx.stream("GET", video.output_path, timeout=300.0, follow_redirects=True) as response:
-                response.raise_for_status()
-                yield from response.iter_bytes()
-        return StreamingResponse(
-            remote_stream(),
-            media_type="video/mp4",
-            headers={"Content-Disposition": _content_disposition_header(disposition_type, filename)},
-        )
-
     source_path = STORAGE_PATH / video.output_path if not is_remote else None
-    if quality == "4k":
-        # Audit INT-01: this used to debit FOUR_K_EXPORT_CREDITS on every
-        # single request for this route, unconditionally — including every
-        # repeat hit against an already-rendered output-4k.mp4, which does
-        # zero rendering work. Combined with this route being intentionally
-        # unauthenticated (video_id is a capability URL, needed for a plain
-        # window.open download link), a leaked/shared 4K link let anyone
-        # replay the request forever and drain the channel owner's credits
-        # for nothing. Billing must only ever happen on the branch that
-        # actually runs ffmpeg — never on a cache hit.
-        target = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "output-4k.mp4"
-        if not target.exists():
-            if not video.channel or not video.channel.user_id:
-                raise HTTPException(status_code=409, detail="Impossible de facturer cet export 4K.")
-            if not debit_izivoice_usage_by_user_id(video.channel.user_id, FOUR_K_EXPORT_CREDITS, "video_4k_export", video_id=video.id):
-                raise HTTPException(status_code=402, detail=f"Crédits insuffisants pour l’export 4K ({FOUR_K_EXPORT_CREDITS:,} crédits).")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="kappgen-4k-") as tmp:
-                if is_remote:
-                    source_path = Path(tmp) / "source.mp4"
-                    with httpx.stream("GET", video.output_path, timeout=300.0, follow_redirects=True) as response:
-                        response.raise_for_status()
-                        with source_path.open("wb") as handle:
-                            for chunk in response.iter_bytes():
-                                handle.write(chunk)
-                if not source_path or not source_path.exists():
-                    raise HTTPException(status_code=404, detail="Vidéo source introuvable pour l’export 4K.")
-                run_ffmpeg(["ffmpeg", "-y", "-i", str(source_path), "-vf", "scale=3840:2160:flags=lanczos", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy", "-movflags", "+faststart", str(target)])
-        return FileResponse(target, media_type="video/mp4", filename=_download_filename(video, "4k"), content_disposition_type=disposition_type)
-
-    source_path = source_path
-    if not source_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found on disk")
-
     if not video.downloaded_at:
         video.downloaded_at = datetime.utcnow()
         db.commit()
 
-    if quality != "sd":
-        return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "hd"), content_disposition_type=disposition_type)
+    if quality == "fullhd":
+        if is_remote:
+            filename = _download_filename(video, "fullhd")
+            def remote_stream():
+                with httpx.stream("GET", video.output_path, timeout=300.0, follow_redirects=True) as response:
+                    response.raise_for_status()
+                    yield from response.iter_bytes()
+            return StreamingResponse(remote_stream(), media_type="video/mp4", headers={"Content-Disposition": _content_disposition_header(disposition_type, filename)})
+        if not source_path or not source_path.exists():
+            raise HTTPException(status_code=404, detail="Vidéo source introuvable.")
+        return FileResponse(source_path, media_type="video/mp4", filename=_download_filename(video, "fullhd"), content_disposition_type=disposition_type)
 
-    # Normally already pre-generated right after the render finished (see
-    # queue_runner.py) so this resolves instantly; only actually transcodes
-    # here as a fallback if that background step hasn't completed yet.
-    cached_path = ensure_sd_variant(source_path)
-    return FileResponse(cached_path, media_type="video/mp4", filename=_download_filename(video, "sd"), content_disposition_type=disposition_type)
+    cache_dir = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id)
+    cached_path = cache_dir / f"output_{quality}.mp4"
+    if not cached_path.exists():
+        with tempfile.TemporaryDirectory(prefix=f"kappgen-{quality}-") as tmp:
+            if is_remote:
+                source_path = Path(tmp) / "source.mp4"
+                with httpx.stream("GET", video.output_path, timeout=600.0, follow_redirects=True) as response:
+                    response.raise_for_status()
+                    with source_path.open("wb") as handle:
+                        for chunk in response.iter_bytes(chunk_size=1024 * 1024):
+                            handle.write(chunk)
+            if not source_path or not source_path.exists():
+                raise HTTPException(status_code=404, detail="Vidéo source introuvable.")
+            ensure_export_variant(source_path, quality, destination=cached_path)
+    return FileResponse(cached_path, media_type="video/mp4", filename=_download_filename(video, quality), content_disposition_type=disposition_type)
 
 
 @router.get("/{video_id}/thumbnail/download")
