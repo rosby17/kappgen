@@ -1131,6 +1131,11 @@ FAILURE_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 300
 # replacement. thumbnail_retry_count is still tracked for observability,
 # just never used to stop retrying.
 THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS = 60
+# An upstream 429 is global to the provider account, not to one video.  A
+# retry pass can contain hundreds of legacy thumbnails; continuing through
+# them after the first 429 used to keep AI33 rate-limited indefinitely.
+THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
+_thumbnail_ai_retry_not_before = 0.0
 
 # A video can reach status='done' (committed as soon as the render itself
 # finishes — see process_single_queued_video) and then never get its
@@ -1521,6 +1526,10 @@ def retry_missing_thumbnails():
     on THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS, for as long as the
     channel still wants one — a channel that has since disabled thumbnails
     or removed its reference images is left alone."""
+    global _thumbnail_ai_retry_not_before
+    if time.monotonic() < _thumbnail_ai_retry_not_before:
+        return
+
     db = SessionLocal()
     try:
         candidates = (
@@ -1530,6 +1539,7 @@ def retry_missing_thumbnails():
             .all()
         )
         for video in candidates:
+            stop_for_rate_limit = False
             channel = db.query(Channel).filter(Channel.id == video.channel_id).first()
             if not channel:
                 continue
@@ -1594,10 +1604,25 @@ def retry_missing_thumbnails():
                     "nouvelle tentative automatique plus tard, l'image actuelle reste affichée en attendant."
                 )
                 logger.warning(f"Scheduled thumbnail retry failed for video {video.id} (attempt {video.thumbnail_retry_count}): {exc}")
+                # AI33 already retries an individual request with exponential
+                # backoff.  If it still returns 429, all following thumbnails
+                # would fail for the exact same account-wide reason.  Persist
+                # this video's truthful state, then stop the sweep and give
+                # the provider time to recover.
+                error_text = str(exc).lower()
+                if "429" in error_text or "limite de requêtes" in error_text or "rate limit" in error_text:
+                    _thumbnail_ai_retry_not_before = time.monotonic() + THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS
+                    stop_for_rate_limit = True
+                    logger.warning(
+                        "AI thumbnail provider rate-limited; pausing automatic thumbnail retries for %s seconds.",
+                        THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS,
+                    )
             finally:
                 video.thumbnail_regenerating = False
                 cleanup()
             db.commit()
+            if stop_for_rate_limit:
+                break
     except Exception as e:
         logger.warning(f"Thumbnail auto-retry pass failed: {e}")
     finally:
