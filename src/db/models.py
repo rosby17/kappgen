@@ -672,7 +672,12 @@ class Video(Base):
                 return "active"
             if self.thumbnail_quality_status == "fallback":
                 return "fallback"
-            return "fallback" if self.thumbnail_is_ai is False or self.thumbnail_error else "active"
+            # A file on disk (or a B2 copy) is only evidence that *an* image
+            # survived.  It is not proof that this is the creator's intended
+            # thumbnail: legacy fallbacks were often copied into the same
+            # location.  Until an image is visually approved, never call it
+            # active in the creator UI.
+            return "verifying"
         if self.thumbnail_storage_url or self.youtube_video_id:
             return "restoring"
         # No source exists from which the card can restore the old image.
