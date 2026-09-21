@@ -1728,6 +1728,11 @@ def backup_thumbnail_copies_to_b2(limit: int = THUMBNAIL_B2_BACKUP_BATCH_SIZE):
         backed_up = 0
         for video in candidates:
             path = STORAGE_PATH / "channels" / str(video.channel_id) / "videos" / str(video.id) / "thumbnail.jpg"
+            if not path.exists():
+                # Already purged: the copy in trash is still the real
+                # thumbnail, and is the only thing standing between this
+                # video and a frame-grab fallback on its card.
+                path = TRASH_ROOT / str(video.channel_id) / str(video.id) / "thumbnail.jpg"
             if not path.exists() or path.stat().st_size <= 1000:
                 continue
             url = b2_storage.upload_thumbnail(path, str(video.channel_id), str(video.id))
@@ -1970,12 +1975,38 @@ def purge_old_render_output(video: Video) -> None:
     channel_id = video.channel_id
     video_dir = STORAGE_PATH / "channels" / str(channel_id) / "videos" / str(video.id)
     if video_dir.exists():
+        # The thumbnail is not render output — it is what every card, every
+        # list and the published video itself shows, long after the MP4 is
+        # gone. Moving the whole directory to trash took it along, and then
+        # serve_video_thumbnail (videos.py) had nothing left to serve: with
+        # no B2 copy it rebuilt a plain frame-grab from the MP4, so a
+        # perfectly good AI thumbnail was quietly replaced by a fallback
+        # image on the site. Make it durable, then keep a local copy.
+        thumbnail = video_dir / "thumbnail.jpg"
+        if thumbnail.exists() and thumbnail.stat().st_size > 1000 and not video.thumbnail_storage_url:
+            from src.utils import b2_storage
+            stored_url = b2_storage.upload_thumbnail(thumbnail, str(channel_id), str(video.id))
+            if stored_url:
+                # Persisted by the caller's commit, alongside purged_at.
+                video.thumbnail_storage_url = stored_url
+
         trash_dir = TRASH_ROOT / str(channel_id)
         trash_dir.mkdir(parents=True, exist_ok=True)
         destination = trash_dir / str(video.id)
         if destination.exists():
             shutil.rmtree(destination, ignore_errors=True)
         shutil.move(str(video_dir), str(destination))
+
+        # A few hundred KB kept out of the trash so the card keeps rendering
+        # instantly, without a B2 round-trip on every view — the MP4 is what
+        # this purge exists to reclaim, not this.
+        archived_thumbnail = destination / "thumbnail.jpg"
+        if archived_thumbnail.exists():
+            try:
+                video_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(archived_thumbnail, video_dir / "thumbnail.jpg")
+            except OSError as exc:
+                logger.warning(f"Could not keep a local thumbnail for purged video {video.id}: {exc}")
 
 
 def _edit_assets_b2_prefix(video: Video) -> str:
