@@ -675,7 +675,13 @@ class Video(Base):
             return "fallback" if self.thumbnail_is_ai is False or self.thumbnail_error else "active"
         if self.thumbnail_storage_url or self.youtube_video_id:
             return "restoring"
-        return "unavailable"
+        # No source exists from which the card can restore the old image.
+        # Keep the two histories distinct for the creator: an image that was
+        # saved at least once was subsequently lost; an empty legacy row has
+        # never produced a thumbnail that KappGen can prove existed.
+        if self.thumbnail_is_ai is True or self.thumbnail_updated_at:
+            return "lost"
+        return "pending"
 
     def to_dict(self):
         return {
