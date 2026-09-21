@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, case
 from src.db.session import SessionLocal, init_db
 from src.db.models import Video, Channel, User, VoiceCloneJob
 from src.utils.email import SUPPORTED_LOCALES, send_brevo_email, email_shell, EMAIL_ACCENT
@@ -1733,12 +1733,19 @@ def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZ
 
     db = SessionLocal()
     try:
+        retry_after = datetime.utcnow() - timedelta(seconds=THUMBNAIL_QUALITY_AUDIT_FAILURE_COOLDOWN_SECONDS)
         candidates = (
             db.query(Video)
             .filter(Video.status == VideoStatus.DONE.value)
             .filter(
                 or_(
-                    Video.thumbnail_quality_status.is_(None),
+                    and_(
+                        Video.thumbnail_quality_status.is_(None),
+                        or_(
+                            Video.thumbnail_quality_reviewed_at.is_(None),
+                            Video.thumbnail_quality_reviewed_at < retry_after,
+                        ),
+                    ),
                     and_(
                         Video.thumbnail_updated_at.isnot(None),
                         or_(
@@ -1748,7 +1755,14 @@ def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZ
                     ),
                 )
             )
-            .order_by(Video.finished_at.asc(), Video.created_at.asc())
+            # Give every never-attempted image a chance before retrying a
+            # card whose provider chain was temporarily unavailable.
+            .order_by(
+                case((Video.thumbnail_quality_reviewed_at.is_(None), 0), else_=1),
+                Video.thumbnail_quality_reviewed_at.asc(),
+                Video.finished_at.asc(),
+                Video.created_at.asc(),
+            )
             .limit(limit)
             .all()
         )
@@ -1793,9 +1807,13 @@ def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZ
                 )
             except Exception as exc:
                 logger.warning(f"Thumbnail quality audit failed for video {video.id}: {exc}")
-                # Keep the video unreviewed.  The next scheduled pass can
-                # resume exactly where this one stopped when any configured
-                # vision provider is available again.
+                # Keep it unreviewed, but record this attempt.  Otherwise it
+                # remains permanently first in the ordering and prevents the
+                # other 300+ legacy thumbnails from ever reaching a provider
+                # that has recovered in the meantime.
+                video.thumbnail_quality_reviewed_at = datetime.utcnow()
+                video.thumbnail_quality_reason = "Audit visuel différé : fournisseur temporairement indisponible."
+                db.commit()
                 _thumbnail_quality_audit_paused_until = (
                     time.monotonic() + THUMBNAIL_QUALITY_AUDIT_FAILURE_COOLDOWN_SECONDS
                 )
