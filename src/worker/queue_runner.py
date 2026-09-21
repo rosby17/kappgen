@@ -51,6 +51,17 @@ VIDEO_EXPIRY_WARNING_HOURS_BEFORE = 48
 EDIT_ASSETS_RETENTION_DAYS = 3
 UPLOAD_RETENTION_HOURS = 48
 PURGE_INTERVAL_SECONDS = 3600
+# A checkout the buyer walked away from used to sit "pending" forever —
+# confirmed live with orders still pending 10+ days later, long after anyone
+# could have paid them. They pollute the transactions table, make the real
+# conversion rate unreadable, and let a stale checkout link be "completed"
+# weeks later against a price that may no longer apply. After this window a
+# pending order is re-checked with its provider one last time and then
+# closed as failed. Generous on purpose: a mobile-money payment can take
+# several minutes to confirm, and wrongly failing a real payment is far
+# worse than leaving a dead one around a little longer.
+PENDING_ORDER_EXPIRY_MINUTES = 45
+PENDING_ORDER_SWEEP_INTERVAL_SECONDS = 600
 THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS = 120
 # A backlog of historical thumbnails is deliberately processed at a useful
 # pace.  The audit is one image request per card and is rate-limited by the
@@ -2031,6 +2042,72 @@ def restore_edit_assets(video: Video) -> bool:
 EDIT_ASSETS_RESTORE_GRACE_DAYS = 3
 
 
+def expire_abandoned_pending_orders():
+    """Close checkouts nobody ever paid, instead of leaving them "pending"
+    forever.
+
+    Every pending order older than PENDING_ORDER_EXPIRY_MINUTES is given one
+    final provider check before being written off — the abandoned case is by
+    far the common one, but a payment that succeeded while our webhook was
+    down looks identical from our side, and silently failing THAT would cost
+    a paying customer their subscription. So the sweep confirms first and
+    only fails what the provider itself doesn't recognize as paid.
+
+    Maketou is polled directly (it has no webhook — polling is the only
+    confirmation path it offers). Tara Money exposes no equivalent
+    order-status endpoint, so its orders are expired on the window alone;
+    its webhook is the confirmation path, and a webhook that hasn't arrived
+    45 minutes after checkout is not going to.
+    """
+    from src.db.models import Order
+    from src.pipeline.payments import poll_maketou_order
+    from src.api.routes.billing import _claim_order_success, _activate_subscription
+
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(minutes=PENDING_ORDER_EXPIRY_MINUTES)
+        stale = (
+            db.query(Order)
+            .filter(Order.status == "pending")
+            .filter(Order.created_at < cutoff)
+            .order_by(Order.created_at.asc())
+            .limit(100)
+            .all()
+        )
+        if not stale:
+            return
+        rescued = 0
+        expired = 0
+        for order in stale:
+            if order.provider == "maketou" and order.provider_ref:
+                try:
+                    if poll_maketou_order(order.provider_ref) == "completed":
+                        # Paid after all — activate it rather than expire it.
+                        if _claim_order_success(db, order):
+                            _activate_subscription(db, order)
+                        rescued += 1
+                        logger.info(f"Pending order {order.id} was actually paid; subscription activated by the expiry sweep.")
+                        continue
+                except Exception as exc:
+                    # Provider unreachable: leave the order pending and try
+                    # again next sweep. Never expire on our own outage.
+                    logger.warning(f"Could not re-check order {order.id} with Maketou, leaving it pending: {exc}")
+                    continue
+            order.status = "failed"
+            expired += 1
+        db.commit()
+        if expired or rescued:
+            logger.info(
+                f"Pending-order sweep: {expired} abandoned checkout(s) closed as failed"
+                + (f", {rescued} confirmed paid and activated" if rescued else "")
+                + f" (older than {PENDING_ORDER_EXPIRY_MINUTES} min)."
+            )
+    except Exception as exc:
+        logger.warning(f"Pending-order expiry sweep failed: {exc}")
+    finally:
+        db.close()
+
+
 def purge_stale_edit_assets():
     """Background sweep for the EDIT_ASSETS_RETENTION_DAYS window — most users
     trigger this earlier via the explicit 'close editor' action instead. Also
@@ -3256,6 +3333,7 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
     last_published_thumbnail_recovery = 0.0
     last_thumbnail_b2_backup = 0.0
     last_thumbnail_quality_audit = 0.0
+    last_pending_order_sweep = 0.0
     recover_interrupted_auto_publishes()
     while not _shutdown_requested:
         now = time.time()
@@ -3291,6 +3369,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
             purge_old_videos_and_uploads()
             purge_stale_edit_assets()
             last_purge = now
+        if now - last_pending_order_sweep > PENDING_ORDER_SWEEP_INTERVAL_SECONDS:
+            expire_abandoned_pending_orders()
+            last_pending_order_sweep = now
         if now - last_automation_check > AUTOMATION_CHECK_INTERVAL_SECONDS:
             run_daily_automation()
             last_automation_check = now

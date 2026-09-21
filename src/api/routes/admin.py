@@ -66,24 +66,10 @@ def list_users(q: Optional[str] = None, admin: User = Depends(get_current_admin)
     return result
 
 
-# --- Private beta access queue --------------------------------------------
-# KappGen is currently invite-only: a new signup lands as beta_status
-# "pending" and sees a waiting screen instead of the app until an admin
-# approves them here. See db/models.py's User.beta_status docstring and
-# session.py's migration for why existing accounts are unaffected.
-@router.get("/beta-requests")
-def list_beta_requests(status_filter: str = "pending", admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    query = db.query(User)
-    if status_filter in ("pending", "approved", "rejected"):
-        query = query.filter(User.beta_status == status_filter)
-    users = query.order_by(User.created_at.desc()).limit(500).all()
-    return [u.to_dict() for u in users]
-
-
-class BetaDecisionPayload(BaseModel):
-    note: Optional[str] = None
-
-
+# The private-beta approval queue that used to live here is gone: signup is
+# open to everyone and no account waits on an admin. Maintenance access
+# below is a separate, still-active gate — it decides who keeps working
+# while the platform is in maintenance, not who may sign up.
 class MaintenanceAccessPayload(BaseModel):
     email: str
     granted: bool = True
@@ -108,30 +94,6 @@ def set_maintenance_access(payload: MaintenanceAccessPayload, admin: User = Depe
     db.commit()
     db.refresh(user)
     return user.to_dict()
-
-
-@router.post("/beta-requests/{user_id}/approve")
-def approve_beta_request(user_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.beta_status = "approved"
-    user.beta_status_updated_at = datetime.utcnow()
-    db.commit()
-    return {"beta_status": user.beta_status}
-
-
-@router.post("/beta-requests/{user_id}/reject")
-def reject_beta_request(user_id: str, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if user.is_admin:
-        raise HTTPException(status_code=400, detail="Impossible de refuser un compte administrateur.")
-    user.beta_status = "rejected"
-    user.beta_status_updated_at = datetime.utcnow()
-    db.commit()
-    return {"beta_status": user.beta_status}
 
 
 @router.get("/users/{user_id}")

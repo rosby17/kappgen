@@ -23,17 +23,15 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     is_admin = Column(Boolean, nullable=False, default=False)
-    # Private beta gate: "pending" (just signed up, waiting on the admin),
-    # "approved" (full access), "rejected" (signed up but denied — kept as
-    # its own state rather than deleting the row, so a rejection is visible/
-    # reversible from the admin queue instead of the account just vanishing).
-    # New signups default to "pending"; existing rows are grandfathered to
-    # "approved" at migration time (see session.py's init_db), same pattern
-    # already used for email_verified.
-    beta_status = Column(String(20), nullable=False, default="pending")
+    # Retired: KappGen's private beta is over and signup is open to everyone,
+    # so every account — new or existing — is "approved". The column stays
+    # (rather than being dropped) because it is cheap to keep and dropping a
+    # NOT NULL column in place on a live Postgres is a bigger operation than
+    # the field is worth; nothing reads it as a gate any more.
+    beta_status = Column(String(20), nullable=False, default="approved")
     beta_status_updated_at = Column(DateTime, nullable=True)
     # Explicit allow-list used only while the platform-wide maintenance gate
-    # is active. It is managed by an administrator from Demandes bêta.
+    # is active, managed by an administrator from the admin panel.
     maintenance_access = Column(Boolean, nullable=False, default=False)
     # Self-service kill switch for THIS creator's own automation only — the
     # "maintenance" flag above is a platform-wide, admin-only gate. A

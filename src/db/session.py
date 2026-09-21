@@ -153,7 +153,7 @@ def init_db():
             "email_verified": "ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT FALSE NOT NULL",
             "email_verify_token": "ALTER TABLE users ADD COLUMN email_verify_token VARCHAR(64)",
             "email_verify_sent_at": "ALTER TABLE users ADD COLUMN email_verify_sent_at TIMESTAMP",
-            "beta_status": "ALTER TABLE users ADD COLUMN beta_status VARCHAR(20) DEFAULT 'pending' NOT NULL",
+            "beta_status": "ALTER TABLE users ADD COLUMN beta_status VARCHAR(20) DEFAULT 'approved' NOT NULL",
             "beta_status_updated_at": "ALTER TABLE users ADD COLUMN beta_status_updated_at TIMESTAMP",
             "maintenance_access": "ALTER TABLE users ADD COLUMN maintenance_access BOOLEAN DEFAULT FALSE NOT NULL",
             "automation_paused": "ALTER TABLE users ADD COLUMN automation_paused BOOLEAN DEFAULT FALSE NOT NULL",
@@ -172,13 +172,14 @@ def init_db():
                 # lock existing users out of checkout the moment this ships.
                 logger.info("Grandfathering existing users as email_verified.")
                 conn.execute(text("UPDATE users SET email_verified = TRUE"))
+            # The private beta is over: signup is open to everyone and nothing
+            # gates on this any more. Runs unconditionally, not just when the
+            # column is new, so accounts left "pending" (or "rejected") when
+            # the gate was lifted don't stay locked out of an open product.
+            # Cheap no-op once every row is already approved.
             if is_new_beta_column:
-                # Same reasoning: the private-beta gate is new, not
-                # retroactive — every account that already existed (including
-                # every current tester) keeps working exactly as before.
-                # Only signups from this point on start "pending".
-                logger.info("Grandfathering existing users as beta_status='approved'.")
-                conn.execute(text("UPDATE users SET beta_status = 'approved'"))
+                logger.info("Beta gate retired: marking all users approved.")
+            conn.execute(text("UPDATE users SET beta_status = 'approved' WHERE beta_status <> 'approved'"))
             if is_new_maintenance_access_column:
                 conn.execute(text("UPDATE users SET maintenance_access = TRUE WHERE LOWER(email) = 'rooseveltmkr@gmail.com'"))
 
