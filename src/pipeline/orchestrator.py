@@ -331,6 +331,10 @@ def run_video_pipeline(
             unique_generation_count=min(len(image_slot_indices), unique_visual_count) if unique_visual_count else None,
             user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
             premium_images_enabled=bool(channel_config.get("premium_images_enabled")),
+            # "Auto" on the creator's visual-count setting means "you decide":
+            # this is that decision — the opening-window count computed above
+            # from the video's own length, not one image per scene.
+            auto_generation_budget=ai_unique_scene_count,
         )
     else:
         generated_images = []
@@ -529,6 +533,7 @@ def run_video_pipeline(
             # the same "nothing matched what's being said" case the premium
             # budget exists for, so it applies here too.
             premium_images_enabled=bool(channel_config.get("premium_images_enabled")),
+            auto_generation_budget=ai_unique_scene_count,
         )
         for position, scene_index in enumerate(unresolved_indices):
             if position < len(fallback_images):

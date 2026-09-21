@@ -233,33 +233,41 @@ def resolve_enabled_image_sources(image_style: Optional[dict]) -> List[str]:
     return ["library"]
 
 
-def resolve_generated_image_budget(image_style: Optional[dict]) -> int:
-    """How many images this video may GENERATE, whichever provider serves
-    them.
+def resolve_generated_image_budget(image_style: Optional[dict], auto_budget: Optional[int] = None) -> int:
+    """How many images this video may GENERATE, whichever engine serves them.
 
-    There is no free generation from the creator's point of view: every
-    generated image is billed at the same per-image credit price whether it
-    came from the free-tier model or a paid one, so this is one number, not
-    a free count plus a paid count. What an admin grant changes is only
-    WHICH engine serves it (see resolve_generation_provider_order) — never
-    whether it costs.
+    This is the creator's single "Nombre de visuels" setting, because for a
+    channel with generation enabled the two questions are the same one: the
+    images the montage uses ARE the images we generate. There is no free
+    generation from the creator's side either — every generated image is
+    billed the same per-image price whether the engine behind it bills us or
+    not, so there is one number, not a free count plus a paid count. The
+    admin grant changes only WHICH engine serves them
+    (resolve_generation_provider_order), never how many or what they cost.
 
-    Left at 0/unset, nothing is generated and nothing is spent. The count is
-    the creator's call — 10 well-placed images is a sensible answer for a
-    30-minute video, since generation only ever fills what the other enabled
-    sources couldn't — clamped to the admin's global ceiling so a typo can't
-    become a 150-image bill."""
+    "Nombre précis" (image_count_mode "manual") is that number, clamped to
+    the admin ceiling so a typo can't become a 150-image bill. "Auto" hands
+    the decision to `auto_budget`, the caller's own length-based count — the
+    creator asked us to pick, so we pick from how much video there is to
+    illustrate rather than generating one image per scene.
+
+    0 means nothing is generated and nothing is spent."""
     if not image_style:
-        return 0
-    raw = image_style.get("premium_image_count")
+        return max(0, auto_budget or 0)
+    from src.utils.app_settings import premium_image_count_ceiling
+    # premium_image_count is the retired separate "premium budget" field —
+    # still honoured so channels configured while it existed keep the number
+    # their creator actually chose, rather than silently reverting to auto.
+    raw = image_style.get("max_unique_images")
+    if raw is None:
+        raw = image_style.get("premium_image_count")
     try:
         count = int(raw)
     except (TypeError, ValueError):
-        return 0
-    if count <= 0:
-        return 0
-    from src.utils.app_settings import premium_image_count_ceiling
-    return min(count, premium_image_count_ceiling())
+        count = 0
+    if count > 0:
+        return min(count, premium_image_count_ceiling())
+    return max(0, auto_budget or 0)
 
 
 def resolve_generation_provider_order(premium_images_enabled: bool) -> Optional[List[str]]:
@@ -847,6 +855,7 @@ def fetch_or_generate_images(
     niche: Optional[str] = None,
     channel_id: Optional[str] = None,
     premium_images_enabled: bool = False,
+    auto_generation_budget: Optional[int] = None,
 ) -> List[Path]:
     """
     Fetches images for each scene. With exactly one visual source enabled,
@@ -875,7 +884,7 @@ def fetch_or_generate_images(
     enabled = resolve_enabled_image_sources(image_style)
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
-    generation_budget = resolve_generated_image_budget(image_style)
+    generation_budget = resolve_generated_image_budget(image_style, auto_generation_budget)
     generation_order = resolve_generation_provider_order(premium_images_enabled)
 
     def expand_randomly(unique_images: List[Path], required_count: int) -> List[Path]:
