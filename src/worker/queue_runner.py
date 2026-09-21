@@ -57,11 +57,14 @@ PURGE_INTERVAL_SECONDS = 3600
 # conversion rate unreadable, and let a stale checkout link be "completed"
 # weeks later against a price that may no longer apply. After this window a
 # pending order is re-checked with its provider one last time and then
-# closed as failed. Generous on purpose: a mobile-money payment can take
-# several minutes to confirm, and wrongly failing a real payment is far
-# worse than leaving a dead one around a little longer.
-PENDING_ORDER_EXPIRY_MINUTES = 45
-PENDING_ORDER_SWEEP_INTERVAL_SECONDS = 600
+# closed as failed — a buyer who left the checkout page is not coming back,
+# and the final provider check is what protects a payment that really did
+# land (see expire_abandoned_pending_orders) rather than a long wait.
+PENDING_ORDER_EXPIRY_MINUTES = 10
+# Well under the expiry window, so an order is actually closed close to the
+# 10-minute mark instead of drifting to nearly double it while waiting for
+# the next sweep.
+PENDING_ORDER_SWEEP_INTERVAL_SECONDS = 180
 THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS = 120
 # A backlog of historical thumbnails is deliberately processed at a useful
 # pace.  The audit is one image request per card and is rate-limited by the
