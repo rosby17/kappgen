@@ -233,21 +233,23 @@ def resolve_enabled_image_sources(image_style: Optional[dict]) -> List[str]:
     return ["library"]
 
 
-def resolve_premium_image_budget(image_style: Optional[dict], premium_images_enabled: bool) -> int:
-    """How many paid premium images this video is allowed to generate.
+def resolve_generated_image_budget(image_style: Optional[dict]) -> int:
+    """How many images this video may GENERATE, whichever provider serves
+    them.
 
-    Two independent gates, both required: the channel must have been granted
-    the right by an admin (`premium_images_enabled`, a column no creator-
-    facing route writes), and the creator must have asked for a number
-    (`image_style.premium_image_count`). A granted channel that never set a
-    count spends nothing — premium is opt-in on both sides, never a default
-    that quietly starts billing.
+    There is no free generation from the creator's point of view: every
+    generated image is billed at the same per-image credit price whether it
+    came from the free-tier model or a paid one, so this is one number, not
+    a free count plus a paid count. What an admin grant changes is only
+    WHICH engine serves it (see resolve_generation_provider_order) — never
+    whether it costs.
 
-    The count is the creator's call (10 well-matched images is a perfectly
-    sensible answer for a 30-minute video, since these only fill the gaps
-    stock search left), clamped to the admin's global ceiling so a typo
-    can't become a 150-image bill."""
-    if not premium_images_enabled or not image_style:
+    Left at 0/unset, nothing is generated and nothing is spent. The count is
+    the creator's call — 10 well-placed images is a sensible answer for a
+    30-minute video, since generation only ever fills what the other enabled
+    sources couldn't — clamped to the admin's global ceiling so a typo can't
+    become a 150-image bill."""
+    if not image_style:
         return 0
     raw = image_style.get("premium_image_count")
     try:
@@ -258,6 +260,25 @@ def resolve_premium_image_budget(image_style: Optional[dict], premium_images_ena
         return 0
     from src.utils.app_settings import premium_image_count_ceiling
     return min(count, premium_image_count_ceiling())
+
+
+def resolve_generation_provider_order(premium_images_enabled: bool) -> Optional[List[str]]:
+    """Which engines serve this channel's generated images.
+
+    An admin-granted channel gets the premium chain (higher quality, higher
+    unit cost to the operator); every other channel gets the standard chain
+    every channel shares. Returns None for "use the standard order", which
+    is what generate_images already does by default.
+
+    This is the ONLY thing the grant controls. The creator still chooses how
+    many images to generate and is billed the same per image either way."""
+    if not premium_images_enabled:
+        return None
+    from src.utils.app_settings import scene_image_premium_provider_order
+    # An admin who emptied the premium chain (or the global paid-API kill
+    # switch) drops the channel back to the standard engines rather than
+    # stopping its generation altogether.
+    return scene_image_premium_provider_order() or None
 
 
 # Appended to premium prompts when the video ALSO carries real stock
@@ -273,7 +294,7 @@ _STOCK_BLEND_DIRECTIVE = (
 )
 
 
-def _premium_style_suffix(enabled_sources: List[str]) -> str:
+def _generated_style_suffix(enabled_sources: List[str]) -> str:
     """Only blend toward photography when there's actually photography to
     blend with. On an AI-only channel the generated images ARE the visual
     identity, and forcing documentary realism there would override the
@@ -281,63 +302,16 @@ def _premium_style_suffix(enabled_sources: List[str]) -> str:
     return _STOCK_BLEND_DIRECTIVE if any(s in enabled_sources for s in ("google_search", "library", "community")) else ""
 
 
-def _generate_with_premium_split(
-    scene_prompts: List[str],
-    budget: int,
-    generate: "callable",
-    niche: Optional[str] = None,
-) -> List[Optional[Path]]:
-    """Generate every scene, routing the `budget` most visually-demanding
-    ones through the paid chain and the rest through the free one.
-
-    For an AI-only channel, where generation isn't the fallback but the
-    whole visual identity. No style suffix here: there's no stock footage to
-    match, so the channel's own style_prompt is the only look to respect."""
-    from src.utils.app_settings import scene_image_premium_provider_order
-    order = scene_image_premium_provider_order()
-    if not order or not scene_prompts:
-        return generate(scene_prompts, "ai_img", None, True)
-
-    if len(scene_prompts) <= budget:
-        premium_indices = set(range(len(scene_prompts)))
-    else:
-        from src.pipeline.scene_director import rank_visual_need
-        scores = rank_visual_need(scene_prompts, niche or "")
-        premium_indices = set(sorted(range(len(scene_prompts)), key=lambda k: -scores[k])[:budget])
-    logger.info(
-        f"Premium/free split across {len(scene_prompts)} generated scene(s): "
-        f"{len(premium_indices)} premium (provider order: {order}), "
-        f"{len(scene_prompts) - len(premium_indices)} free."
-    )
-
-    results: List[Optional[Path]] = [None] * len(scene_prompts)
-    premium_positions = sorted(premium_indices)
-    free_positions = [i for i in range(len(scene_prompts)) if i not in premium_indices]
-    # Distinct prefixes: fetch_one reuses any file already on disk at
-    # {prefix}_{n}, so sharing one prefix across the two passes would make a
-    # free image get picked up as the premium one for that slot on a retry.
-    for positions, prefix, provider_order in (
-        (premium_positions, "premium_img", order),
-        (free_positions, "ai_img", None),
-    ):
-        if not positions:
-            continue
-        produced = generate([scene_prompts[i] for i in positions], prefix, provider_order, True, positions)
-        for pos, i in enumerate(positions):
-            if pos < len(produced):
-                results[i] = produced[pos]
-    return results
-
-
-def _fill_gaps_with_premium_images(
+def _fill_gaps_with_generated_images(
     results: List[Optional[Path]],
     prompts: List[str],
     budget: int,
     generate: "callable",
+    provider_order: Optional[List[str]] = None,
     niche: Optional[str] = None,
     style_suffix: str = "",
 ) -> List[Optional[Path]]:
-    """Generate at most `budget` paid images to cover the scenes still
+    """Generate at most `budget` images to cover the scenes still
     without a visual, and hold each one across the whole run of consecutive
     scenes it was generated for.
 
@@ -362,11 +336,6 @@ def _fill_gaps_with_premium_images(
 
     Returns the list with gaps filled where generation succeeded; any scene
     it couldn't cover is left as None for the caller's normal pool fallback."""
-    from src.utils.app_settings import scene_image_premium_provider_order
-    order = scene_image_premium_provider_order()
-    if not order:
-        logger.info("Premium scene images requested but no premium provider is configured (or paid APIs are disabled); leaving gaps to the standard fallback.")
-        return results
 
     gaps = [i for i, r in enumerate(results) if r is None]
     if not gaps:
@@ -391,7 +360,7 @@ def _fill_gaps_with_premium_images(
         ranked = sorted(range(len(runs)), key=lambda k: (-scores[k], -len(runs[k])))
         selected = sorted(ranked[:budget])
         logger.info(
-            "Premium image allocation (visual need score): "
+            "Generated-image allocation (visual need score): "
             + ", ".join(f"scenes {runs[k][0] + 1}-{runs[k][-1] + 1}={scores[k]:.1f}{'*' if k in selected else ''}" for k in range(len(runs)))
         )
     else:
@@ -401,14 +370,14 @@ def _fill_gaps_with_premium_images(
     run_prompts = [f"{run_texts[k]}{style_suffix}" for k in selected]
     covered = sum(len(r) for r in chosen_runs)
     logger.info(
-        f"Premium scene images: {len(gaps)} scene(s) in {len(runs)} run(s) had no matching visual — "
+        f"Generated scene images: {len(gaps)} scene(s) in {len(runs)} run(s) had no matching visual — "
         f"generating {len(chosen_runs)} image(s) to cover {covered} scene(s) "
-        f"(budget {budget} image(s), provider order: {order})."
+        f"(budget {budget} image(s), provider order: {provider_order or 'standard'})."
     )
 
     # Named after each run's first scene, so the cache entry survives a
     # retry that groups the gaps differently.
-    generated = generate(run_prompts, "premium_img", order, True, [run[0] for run in chosen_runs])
+    generated = generate(run_prompts, "gen_img", provider_order, True, [run[0] for run in chosen_runs])
     for pos, run in enumerate(chosen_runs):
         image = generated[pos] if pos < len(generated) else None
         if image is None:
@@ -889,21 +858,25 @@ def fetch_or_generate_images(
     local, and community imagery throughout the video, not "AI unless it
     breaks."
 
-    `premium_images_enabled` is the channel's admin-granted permission to
-    use the paid provider chain (Channel.premium_images_enabled). It does
-    NOT turn premium into another source in the mix above: premium images
-    are the gap-filler for scenes the other sources couldn't illustrate
-    honestly — a stock search that found nothing matching the narration —
-    capped at image_style.premium_image_count per video. That ordering is
-    the entire point for a channel where a wrong image is worse than a
-    generic one (health, how-to): search for something real first, and only
-    pay to generate when the search comes back empty.
+    Image GENERATION is never free to the creator, whichever engine serves
+    it, so when other sources are also enabled it is not thrown into the
+    random mix above — it is the gap-filler for the scenes those sources
+    couldn't illustrate honestly (a stock search that came back with nothing
+    matching the narration), bounded by image_style.premium_image_count. On
+    a channel where a wrong image is worse than a generic one (health,
+    how-to), that ordering is the whole point: look for something real
+    first, generate only where looking failed.
+
+    `premium_images_enabled` (the channel's admin grant) changes only WHICH
+    engines serve those generations, never how many there are or what they
+    cost the creator.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     enabled = resolve_enabled_image_sources(image_style)
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
-    premium_budget = resolve_premium_image_budget(image_style, premium_images_enabled)
+    generation_budget = resolve_generated_image_budget(image_style)
+    generation_order = resolve_generation_provider_order(premium_images_enabled)
 
     def expand_randomly(unique_images: List[Path], required_count: int) -> List[Path]:
         """Fill a long timeline from a per-video original pool without obvious
@@ -1086,8 +1059,8 @@ def fetch_or_generate_images(
         # source mix above — is what keeps a health/how-to video's visuals
         # tied to what the narration is actually saying, at the cost of N
         # images instead of a full video's worth.
-        if premium_budget:
-            results = _fill_gaps_with_premium_images(results, prompts, premium_budget, generate_images, niche, _premium_style_suffix(enabled))
+        if generation_budget:
+            results = _fill_gaps_with_generated_images(results, prompts, generation_budget, generate_images, generation_order, niche, _generated_style_suffix(enabled))
 
         # Everything not filled by AI/Google/premium (library/community-assigned scenes,
         # plus any scene where AI generation itself failed) is drawn from
@@ -1121,20 +1094,13 @@ def fetch_or_generate_images(
         # visual identity original. Any image this fails to generate falls
         # through per-image to library/community/synthetic inside fetch_one
         # above, according to the same `enabled` priority.
-        generation_count = min(len(prompts), unique_generation_count or len(prompts))
-        if premium_budget:
-            # Generation is this channel's ONLY source, so there are no gaps
-            # to fill — every scene gets an AI image either way. The premium
-            # budget becomes a quality split instead: the scenes whose
-            # narration most needs an exact, well-composed image get the paid
-            # generator, everything else keeps the free one. Same money, spent
-            # where a viewer would actually notice the difference.
-            originals = _generate_with_premium_split(
-                prompts[:generation_count], premium_budget, generate_images, niche,
-            )
-        else:
-            originals = generate_images(prompts[:generation_count])
-        originals = [p for p in originals if p is not None]
+        # Generation is this channel's only source, so its image budget IS
+        # the number of images the video generates — no gaps to fill and
+        # nothing to arbitrate. An explicit budget wins over the length-based
+        # heuristic: a creator who said "10 images" means 10 images, and
+        # knows what the 10 cost.
+        generation_count = min(len(prompts), generation_budget or unique_generation_count or len(prompts))
+        originals = [p for p in generate_images(prompts[:generation_count], "ai_img", generation_order) if p is not None]
         sequence = expand_randomly(originals, len(prompts))
         reused = max(0, len(sequence) - len(originals))
         logger.info(
@@ -1153,14 +1119,14 @@ def fetch_or_generate_images(
         # last resort.
         generation_count = min(len(prompts), unique_generation_count or len(prompts))
         found = fetch_google_images(prompts[:generation_count], user_id=user_id)
-        if premium_budget:
+        if generation_budget:
             # Same contract as the mixed branch: pay only for the scenes the
             # search genuinely couldn't illustrate, keeping each generated
             # image on the scene whose narration asked for it.
             positioned: List[Optional[Path]] = [None] * len(prompts)
             for i in range(min(len(found), len(positioned))):
                 positioned[i] = found[i]
-            positioned = _fill_gaps_with_premium_images(positioned, prompts, premium_budget, generate_images, niche, _premium_style_suffix(enabled))
+            positioned = _fill_gaps_with_generated_images(positioned, prompts, generation_budget, generate_images, generation_order, niche, _generated_style_suffix(enabled))
             resolved = [p for p in positioned if p]
             if not resolved:
                 return get_image_pool(output_dir, len(prompts), niche=niche)
