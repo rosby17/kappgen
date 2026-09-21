@@ -202,6 +202,30 @@ def fetch_google_images(queries: List[str], user_id: Optional[str] = None) -> Li
     return results
 
 
+# How strictly each scene's visual has to match what is being said there.
+#
+# "strict": the narration describes something the viewer must actually see
+# (an exercise, a position, a tool). Library images are matched to each
+# scene by their vision tags, whatever nothing fits is generated, and only
+# then does anything random get used. Costs more and is the entire point for
+# health/how-to.
+#
+# "loose" (default, and what every existing channel keeps): any on-theme
+# visual carries the passage — religion, tourism, motivation. Sources are
+# mixed at random, which is cheaper and reads perfectly well.
+SCENE_ACCURACY_STRICT = "strict"
+SCENE_ACCURACY_LOOSE = "loose"
+
+
+def resolve_scene_accuracy(image_style: Optional[dict]) -> str:
+    """Default is "loose": it is the behaviour every channel had before this
+    setting existed, so an untouched channel's videos don't silently change
+    (or start spending differently) because a new option appeared."""
+    if not image_style:
+        return SCENE_ACCURACY_LOOSE
+    return SCENE_ACCURACY_STRICT if image_style.get("scene_accuracy") == SCENE_ACCURACY_STRICT else SCENE_ACCURACY_LOOSE
+
+
 def resolve_enabled_image_sources(image_style: Optional[dict]) -> List[str]:
     """Returns the visual sources a channel wants, in the fixed priority
     order they're actually tried at render time: AI generation first (its
@@ -884,7 +908,11 @@ def fetch_or_generate_images(
     enabled = resolve_enabled_image_sources(image_style)
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
-    generation_budget = resolve_generated_image_budget(image_style, auto_generation_budget)
+    scene_accuracy = resolve_scene_accuracy(image_style)
+    # Generation is a source the creator ticks, not something a number alone
+    # turns on: without "ai_generated" enabled, a configured count must never
+    # start billing a channel that only asked for stock and its own library.
+    generation_budget = resolve_generated_image_budget(image_style, auto_generation_budget) if "ai_generated" in enabled else 0
     generation_order = resolve_generation_provider_order(premium_images_enabled)
 
     def expand_randomly(unique_images: List[Path], required_count: int) -> List[Path]:
@@ -1010,6 +1038,57 @@ def fetch_or_generate_images(
             _persist_generated_images_to_channel_library(channel_id, user_id, niche, fresh_paths)
         return generated_paths
 
+    if scene_accuracy == SCENE_ACCURACY_STRICT:
+        # Demanding niche: every scene must show what is being said there, so
+        # nothing is assigned at random. Match first, generate what didn't
+        # match, and only then fall back to the shuffled pool for whatever
+        # the budget couldn't cover.
+        results: List[Optional[Path]] = [None] * len(prompts)
+
+        if "library" in enabled or "community" in enabled:
+            from src.pipeline.library_matching import match_images_to_scenes
+            candidates: List[Path] = []
+            if "library" in enabled and library_path:
+                from src.config import STORAGE_PATH
+                library_dir = (STORAGE_PATH / library_path)
+                if library_dir.is_dir():
+                    candidates.extend(p for p in library_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_UPLOAD_EXTENSIONS)
+            if "community" in enabled:
+                candidates.extend(_approved_community_library_files(niche, user_id=user_id))
+            for i, matched in enumerate(match_images_to_scenes(prompts, candidates)):
+                results[i] = matched
+
+        if "google_search" in enabled:
+            unmatched = [i for i, r in enumerate(results) if r is None]
+            if unmatched:
+                found = fetch_google_images([prompts[i] for i in unmatched], user_id=user_id)
+                for pos, i in enumerate(unmatched):
+                    if pos < len(found) and found[pos]:
+                        results[i] = found[pos]
+
+        if generation_budget:
+            results = _fill_gaps_with_generated_images(
+                results, prompts, generation_budget, generate_images,
+                generation_order, niche, _generated_style_suffix(enabled),
+            )
+
+        # Last resort only: a scene reaching here matched nothing and the
+        # generation budget was already spent elsewhere. A random on-theme
+        # image still beats a blank scene.
+        still_needed = sum(1 for r in results if r is None)
+        if still_needed:
+            pool = iter(get_image_pool(
+                output_dir, still_needed,
+                custom_library_path=library_path if "library" in enabled else None,
+                additional_library_files=_approved_community_library_files(niche, user_id=user_id) if "community" in enabled else [],
+                niche=niche,
+            ))
+            for i, r in enumerate(results):
+                if r is None:
+                    results[i] = next(pool, None)
+            logger.info(f"Strict scene accuracy: {still_needed} scene(s) fell back to the shuffled pool.")
+        return [r for r in results if r is not None]
+
     if len(enabled) > 1:
         # Two or more sources enabled — genuinely mix them instead of
         # treating everything past the first as pure emergency fallback.
@@ -1062,16 +1141,7 @@ def fetch_or_generate_images(
                     for pos, i in enumerate(leftover):
                         results[i] = cycled[pos]
 
-        # Paid gap-filler: the scenes still unillustrated at this point are
-        # the ones no enabled source had anything honest for. Generating
-        # those specifically — rather than adding premium to the random
-        # source mix above — is what keeps a health/how-to video's visuals
-        # tied to what the narration is actually saying, at the cost of N
-        # images instead of a full video's worth.
-        if generation_budget:
-            results = _fill_gaps_with_generated_images(results, prompts, generation_budget, generate_images, generation_order, niche, _generated_style_suffix(enabled))
-
-        # Everything not filled by AI/Google/premium (library/community-assigned scenes,
+        # Everything not filled by AI/Google (library/community-assigned scenes,
         # plus any scene where AI generation itself failed) is drawn from
         # one combined pool of whichever of library/community are enabled —
         # get_image_pool already merges and shuffles both together, with

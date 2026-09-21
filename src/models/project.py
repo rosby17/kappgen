@@ -150,6 +150,12 @@ class ImageStyle(BaseModel):
     # a column no creator-facing route writes, so a creator setting this
     # number on an ungranted channel simply spends nothing.
     premium_image_count: Optional[int] = None
+    # "strict" | "loose" (default) — how closely each scene's visual has to
+    # match what is being said there. See SCENE_ACCURACY_STRICT in images.py:
+    # strict matches library images to each scene by their vision tags and
+    # generates what didn't match, loose mixes the sources at random. Default
+    # is loose so existing channels keep their current behaviour and cost.
+    scene_accuracy: Optional[str] = None
 
 class EffectsConfig(BaseModel):
     enabled: bool = True                # master on/off for color grade + overlay effects together
