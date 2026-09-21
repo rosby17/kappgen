@@ -57,6 +57,12 @@ THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS = 120
 # worker interval, while a batch of 12 clears an entire channel in minutes
 # instead of leaving misleading fallback badges for days.
 THUMBNAIL_QUALITY_AUDIT_BATCH_SIZE = 12
+# A vision outage is global, not a defect in every thumbnail.  One failed
+# provider chain must pause the audit briefly; otherwise a 429/temporary
+# outage gets multiplied by every card in the batch and makes recovery take
+# longer once the provider is healthy again.
+THUMBNAIL_QUALITY_AUDIT_FAILURE_COOLDOWN_SECONDS = 15 * 60
+_thumbnail_quality_audit_paused_until = 0.0
 
 # Shown to the creator instead of a raw exception/traceback when a render
 # fails because of an underlying paid-provider outage (exhausted API
@@ -1719,6 +1725,10 @@ def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZ
     false positives without flooding the vision provider: each eligible video
     is reviewed exactly once, then receives an explicit quality state.
     """
+    global _thumbnail_quality_audit_paused_until
+    if time.monotonic() < _thumbnail_quality_audit_paused_until:
+        return
+
     from src.pipeline.vision import assess_thumbnail_quality
 
     db = SessionLocal()
@@ -1783,7 +1793,13 @@ def audit_thumbnail_quality_batch(limit: int = THUMBNAIL_QUALITY_AUDIT_BATCH_SIZ
                 )
             except Exception as exc:
                 logger.warning(f"Thumbnail quality audit failed for video {video.id}: {exc}")
-                continue
+                # Keep the video unreviewed.  The next scheduled pass can
+                # resume exactly where this one stopped when any configured
+                # vision provider is available again.
+                _thumbnail_quality_audit_paused_until = (
+                    time.monotonic() + THUMBNAIL_QUALITY_AUDIT_FAILURE_COOLDOWN_SECONDS
+                )
+                return
 
             video.thumbnail_quality_status = verdict["status"]
             video.thumbnail_quality_reason = verdict["reason"]
