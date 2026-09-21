@@ -4,7 +4,6 @@ import re
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
@@ -66,34 +65,11 @@ def list_users(q: Optional[str] = None, admin: User = Depends(get_current_admin)
     return result
 
 
-# The private-beta approval queue that used to live here is gone: signup is
-# open to everyone and no account waits on an admin. Maintenance access
-# below is a separate, still-active gate — it decides who keeps working
-# while the platform is in maintenance, not who may sign up.
-class MaintenanceAccessPayload(BaseModel):
-    email: str
-    granted: bool = True
-
-
-@router.get("/maintenance-access")
-def list_maintenance_access(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    """Accounts that remain usable when maintenance mode is enabled."""
-    users = db.query(User).filter(User.maintenance_access.is_(True)).order_by(User.email.asc()).all()
-    return [u.to_dict() for u in users]
-
-
-@router.post("/maintenance-access")
-def set_maintenance_access(payload: MaintenanceAccessPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    email = payload.email.strip().lower()
-    if not email:
-        raise HTTPException(status_code=400, detail="L'adresse email est requise.")
-    user = db.query(User).filter(func.lower(User.email) == email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Aucun compte ne correspond à cette adresse email.")
-    user.maintenance_access = payload.granted
-    db.commit()
-    db.refresh(user)
-    return user.to_dict()
+# Two admin gates used to live here and are both gone: the private-beta
+# approval queue (signup is open to everyone now) and the maintenance-access
+# allow-list. Maintenance mode still exists — admins simply keep working
+# through it, and User.maintenance_access is left honoured for the accounts
+# that already carry it rather than being managed by hand.
 
 
 @router.get("/users/{user_id}")
