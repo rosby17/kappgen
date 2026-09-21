@@ -29,6 +29,7 @@ from src.pipeline.script_structure_analyzer import analyze_script_structure_text
 from src.utils.credentials import encrypt_credential, izivoice_key_for_user
 from src.utils.auth import get_current_user
 from src.utils.billing import user_has_purchased_credits
+from sqlalchemy.exc import IntegrityError
 from src.utils.logger import logger
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -1813,6 +1814,37 @@ async def upload_channel_overlay(channel_id: str, file: UploadFile = File(...), 
     db.refresh(channel)
     return channel.to_dict()
 
+def _channel_already_linked_to_youtube(db: Session, channel: Channel, youtube_channel_id: str):
+    """Another of this creator's channels already connected to the same
+    YouTube channel, if any.
+
+    Nothing used to check this, and the consequence was not obvious: both
+    the OAuth callback and the periodic identity sync overwrite name, handle
+    and avatar from YouTube, so two KappGen channels pointing at one YouTube
+    channel drift into looking exactly alike — same name, same photo — while
+    still holding separate videos and separate settings. The creator then
+    sees what looks like a duplicated channel and can't tell which one is
+    actually producing.
+
+    Scoped to the creator's own channels on purpose: another account
+    connecting the same YouTube channel is a different situation (a shared
+    brand account, an agency), and naming someone else's channel in an error
+    message would leak their data to tell this creator nothing useful.
+    """
+    if not youtube_channel_id:
+        return None
+    return (
+        db.query(Channel)
+        .filter(
+            Channel.user_id == channel.user_id,
+            Channel.id != channel.id,
+            Channel.youtube_channel_id == youtube_channel_id,
+            Channel.youtube_refresh_token.isnot(None),
+        )
+        .first()
+    )
+
+
 @router.delete("/{channel_id}/overlays/{overlay_id}")
 def delete_channel_overlay(channel_id: str, overlay_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
@@ -3062,6 +3094,17 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
         channel.youtube_token_expiry = datetime.utcnow()
         channel.youtube_connected_at = datetime.utcnow()
         if channel_info:
+            # Refuse rather than silently creating a look-alike pair. The
+            # tokens exchanged above are simply dropped: nothing is stored,
+            # so the creator can retry on the right channel.
+            duplicate = _channel_already_linked_to_youtube(db, channel, channel_info["id"])
+            if duplicate:
+                return redirect_with(
+                    "error",
+                    f"Cette chaîne YouTube est déjà connectée à « {duplicate.name} ». "
+                    "Déconnecte-la d'abord si tu veux la relier à cette chaîne-ci.",
+                    channel_id=channel.id,
+                )
             channel.youtube_channel_id = channel_info["id"]
             channel.youtube_channel_title = channel_info["title"]
             channel.youtube_channel_handle = channel_info.get("handle")
@@ -3111,6 +3154,13 @@ def refresh_youtube_identity(channel_id: str, current_user: User = Depends(get_c
     if not channel_info:
         raise HTTPException(status_code=502, detail="Impossible de récupérer les informations de la chaîne YouTube.")
 
+    duplicate = _channel_already_linked_to_youtube(db, channel, channel_info["id"])
+    if duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cette chaîne YouTube est déjà connectée à « {duplicate.name} ». "
+                   "Déconnecte-la de cette chaîne-là avant de resynchroniser celle-ci.",
+        )
     channel.youtube_channel_id = channel_info["id"]
     channel.youtube_channel_title = channel_info["title"]
     channel.youtube_channel_handle = channel_info.get("handle")
@@ -3158,7 +3208,22 @@ def delete_channel(channel_id: str, current_user: User = Depends(get_current_use
     # (image tags, placements, sound effects) were added — see
     # purge_channel_references, which both delete paths now share.
     from src.utils.channel_deletion import purge_channel_references
-    purge_channel_references(db, channel_id)
-    db.delete(channel)
-    db.commit()
+    channel_name = channel.name
+    try:
+        purge_channel_references(db, channel_id)
+        db.delete(channel)
+        db.commit()
+    except IntegrityError:
+        # A table still referencing this channel that purge_channel_references
+        # doesn't know about yet. Letting this escape produced a bare 500,
+        # which Starlette generates OUTSIDE the CORS middleware — so the
+        # browser saw no headers, reported "Failed to fetch", and the creator
+        # was told the servers were down. Answer with a real status instead,
+        # and log the constraint so the missing table is identifiable.
+        db.rollback()
+        logger.exception(f"Channel {channel_id} ({channel_name}) could not be deleted: a dependent row still references it.")
+        raise HTTPException(
+            status_code=409,
+            detail="Cette chaîne ne peut pas être supprimée pour l'instant : des données y sont encore rattachées. L'incident est enregistré, réessaie dans quelques minutes.",
+        )
     return {"message": "Channel deleted successfully"}
