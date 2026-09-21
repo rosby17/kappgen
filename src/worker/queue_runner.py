@@ -706,6 +706,17 @@ def process_single_queued_video() -> bool:
                 logger.warning(f"Post-render thumbnail retry failed for video {video.id}, leaving no thumbnail: {exc}")
             db.commit()
 
+        # A thumbnail is its own durable creator asset.  Copy it to B2 as
+        # soon as it exists, rather than waiting for the periodic backup
+        # sweep; a later local-volume cleanup can then never make a newly
+        # generated AI33 thumbnail disappear from a card.
+        if thumbnail_destination.exists() and thumbnail_destination.stat().st_size > 1000:
+            from src.utils import b2_storage
+            stored_url = b2_storage.upload_thumbnail(thumbnail_destination, str(video.channel_id), str(video.id))
+            if stored_url:
+                video.thumbnail_storage_url = stored_url
+                db.commit()
+
         # Only now, after every step that reads output_mp4 from local disk
         # (SD-variant pregeneration, the thumbnail frame-grab fallback above)
         # — uploading to B2 and deleting the local copy any earlier left both
@@ -1607,6 +1618,10 @@ def retry_missing_thumbnails():
                 video.thumbnail_quality_status = None
                 video.thumbnail_quality_reason = None
                 video.thumbnail_quality_reviewed_at = None
+                from src.utils import b2_storage
+                stored_url = b2_storage.upload_thumbnail(thumbnail_destination, str(video.channel_id), str(video.id))
+                if stored_url:
+                    video.thumbnail_storage_url = stored_url
                 if had_fallback:
                     fallback_backup.unlink(missing_ok=True)
                 logger.info(f"Scheduled thumbnail retry succeeded for video {video.id} (attempt {video.thumbnail_retry_count}).")
@@ -3265,9 +3280,9 @@ def start_queue_worker(poll_interval_seconds: float = 2.0, single_run: bool = Fa
         if now - last_thumbnail_retry_check > THUMBNAIL_AUTO_RETRY_CHECK_INTERVAL_SECONDS:
             retry_missing_thumbnails()
             last_thumbnail_retry_check = now
-        if now - last_thumbnail_quality_audit > THUMBNAIL_QUALITY_AUDIT_INTERVAL_SECONDS:
-            audit_thumbnail_quality_batch()
-            last_thumbnail_quality_audit = now
+        # Thumbnail provenance is authoritative: an AI33/provider result is
+        # immediately active, while a frame fallback remains queued for retry.
+        # Do not let an optional visual audit delay or reclassify that state.
         if now - last_purge > PURGE_INTERVAL_SECONDS:
             # REINSTATED Sept 2026 alongside VIDEO_RETENTION_HOURS above —
             # warn first so a creator has VIDEO_EXPIRY_WARNING_HOURS_BEFORE

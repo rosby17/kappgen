@@ -140,6 +140,16 @@ class ImageStyle(BaseModel):
     # from the video's own length; "manual" pins it to a specific number.
     image_count_mode: Optional[str] = None
     max_unique_images: Optional[int] = None
+    # Budget, in IMAGES (not scenes), for the paid gap-filling generator —
+    # see resolve_premium_image_budget/_fill_gaps_with_premium_images in
+    # images.py. Only ever spent on scenes the channel's other sources found
+    # nothing for, and one image covers a whole run of consecutive gaps, so
+    # a small number goes a long way: 10 is a realistic setting for a
+    # 30-minute video, not a degraded one. Ignored entirely unless an admin
+    # granted the channel Channel.premium_images_enabled — the permission is
+    # a column no creator-facing route writes, so a creator setting this
+    # number on an ungranted channel simply spends nothing.
+    premium_image_count: Optional[int] = None
 
 class EffectsConfig(BaseModel):
     enabled: bool = True                # master on/off for color grade + overlay effects together

@@ -233,6 +233,191 @@ def resolve_enabled_image_sources(image_style: Optional[dict]) -> List[str]:
     return ["library"]
 
 
+def resolve_premium_image_budget(image_style: Optional[dict], premium_images_enabled: bool) -> int:
+    """How many paid premium images this video is allowed to generate.
+
+    Two independent gates, both required: the channel must have been granted
+    the right by an admin (`premium_images_enabled`, a column no creator-
+    facing route writes), and the creator must have asked for a number
+    (`image_style.premium_image_count`). A granted channel that never set a
+    count spends nothing — premium is opt-in on both sides, never a default
+    that quietly starts billing.
+
+    The count is the creator's call (10 well-matched images is a perfectly
+    sensible answer for a 30-minute video, since these only fill the gaps
+    stock search left), clamped to the admin's global ceiling so a typo
+    can't become a 150-image bill."""
+    if not premium_images_enabled or not image_style:
+        return 0
+    raw = image_style.get("premium_image_count")
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    if count <= 0:
+        return 0
+    from src.utils.app_settings import premium_image_count_ceiling
+    return min(count, premium_image_count_ceiling())
+
+
+# Appended to premium prompts when the video ALSO carries real stock
+# photos/footage. A generated image that reads as an illustration or a 3D
+# render next to real photography is more distracting than the generic stock
+# shot it replaced: the viewer notices the seam, and the video stops looking
+# like one piece of work. The channel's own style_prompt is still applied on
+# top of this (see fetch_one) — this only pins the medium, not the look.
+_STOCK_BLEND_DIRECTIVE = (
+    ", photorealistic documentary photograph, real camera, natural lighting, "
+    "authentic candid framing, indistinguishable from professional stock photography, "
+    "not an illustration, not a 3d render, not a painting"
+)
+
+
+def _premium_style_suffix(enabled_sources: List[str]) -> str:
+    """Only blend toward photography when there's actually photography to
+    blend with. On an AI-only channel the generated images ARE the visual
+    identity, and forcing documentary realism there would override the
+    creator's chosen style for no reason."""
+    return _STOCK_BLEND_DIRECTIVE if any(s in enabled_sources for s in ("google_search", "library", "community")) else ""
+
+
+def _generate_with_premium_split(
+    scene_prompts: List[str],
+    budget: int,
+    generate: "callable",
+    niche: Optional[str] = None,
+) -> List[Optional[Path]]:
+    """Generate every scene, routing the `budget` most visually-demanding
+    ones through the paid chain and the rest through the free one.
+
+    For an AI-only channel, where generation isn't the fallback but the
+    whole visual identity. No style suffix here: there's no stock footage to
+    match, so the channel's own style_prompt is the only look to respect."""
+    from src.utils.app_settings import scene_image_premium_provider_order
+    order = scene_image_premium_provider_order()
+    if not order or not scene_prompts:
+        return generate(scene_prompts, "ai_img", None, True)
+
+    if len(scene_prompts) <= budget:
+        premium_indices = set(range(len(scene_prompts)))
+    else:
+        from src.pipeline.scene_director import rank_visual_need
+        scores = rank_visual_need(scene_prompts, niche or "")
+        premium_indices = set(sorted(range(len(scene_prompts)), key=lambda k: -scores[k])[:budget])
+    logger.info(
+        f"Premium/free split across {len(scene_prompts)} generated scene(s): "
+        f"{len(premium_indices)} premium (provider order: {order}), "
+        f"{len(scene_prompts) - len(premium_indices)} free."
+    )
+
+    results: List[Optional[Path]] = [None] * len(scene_prompts)
+    premium_positions = sorted(premium_indices)
+    free_positions = [i for i in range(len(scene_prompts)) if i not in premium_indices]
+    # Distinct prefixes: fetch_one reuses any file already on disk at
+    # {prefix}_{n}, so sharing one prefix across the two passes would make a
+    # free image get picked up as the premium one for that slot on a retry.
+    for positions, prefix, provider_order in (
+        (premium_positions, "premium_img", order),
+        (free_positions, "ai_img", None),
+    ):
+        if not positions:
+            continue
+        produced = generate([scene_prompts[i] for i in positions], prefix, provider_order, True, positions)
+        for pos, i in enumerate(positions):
+            if pos < len(produced):
+                results[i] = produced[pos]
+    return results
+
+
+def _fill_gaps_with_premium_images(
+    results: List[Optional[Path]],
+    prompts: List[str],
+    budget: int,
+    generate: "callable",
+    niche: Optional[str] = None,
+    style_suffix: str = "",
+) -> List[Optional[Path]]:
+    """Generate at most `budget` paid images to cover the scenes still
+    without a visual, and hold each one across the whole run of consecutive
+    scenes it was generated for.
+
+    The budget counts IMAGES GENERATED, not scenes covered. Consecutive gaps
+    are one run and cost one image: four unillustrated scenes in a row get a
+    single generated visual held across all four, not four near-identical
+    images at four times the price. That's both cheaper and better to watch —
+    a shot that lasts reads as deliberate, four variations on the same idea
+    read as filler. The prompt for a run is built from all of its scenes'
+    narration, so the one image illustrates the passage as a whole rather
+    than only its first sentence.
+
+    When there are more runs than budget, the choice is editorial rather
+    than mechanical: each run is scored on how much the video actually loses
+    without its own accurate image (rank_visual_need, scene_director.py — a
+    free-tier text call, negligible next to one generated image), and the
+    passages that must be SEEN to be followed win. A run describing a
+    specific movement or object outranks a longer run of general
+    encouragement, which a held shot carries perfectly well. Run length
+    breaks ties, so among equally-important passages the credit still goes
+    where it covers the most screen time.
+
+    Returns the list with gaps filled where generation succeeded; any scene
+    it couldn't cover is left as None for the caller's normal pool fallback."""
+    from src.utils.app_settings import scene_image_premium_provider_order
+    order = scene_image_premium_provider_order()
+    if not order:
+        logger.info("Premium scene images requested but no premium provider is configured (or paid APIs are disabled); leaving gaps to the standard fallback.")
+        return results
+
+    gaps = [i for i, r in enumerate(results) if r is None]
+    if not gaps:
+        return results
+
+    runs: List[List[int]] = []
+    for i in gaps:
+        if runs and i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+
+    # Truncated: these are concatenated narration segments, and past a few
+    # hundred characters an image model stops gaining anything from the
+    # extra text. Built before selection because the ranker scores these
+    # same passages.
+    run_texts = [" ".join(prompts[i] for i in run)[:600] for run in runs]
+
+    if len(runs) > budget:
+        from src.pipeline.scene_director import rank_visual_need
+        scores = rank_visual_need(run_texts, niche or "")
+        ranked = sorted(range(len(runs)), key=lambda k: (-scores[k], -len(runs[k])))
+        selected = sorted(ranked[:budget])
+        logger.info(
+            "Premium image allocation (visual need score): "
+            + ", ".join(f"scenes {runs[k][0] + 1}-{runs[k][-1] + 1}={scores[k]:.1f}{'*' if k in selected else ''}" for k in range(len(runs)))
+        )
+    else:
+        selected = list(range(len(runs)))
+
+    chosen_runs = [runs[k] for k in selected]
+    run_prompts = [f"{run_texts[k]}{style_suffix}" for k in selected]
+    covered = sum(len(r) for r in chosen_runs)
+    logger.info(
+        f"Premium scene images: {len(gaps)} scene(s) in {len(runs)} run(s) had no matching visual — "
+        f"generating {len(chosen_runs)} image(s) to cover {covered} scene(s) "
+        f"(budget {budget} image(s), provider order: {order})."
+    )
+
+    # Named after each run's first scene, so the cache entry survives a
+    # retry that groups the gaps differently.
+    generated = generate(run_prompts, "premium_img", order, True, [run[0] for run in chosen_runs])
+    for pos, run in enumerate(chosen_runs):
+        image = generated[pos] if pos < len(generated) else None
+        if image is None:
+            continue
+        for i in run:
+            results[i] = image
+    return results
+
+
 def _persist_generated_images_to_channel_library(
     channel_id: Optional[str], user_id: Optional[str], niche: Optional[str], image_paths: List[Path],
 ) -> None:
@@ -692,6 +877,7 @@ def fetch_or_generate_images(
     user_id: Optional[str] = None,
     niche: Optional[str] = None,
     channel_id: Optional[str] = None,
+    premium_images_enabled: bool = False,
 ) -> List[Path]:
     """
     Fetches images for each scene. With exactly one visual source enabled,
@@ -702,11 +888,22 @@ def fetch_or_generate_images(
     treating the others as pure emergency fallback — a real mix of AI,
     local, and community imagery throughout the video, not "AI unless it
     breaks."
+
+    `premium_images_enabled` is the channel's admin-granted permission to
+    use the paid provider chain (Channel.premium_images_enabled). It does
+    NOT turn premium into another source in the mix above: premium images
+    are the gap-filler for scenes the other sources couldn't illustrate
+    honestly — a stock search that found nothing matching the narration —
+    capped at image_style.premium_image_count per video. That ordering is
+    the entire point for a channel where a wrong image is worse than a
+    generic one (health, how-to): search for something real first, and only
+    pay to generate when the search comes back empty.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     enabled = resolve_enabled_image_sources(image_style)
     style_prompt = image_style.get("style_prompt", "") if image_style else ""
     library_path = image_style.get("library_path") if image_style else None
+    premium_budget = resolve_premium_image_budget(image_style, premium_images_enabled)
 
     def expand_randomly(unique_images: List[Path], required_count: int) -> List[Path]:
         """Fill a long timeline from a per-video original pool without obvious
@@ -724,9 +921,14 @@ def fetch_or_generate_images(
             result.extend(cycle)
         return result[:required_count]
 
-    def generate_images(ai_prompts: List[str], prefix: str = "ai_img") -> List[Path]:
+    def generate_images(ai_prompts: List[str], prefix: str = "ai_img", provider_order: Optional[List[str]] = None, keep_positions: bool = False, scene_indices: Optional[List[int]] = None) -> List[Optional[Path]]:
         from src.utils.app_settings import scene_image_provider_order
-        scene_order = scene_image_provider_order()
+        # provider_order is the premium chain when the caller is the premium
+        # gap-filling pass; everything else uses the global (free-first)
+        # scene order that every channel shares.
+        scene_order = provider_order if provider_order is not None else scene_image_provider_order()
+        if not scene_order:
+            return [None] * len(ai_prompts) if keep_positions else []
         logger.info(f"Generating {len(ai_prompts)} scene images (provider order: {scene_order})...")
         # These are independent network calls (each waits on Izivoice's API, not
         # local CPU), so running them one after another was pure dead time —
@@ -742,7 +944,13 @@ def fetch_or_generate_images(
         failures = 0
 
         def fetch_one(i: int, p: str, client: httpx.Client) -> Optional[Path]:
-            img_file = output_dir / f"{prefix}_{i+1}.png"
+            # Named by the scene this image is FOR, not by its position in
+            # this particular call's sublist: when a caller generates a
+            # subset of the video's scenes (the premium/free split, the
+            # gap-filler), a retry that splits differently must not pick up
+            # the on-disk cache entry belonging to another scene.
+            scene_number = (scene_indices[i] if scene_indices and i < len(scene_indices) else i) + 1
+            img_file = output_dir / f"{prefix}_{scene_number}.png"
             # output_dir is deterministic per video (channels/{id}/videos/{id}/source/images),
             # so retrying a video that already generated some images before
             # failing at a later step (subtitles, mixing, ...) would otherwise
@@ -807,7 +1015,13 @@ def fetch_or_generate_images(
                     elif is_fresh:
                         fresh_paths.append(result)
 
-        generated_paths = [r for r in results if r is not None]
+        # Compacted for the bulk callers below, which only want "N images to
+        # spread over the timeline". The premium gap-filler asks for
+        # positions instead: it maps each returned image back onto the
+        # specific scene whose prompt produced it, so dropping a failed entry
+        # would shift every later image onto the wrong scene — the exact
+        # mismatch premium generation exists to eliminate.
+        generated_paths = list(results) if keep_positions else [r for r in results if r is not None]
         if failures:
             logger.warning(f"{failures}/{len(ai_prompts)} AI images fell back to library/synthetic assets due to provider errors.")
         if fresh_paths:
@@ -848,13 +1062,34 @@ def fetch_or_generate_images(
             google_indices = [i for i, s in enumerate(assignment) if s == "google_search"]
             if google_indices:
                 generation_count = min(len(google_indices), unique_generation_count or len(google_indices))
-                google_originals = [p for p in fetch_google_images([prompts[i] for i in google_indices[:generation_count]], user_id=user_id) if p]
-                google_sequence = expand_randomly(google_originals, len(google_indices))
-                for pos, i in enumerate(google_indices):
-                    if pos < len(google_sequence):
-                        results[i] = google_sequence[pos]
+                searched_indices = google_indices[:generation_count]
+                found = fetch_google_images([prompts[i] for i in searched_indices], user_id=user_id)
+                # Kept positional (a scene whose search came back empty stays
+                # None) instead of collapsing the hits into one pool to cycle:
+                # with a premium budget configured, "this exact scene found
+                # nothing" is precisely the signal the pass below spends money
+                # on. Scenes past the unique-count cap, and misses left over
+                # once the premium budget runs out, still get cycled from the
+                # hits by the pool fill further down.
+                for pos, i in enumerate(searched_indices):
+                    results[i] = found[pos] if pos < len(found) else None
+                leftover = google_indices[generation_count:]
+                hits = [p for p in found if p]
+                if leftover and hits:
+                    cycled = expand_randomly(hits, len(leftover))
+                    for pos, i in enumerate(leftover):
+                        results[i] = cycled[pos]
 
-        # Everything not filled by AI/Google (library/community-assigned scenes,
+        # Paid gap-filler: the scenes still unillustrated at this point are
+        # the ones no enabled source had anything honest for. Generating
+        # those specifically — rather than adding premium to the random
+        # source mix above — is what keeps a health/how-to video's visuals
+        # tied to what the narration is actually saying, at the cost of N
+        # images instead of a full video's worth.
+        if premium_budget:
+            results = _fill_gaps_with_premium_images(results, prompts, premium_budget, generate_images, niche, _premium_style_suffix(enabled))
+
+        # Everything not filled by AI/Google/premium (library/community-assigned scenes,
         # plus any scene where AI generation itself failed) is drawn from
         # one combined pool of whichever of library/community are enabled —
         # get_image_pool already merges and shuffles both together, with
@@ -887,7 +1122,19 @@ def fetch_or_generate_images(
         # through per-image to library/community/synthetic inside fetch_one
         # above, according to the same `enabled` priority.
         generation_count = min(len(prompts), unique_generation_count or len(prompts))
-        originals = generate_images(prompts[:generation_count])
+        if premium_budget:
+            # Generation is this channel's ONLY source, so there are no gaps
+            # to fill — every scene gets an AI image either way. The premium
+            # budget becomes a quality split instead: the scenes whose
+            # narration most needs an exact, well-composed image get the paid
+            # generator, everything else keeps the free one. Same money, spent
+            # where a viewer would actually notice the difference.
+            originals = _generate_with_premium_split(
+                prompts[:generation_count], premium_budget, generate_images, niche,
+            )
+        else:
+            originals = generate_images(prompts[:generation_count])
+        originals = [p for p in originals if p is not None]
         sequence = expand_randomly(originals, len(prompts))
         reused = max(0, len(sequence) - len(originals))
         logger.info(
@@ -905,7 +1152,25 @@ def fetch_or_generate_images(
         # placeholder art via get_image_pool, same as every other source's
         # last resort.
         generation_count = min(len(prompts), unique_generation_count or len(prompts))
-        originals = [p for p in fetch_google_images(prompts[:generation_count], user_id=user_id) if p]
+        found = fetch_google_images(prompts[:generation_count], user_id=user_id)
+        if premium_budget:
+            # Same contract as the mixed branch: pay only for the scenes the
+            # search genuinely couldn't illustrate, keeping each generated
+            # image on the scene whose narration asked for it.
+            positioned: List[Optional[Path]] = [None] * len(prompts)
+            for i in range(min(len(found), len(positioned))):
+                positioned[i] = found[i]
+            positioned = _fill_gaps_with_premium_images(positioned, prompts, premium_budget, generate_images, niche, _premium_style_suffix(enabled))
+            resolved = [p for p in positioned if p]
+            if not resolved:
+                return get_image_pool(output_dir, len(prompts), niche=niche)
+            # Scenes still empty (beyond the unique-count cap, or past the
+            # premium budget) cycle the visuals this video did resolve.
+            filler = iter(expand_randomly(resolved, sum(1 for p in positioned if p is None)))
+            sequence = [p if p else next(filler, resolved[0]) for p in positioned]
+            logger.info(f"Google Image Search + premium fill: {len(resolved)} distinct visual(s) across {len(prompts)} scene(s).")
+            return sequence
+        originals = [p for p in found if p]
         if not originals:
             return get_image_pool(output_dir, len(prompts), niche=niche)
         sequence = expand_randomly(originals, len(prompts))

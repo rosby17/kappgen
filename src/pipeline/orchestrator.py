@@ -330,6 +330,7 @@ def run_video_pipeline(
             image_prompts, images_dir, image_style_cfg,
             unique_generation_count=min(len(image_slot_indices), unique_visual_count) if unique_visual_count else None,
             user_id=channel_config.get("user_id"), niche=channel_config.get("niche"), channel_id=channel_config.get("id"),
+            premium_images_enabled=bool(channel_config.get("premium_images_enabled")),
         )
     else:
         generated_images = []
@@ -524,6 +525,10 @@ def run_video_pipeline(
             user_id=channel_config.get("user_id"),
             niche=channel_config.get("niche"),
             channel_id=channel_config.get("id"),
+            # These are the scenes stock VIDEO search couldn't cover either —
+            # the same "nothing matched what's being said" case the premium
+            # budget exists for, so it applies here too.
+            premium_images_enabled=bool(channel_config.get("premium_images_enabled")),
         )
         for position, scene_index in enumerate(unresolved_indices):
             if position < len(fallback_images):

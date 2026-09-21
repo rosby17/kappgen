@@ -234,6 +234,11 @@ def init_db():
             "topic_examples": "ALTER TABLE channels ADD COLUMN topic_examples TEXT",
             "use_web_trends": "ALTER TABLE channels ADD COLUMN use_web_trends BOOLEAN DEFAULT FALSE NOT NULL",
             "youtube_topic_sources": "ALTER TABLE channels ADD COLUMN youtube_topic_sources TEXT",
+            # Paid scene-image generation, off for every existing channel —
+            # granted per channel by an admin only (see admin.py).
+            "premium_images_enabled": "ALTER TABLE channels ADD COLUMN premium_images_enabled BOOLEAN DEFAULT FALSE NOT NULL",
+            "premium_images_granted_at": "ALTER TABLE channels ADD COLUMN premium_images_granted_at TIMESTAMP",
+            "premium_images_granted_by": "ALTER TABLE channels ADD COLUMN premium_images_granted_by VARCHAR(36)",
         }
         with engine.begin() as conn:
             for col_name, ddl in channel_migrations.items():

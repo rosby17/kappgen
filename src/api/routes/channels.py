@@ -1538,6 +1538,21 @@ def update_channel(channel_id: str, payload: ChannelUpdate, current_user: User =
         niche_matches_stoic = bool(re.search(r"stoïc|stoic|philosophi", niche_for_check, re.IGNORECASE))
         if "stoic sculpture style" in style_prompt_lower and not niche_matches_stoic:
             image_style["style_prompt"] = ""
+        # The premium budget is creator-facing (they pick how many generated
+        # images a video may use), but it maps to real money, so it's clamped
+        # here rather than trusted from the request — the UI's own max isn't
+        # an enforcement point. The PERMISSION to spend it at all is
+        # Channel.premium_images_enabled, deliberately not part of this
+        # payload: an admin route is its only writer.
+        raw_premium = image_style.get("premium_image_count")
+        if raw_premium is None or (isinstance(raw_premium, int) and raw_premium <= 0):
+            image_style["premium_image_count"] = None
+        else:
+            from src.utils.app_settings import premium_image_count_ceiling
+            try:
+                image_style["premium_image_count"] = min(int(raw_premium), premium_image_count_ceiling())
+            except (TypeError, ValueError):
+                image_style["premium_image_count"] = None
         channel.image_style = image_style
         # The wizard's general save can flip share_with_community on its own,
         # without going through a library upload — _sync_community_library_folder

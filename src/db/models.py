@@ -179,6 +179,21 @@ class Channel(Base):
     # (they might want to re-enable it later without re-uploading anything).
     sfx_enabled = Column(Boolean, nullable=False, default=True)
 
+    # Paid, high-quality scene-image generation (see
+    # scene_image_premium_provider_order in utils/app_settings.py). Off for
+    # every channel, granted one channel at a time by an admin and by nobody
+    # else: each premium image costs real credits, so this can't be a
+    # creator-facing checkbox the way the free generator is. The update
+    # routes a channel's own owner can reach deliberately ignore this field
+    # (see channels.py) — the only writer is the admin route, since hiding
+    # a button in the UI is not an access control. How MANY premium images a
+    # video may spend is a separate, creator-facing number
+    # (image_style.premium_image_count): this column is permission, that one
+    # is budget.
+    premium_images_enabled = Column(Boolean, nullable=False, default=False)
+    premium_images_granted_at = Column(DateTime, nullable=True)
+    premium_images_granted_by = Column(String(36), nullable=True)
+
     # Full-auto daily pipeline: "manual" (default, user submits each video)
     # or "auto" (Claude picks a fresh topic + writes the script itself once a
     # day, at a randomized time in the configured window, no human input).
@@ -342,6 +357,12 @@ class Channel(Base):
             "image_style": self.image_style,
             "thumbnail_style": self.thumbnail_style,
             "sfx_enabled": self.sfx_enabled if self.sfx_enabled is not None else True,
+            # Read-only everywhere outside the admin route — exposed so the
+            # creator UI can show the premium budget field only to channels
+            # that actually have the right, and so the render pipeline can
+            # read it straight off the channel config snapshot.
+            "premium_images_enabled": bool(self.premium_images_enabled),
+            "premium_images_granted_at": self.premium_images_granted_at.isoformat() if self.premium_images_granted_at else None,
             "effects_config": self.effects_config,
             "completion_percent": completion_percent,
             "is_render_ready": visuals_ready,
@@ -663,21 +684,17 @@ class Video(Base):
         if self.storage_backend not in ("b2", "r2") and output_ref and not output_ref.startswith(("http://", "https://")):
             target = (STORAGE_PATH / output_ref).with_name("thumbnail.jpg")
         if target.exists() and target.stat().st_size > 1000:
-            # The visual audit is authoritative once it exists.  Legacy
-            # imports and thumbnail restores often retain a stale provider
-            # error / thumbnail_is_ai flag even though the image a creator
-            # sees is a strong, deliberate thumbnail.  Showing “fallback”
-            # from that stale implementation detail made the badge lie.
-            if self.thumbnail_quality_status == "approved":
+            # Provenance is the source of truth for new KappGen thumbnails:
+            # an AI33/AI-provider result is ready to use immediately.  A
+            # visual reviewer is not required and must never hold a valid
+            # provider-generated thumbnail in an ambiguous state.
+            if self.thumbnail_is_ai is True:
                 return "active"
-            if self.thumbnail_quality_status == "fallback":
+            if self.thumbnail_is_ai is False or self.thumbnail_error:
                 return "fallback"
-            # A file on disk (or a B2 copy) is only evidence that *an* image
-            # survived.  It is not proof that this is the creator's intended
-            # thumbnail: legacy fallbacks were often copied into the same
-            # location.  Until an image is visually approved, never call it
-            # active in the creator UI.
-            return "verifying"
+            # Legacy files predate source tracking. Preserve them without
+            # asking the creator to audit or regenerate historical content.
+            return "legacy"
         if self.thumbnail_storage_url or self.youtube_video_id:
             return "restoring"
         # No source exists from which the card can restore the old image.

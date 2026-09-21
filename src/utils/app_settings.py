@@ -123,6 +123,69 @@ def set_scene_image_provider_order(order: List[str]) -> None:
     set_setting(SCENE_IMAGE_PROVIDER_ORDER_KEY, json.dumps(order))
 
 
+# Separate, higher-quality provider chain for the handful of scenes a
+# premium-enabled channel generates per video (Channel.premium_images_enabled
+# — permission; image_style.premium_image_count — how many). Kept apart from
+# scene_image_provider_order rather than replacing it: that order is what
+# EVERY channel gets for bulk generation and must stay cheap/free, while this
+# one is deliberately paid and is only ever reached for a channel an admin
+# explicitly granted. Ordered as a fallback chain (first that succeeds wins),
+# so one provider being down or out of quota degrades to the next instead of
+# dropping the scene back to a generic stock image.
+SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_KEY = "scene_image_premium_provider_order"
+# Limited to the providers scene generation actually implements (see
+# SCENE_FUNCS in images.py) — offering openai/gemini here the way the
+# thumbnail list does would just silently skip them at render time.
+SCENE_IMAGE_PREMIUM_PROVIDERS_ALL = ["ai33pro", "fal", "kie", "izivoice"]
+SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_DEFAULT = ["ai33pro", "fal"]
+
+
+def scene_image_premium_provider_order() -> List[str]:
+    """Empty when the global paid-API kill switch is on: every provider here
+    is billable by definition, and the caller falls back to the free chain
+    rather than silently spending money the operator just cut off."""
+    if paid_apis_disabled():
+        return []
+    raw = get_setting(SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_KEY, None)
+    if raw is None:
+        return list(SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_DEFAULT)
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return list(SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_DEFAULT)
+    if not isinstance(parsed, list):
+        return list(SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_DEFAULT)
+    # An explicitly emptied order means "premium off globally" and is
+    # honored as-is — unlike a corrupt/absent value, which falls back to the
+    # default above.
+    return [p for p in parsed if p in SCENE_IMAGE_PREMIUM_PROVIDERS_ALL]
+
+
+def set_scene_image_premium_provider_order(order: List[str]) -> None:
+    set_setting(SCENE_IMAGE_PREMIUM_PROVIDER_ORDER_KEY, json.dumps(order))
+
+
+# Safety ceiling on the creator-facing per-video premium budget
+# (image_style.premium_image_count). The creator picks the real number — the
+# whole point is that 10 well-matched images can be plenty — but nothing
+# saved from the UI or posted straight to the API may exceed this, so a typo
+# (or a channel config copied around) can't turn into a 150-image bill.
+PREMIUM_IMAGE_COUNT_CEILING_KEY = "premium_image_count_ceiling"
+PREMIUM_IMAGE_COUNT_CEILING_DEFAULT = 30
+
+
+def premium_image_count_ceiling() -> int:
+    raw = get_setting(PREMIUM_IMAGE_COUNT_CEILING_KEY, None)
+    try:
+        return max(1, int(raw)) if raw is not None else PREMIUM_IMAGE_COUNT_CEILING_DEFAULT
+    except (ValueError, TypeError):
+        return PREMIUM_IMAGE_COUNT_CEILING_DEFAULT
+
+
+def set_premium_image_count_ceiling(value: int) -> None:
+    set_setting(PREMIUM_IMAGE_COUNT_CEILING_KEY, str(max(1, int(value))))
+
+
 # Admin-defined priority order for text-generation providers (see
 # src/pipeline/ai_text.py) — "anthropic" | "deepseek" | "groq" | "openai" |
 # "fal", in the order they should be tried. Any configured provider left out

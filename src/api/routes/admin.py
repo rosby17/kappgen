@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from src.db.session import get_db
 from src.db.models import User, Channel, Video, Plan, Subscription, Order, ApiUsageLog, Folder, PasswordReset, CommunityLibraryFolder, CommunityLibraryImagePlacement, HuggingFaceAccount
 from src.utils.auth import get_current_admin
+from src.utils.logger import logger
 from src.utils.billing import user_has_active_subscription, get_credit_balance, credit_user, debit_credits, estimate_video_cost_breakdown
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -1493,6 +1494,114 @@ def admin_set_channel_automation(channel_id: str, payload: AdminChannelAutomatio
     db.commit()
     db.refresh(channel)
     return channel.to_dict()
+
+
+class AdminChannelPremiumImagesPayload(BaseModel):
+    enabled: bool
+
+
+@router.get("/channels/premium-images")
+def admin_list_premium_image_channels(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Every channel that can currently spend on premium image generation,
+    so the grant list is auditable at a glance rather than having to open
+    channels one at a time to find out who was given access."""
+    from src.utils.app_settings import premium_image_count_ceiling
+    granted = db.query(Channel).filter(Channel.premium_images_enabled.is_(True)).all()
+    return {
+        "channels": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "niche": c.niche,
+                "user_id": c.user_id,
+                "premium_image_count": (c.image_style or {}).get("premium_image_count"),
+                "granted_at": c.premium_images_granted_at.isoformat() if c.premium_images_granted_at else None,
+            }
+            for c in granted
+        ],
+        "count_ceiling": premium_image_count_ceiling(),
+    }
+
+
+@router.patch("/channels/{channel_id}/premium-images")
+def admin_set_channel_premium_images(channel_id: str, payload: AdminChannelPremiumImagesPayload, admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """Grant or revoke a single channel's access to the paid image
+    generators. This route is the ONLY writer of premium_images_enabled:
+    the creator-facing channel update deliberately ignores the field, so a
+    creator cannot grant it to themselves by posting it directly — hiding
+    the control in the UI would not have been an access control.
+
+    Granting access doesn't spend anything by itself: the channel also needs
+    a per-video budget (image_style.premium_image_count), which the creator
+    sets and which stays at "none" until they do."""
+    channel = db.query(Channel).filter(Channel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Chaîne introuvable.")
+    channel.premium_images_enabled = bool(payload.enabled)
+    channel.premium_images_granted_at = datetime.utcnow() if payload.enabled else None
+    channel.premium_images_granted_by = admin.id if payload.enabled else None
+    db.commit()
+    db.refresh(channel)
+    logger.info(
+        f"Admin {admin.email} {'granted' if payload.enabled else 'revoked'} "
+        f"premium image generation for channel {channel.id} ({channel.name})."
+    )
+    return channel.to_dict()
+
+
+# --- Premium (paid) scene-image provider chain --------------------------
+# Distinct from the scene-image order above, which every channel shares and
+# which stays free-first. This chain is only ever reached for a channel an
+# admin granted premium_images_enabled, and only for the scenes no other
+# source could illustrate.
+PREMIUM_SCENE_IMAGE_PROVIDERS = ["ai33pro", "fal", "kie", "izivoice"]
+
+
+@router.get("/settings/premium-scene-image-provider-mode")
+def get_premium_scene_image_provider_mode(admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import scene_image_premium_provider_order, premium_image_count_ceiling
+    from src.config import IZIVOICE_API_KEY, KIE_API_KEY, AI33PRO_API_KEY, FAL_API_KEY
+    from src.utils.provider_status import _get_effective_key
+    configured = {
+        "ai33pro": bool(_get_effective_key("ai33pro", AI33PRO_API_KEY)),
+        "fal": bool(_get_effective_key("fal", FAL_API_KEY)),
+        "kie": bool(_get_effective_key("kie", KIE_API_KEY)),
+        "izivoice": bool(_get_effective_key("izivoice", IZIVOICE_API_KEY)),
+    }
+    return {
+        "order": scene_image_premium_provider_order(),
+        "available": PREMIUM_SCENE_IMAGE_PROVIDERS,
+        "configured": configured,
+        "count_ceiling": premium_image_count_ceiling(),
+    }
+
+
+class PremiumSceneImagePayload(BaseModel):
+    order: Optional[List[str]] = None
+    count_ceiling: Optional[int] = None
+
+
+@router.patch("/settings/premium-scene-image-provider-mode")
+def set_premium_scene_image_provider_mode(payload: PremiumSceneImagePayload, admin: User = Depends(get_current_admin)):
+    from src.utils.app_settings import (
+        set_scene_image_premium_provider_order,
+        set_premium_image_count_ceiling,
+        scene_image_premium_provider_order,
+        premium_image_count_ceiling,
+    )
+    if payload.order is not None:
+        cleaned = []
+        for p in payload.order:
+            if p not in PREMIUM_SCENE_IMAGE_PROVIDERS:
+                raise HTTPException(status_code=400, detail=f"Fournisseur invalide : {p}")
+            if p not in cleaned:
+                cleaned.append(p)
+        set_scene_image_premium_provider_order(cleaned)
+    if payload.count_ceiling is not None:
+        if payload.count_ceiling < 1:
+            raise HTTPException(status_code=400, detail="Le plafond doit être d'au moins 1 image.")
+        set_premium_image_count_ceiling(payload.count_ceiling)
+    return {"order": scene_image_premium_provider_order(), "count_ceiling": premium_image_count_ceiling()}
 
 
 # --- Hugging Face free-tier image generation accounts ------------------------

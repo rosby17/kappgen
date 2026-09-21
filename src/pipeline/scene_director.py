@@ -205,3 +205,81 @@ The queries array MUST have exactly {len(batch)} entries, in order."""
             any_success = True
 
     return queries if any_success else None
+
+
+# Heuristic markers for a passage that genuinely needs its own accurate
+# image: the narration is pointing at something specific ("cette position",
+# "placez votre main"), giving a concrete instruction, or naming a body
+# part/object the viewer is meant to picture. A passage without any of these
+# is usually framing or motivation — true, but not something a specific
+# image illustrates better than a held shot.
+_VISUAL_NEED_MARKERS = re.compile(
+    r"\b(ce(tte|s)?|cet|voici|voilà|regardez|observez|notez|placez|posez|tenez|pliez|"
+    r"levez|tournez|respirez|asseyez|exercice|position|mouvement|geste|étape|"
+    r"main|bras|jambe|genou|épaule|dos|cou|pied|hanche|muscle|articulation|"
+    r"this|these|notice|place|hold|bend|raise|step|position|movement)\b",
+    re.IGNORECASE,
+)
+
+
+def _local_visual_need_scores(passages: List[str]) -> List[float]:
+    """Marker-count-based need score, used when no text provider answers.
+
+    Deliberately crude: it only has to separate "the narration is describing
+    something concrete on screen" from "the narration is talking in general
+    terms", which keyword density does well enough to allocate a handful of
+    images sensibly."""
+    scores = []
+    for text in passages:
+        hits = len(_VISUAL_NEED_MARKERS.findall(text or ""))
+        words = max(1, len(re.findall(r"\w+", text or "")))
+        # Density, not raw count, so a long passage doesn't outrank a short
+        # and highly specific one purely by being long.
+        scores.append(min(10.0, (hits / words) * 100))
+    return scores
+
+
+def rank_visual_need(passages: List[str], niche: str = "") -> List[float]:
+    """Score each passage 0-10 on how much it needs its OWN accurate image
+    rather than a held/reused one.
+
+    This is the editorial judgment behind spending a small image budget
+    well: in a health video, "placez la main sous le genou et tirez" has to
+    show exactly that or the video is worse than useless, while "beaucoup de
+    gens ignorent ce détail" is carried fine by whatever is already on
+    screen. Uniform allocation gets both wrong — it underserves the first
+    and wastes money on the second.
+
+    Runs on the text models, which are free-tier-first (Groq/Gemini) and
+    cost a rounding error next to a single generated image, so paying a
+    little thought to decide where the images go is always worth it. Falls
+    back to the local heuristic on any failure — a scoring outage must not
+    stop the images from being allocated at all."""
+    if not passages:
+        return []
+    if not any_text_provider_configured():
+        return _local_visual_need_scores(passages)
+    numbered = "\n".join(f"{i + 1}. {(t or '').strip()[:400]}" for i, t in enumerate(passages))
+    instruction = f"""You are the editor of a faceless narration video (niche: {niche or "general"}).
+
+These passages currently have NO matching footage. You can only afford to generate an image for a few of them; the rest will keep whatever shot is already on screen.
+
+PASSAGES:
+{numbered}
+
+For each passage, rate 0-10 how much the video LOSES if this passage does not get its own accurate image:
+- 9-10: the narration describes a specific action, position, object or body part the viewer must SEE to follow it.
+- 5-8: concrete subject matter that an accurate image clearly strengthens.
+- 1-4: general statement, motivation, transition or repetition — a held shot carries it fine.
+
+Respond with ONLY this JSON object, no other text:
+{{"scores": [<{len(passages)} numbers, in order>]}}"""
+    try:
+        data = _extract_json(generate_text(instruction, max_tokens=800, model=SCENE_DIRECTOR_MODEL, operation="visual_need_ranking"))
+        scores = data.get("scores")
+        if not isinstance(scores, list) or len(scores) != len(passages):
+            raise ValueError(f"expected {len(passages)} scores, got {len(scores) if isinstance(scores, list) else 'none'}")
+        return [max(0.0, min(10.0, float(s))) for s in scores]
+    except Exception as e:
+        logger.warning(f"Visual-need ranking failed, falling back to local heuristic: {e}")
+        return _local_visual_need_scores(passages)

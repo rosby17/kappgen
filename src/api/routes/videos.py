@@ -1645,6 +1645,13 @@ def _regenerate_thumbnail_background(video_id: str) -> None:
                     video.thumbnail_quality_status = None
                     video.thumbnail_quality_reason = None
                     video.thumbnail_quality_reviewed_at = None
+                    # Persist the exact successful provider result before the
+                    # request returns.  The periodic backup pass remains a
+                    # safety net, not the only protection for a new thumbnail.
+                    from src.utils import b2_storage
+                    stored_url = b2_storage.upload_thumbnail(current, str(video.channel_id), str(video.id))
+                    if stored_url:
+                        video.thumbnail_storage_url = stored_url
                 else:
                     # Preserve the classification of the image restored above.
                     # In particular, do not turn a known fallback into an AI
