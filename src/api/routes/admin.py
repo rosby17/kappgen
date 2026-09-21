@@ -1404,10 +1404,8 @@ def admin_delete_channel(channel_id: str, admin: User = Depends(get_current_admi
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         raise HTTPException(status_code=404, detail="Chaîne introuvable.")
-    from src.db.models import VoiceCloneJob
-    db.query(ApiUsageLog).filter(ApiUsageLog.channel_id == channel_id).delete()
-    db.query(VoiceCloneJob).filter(VoiceCloneJob.channel_id == channel_id).delete()
-    db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).delete()
+    from src.utils.channel_deletion import purge_channel_references
+    purge_channel_references(db, channel_id)
     db.delete(channel)
     db.commit()
     return {"deleted": True}

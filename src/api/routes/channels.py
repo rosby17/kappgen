@@ -3152,16 +3152,13 @@ def delete_channel(channel_id: str, current_user: User = Depends(get_current_use
     if channel.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Accès refusé.")
     # Video cascades via the ORM relationship (Channel.videos,
-    # cascade="all, delete-orphan"), but these three tables have a
-    # channel_id foreign key with no cascade defined at all (ORM or DB) —
-    # deleting a channel that had ever generated a script/video (so has
-    # ApiUsageLog rows), cloned a voice, or shared a library folder was
-    # silently failing with a 500 (FK violation) that the frontend's
-    # "Supprimer" button never surfaced, since it ignores a non-ok response.
-    from src.db.models import ApiUsageLog, VoiceCloneJob, CommunityLibraryFolder
-    db.query(ApiUsageLog).filter(ApiUsageLog.channel_id == channel_id).delete()
-    db.query(VoiceCloneJob).filter(VoiceCloneJob.channel_id == channel_id).delete()
-    db.query(CommunityLibraryFolder).filter(CommunityLibraryFolder.channel_id == channel_id).delete()
+    # cascade="all, delete-orphan"); every other table carrying a channel_id
+    # has to be cleared by hand or the delete fails on the foreign key. That
+    # list used to be maintained inline here and fell behind as new tables
+    # (image tags, placements, sound effects) were added — see
+    # purge_channel_references, which both delete paths now share.
+    from src.utils.channel_deletion import purge_channel_references
+    purge_channel_references(db, channel_id)
     db.delete(channel)
     db.commit()
     return {"message": "Channel deleted successfully"}
