@@ -13,12 +13,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 
 # API Keys
-# Cloudflare R2 (S3-compatible) — hybrid rendered-video storage: as long as
-# R2 usage tracked in our own DB stays under R2_FREE_TIER_CAP_BYTES, finished
-# renders upload there instead of staying on the VPS's own (small, shared)
-# disk. Once usage would cross the cap, new renders fall back to local disk
-# automatically — no code change needed to stay on R2's free tier today and
-# raise the cap (or remove it) later after upgrading to a paid R2 plan.
+# Cloudflare R2 (S3-compatible). R2 Standard is the preferred delivery store
+# for completed video exports: it has no egress charge, which is materially
+# cheaper for KappGen's frequently downloaded long videos.
 # All four must be set for R2 to be used at all; leaving any unset keeps
 # every video on local disk exactly like before this feature existed.
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
@@ -29,15 +26,20 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "")
 # bucket) — videos are served directly from here, not proxied through our
 # own API. Required alongside the 4 vars above for R2 to actually be used.
 R2_PUBLIC_URL_BASE = os.getenv("R2_PUBLIC_URL_BASE", "").rstrip("/")
-# Cloudflare R2's free tier is 10GB storage — kept at 9.5GB to leave margin
-# for in-flight uploads counted before the DB commit lands. Override via env
-# once on a paid plan (or set very high to effectively remove the cap).
-R2_FREE_TIER_CAP_BYTES = int(os.getenv("R2_FREE_TIER_CAP_BYTES", str(9_500_000_000)))
+# No application-side capacity cap unless one is explicitly asked for (0 =
+# unlimited, same convention as B2_FREE_TIER_CAP_BYTES below).
+#
+# This used to default to 9.5GB, Cloudflare's free-tier allowance. That is a
+# quiet trap for the B2 migration: 277GB of existing renders are about to
+# land in R2, and past the cap should_upload_to_r2() simply returns False —
+# every new render then stays on local disk with no error, no warning, and
+# no remote copy. Opting IN to a cap is a decision; inheriting one from a
+# free-tier assumption is how videos stop being backed up without anyone
+# noticing.
+R2_FREE_TIER_CAP_BYTES = int(os.getenv("R2_FREE_TIER_CAP_BYTES", "0"))
 
-# Backblaze B2 (S3-compatible) — replaces R2 as of Sept 2026, primary
-# rendered-video + B-roll storage (not a capped fallback like R2 was):
-# ~1/5 the storage cost of R2, free egress up to 3x the stored volume/day.
-# All five must be set for B2 to be used at all.
+# Backblaze B2 is retained only to make the one-time B2 → R2 migration. No
+# running KappGen request reads or writes it once the migration is complete.
 B2_ENDPOINT = os.getenv("B2_ENDPOINT", "")  # e.g. s3.us-west-002.backblazeb2.com
 B2_REGION = os.getenv("B2_REGION", "us-west-002")
 B2_KEY_ID = os.getenv("B2_KEY_ID", "")
