@@ -7,7 +7,7 @@ Run this on the production host before a migration:
 
 It answers three questions with numbers rather than assumptions:
 
-1. Is B2 actually switched on right now? Uploads need five environment
+1. Is R2 actually switched on right now? Uploads need five environment
    variables, and a single missing one turns every upload into a silent
    no-op while the app keeps working perfectly on local disk.
 2. What does the database think is where — how many renders and thumbnails
@@ -28,12 +28,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import (  # noqa: E402
-    B2_APPLICATION_KEY,
-    B2_BUCKET_NAME,
-    B2_ENDPOINT,
-    B2_FREE_TIER_CAP_BYTES,
-    B2_KEY_ID,
-    B2_PUBLIC_URL_BASE,
+    R2_ACCOUNT_ID,
+    R2_ACCESS_KEY_ID,
+    R2_BUCKET_NAME,
+    R2_FREE_TIER_CAP_BYTES,
+    R2_PUBLIC_URL_BASE,
+    R2_SECRET_ACCESS_KEY,
     STORAGE_PATH,
 )
 
@@ -92,21 +92,65 @@ def measure(path: Path) -> tuple:
     return total, files
 
 
-def b2_status() -> dict:
+def r2_status() -> dict:
     required = {
-        "B2_ENDPOINT": B2_ENDPOINT,
-        "B2_KEY_ID": B2_KEY_ID,
-        "B2_APPLICATION_KEY": B2_APPLICATION_KEY,
-        "B2_BUCKET_NAME": B2_BUCKET_NAME,
-        "B2_PUBLIC_URL_BASE": B2_PUBLIC_URL_BASE,
+        "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
+        "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
+        "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
+        "R2_BUCKET_NAME": R2_BUCKET_NAME,
+        "R2_PUBLIC_URL_BASE": R2_PUBLIC_URL_BASE,
     }
     # Presence only — never echo a key into a log or a terminal history.
     missing = [name for name, value in required.items() if not value]
     return {
         "configured": not missing,
         "missing_variables": missing,
-        "cap_bytes": B2_FREE_TIER_CAP_BYTES,
+        "cap_bytes": R2_FREE_TIER_CAP_BYTES,
     }
+
+
+def configured_providers() -> list:
+    """Every object store usable right now, destination first.
+
+    B2 and R2 both exist while the migration runs: renders uploaded before
+    it are on B2, new ones land on R2, and an audit that knew about only one
+    would report the other's copies as missing — the single number a
+    migration decision leans on, wrong in the dangerous direction.
+    """
+    from src.utils import b2_storage, r2_storage
+
+    found = []
+    if r2_storage.is_r2_configured():
+        found.append({"name": "R2", "module": r2_storage, "bucket": r2_storage.R2_BUCKET_NAME})
+    if b2_storage.is_b2_configured():
+        found.append({"name": "B2", "module": b2_storage, "bucket": b2_storage.B2_BUCKET_NAME})
+    return found
+
+
+def asset_backup_report() -> dict:
+    """What scripts/backup_assets.py actually holds, per store.
+
+    Without this the audit only counted what no AUTOMATIC upload path
+    covers, and kept calling a finished, deliberate backup "jamais
+    sauvegardé".
+    """
+    stores = []
+    for provider in configured_providers():
+        try:
+            client = provider["module"]._get_client()
+            paginator = client.get_paginator("list_objects_v2")
+            objects = 0
+            total = 0
+            for page in paginator.paginate(Bucket=provider["bucket"], Prefix="asset-backups/"):
+                for obj in page.get("Contents", []):
+                    objects += 1
+                    total += obj["Size"]
+            stores.append({"name": provider["name"], "objects": objects, "bytes": total})
+        except Exception as exc:
+            # An audit must still produce its other numbers if a store is
+            # unreachable.
+            stores.append({"name": provider["name"], "objects": 0, "bytes": 0, "error": str(exc)})
+    return {"stores": stores, "best_bytes": max([s["bytes"] for s in stores], default=0)}
 
 
 def database_report() -> dict:
@@ -123,7 +167,7 @@ def database_report() -> dict:
         done = db.query(Video).filter(Video.output_path.isnot(None))
         remote_bytes = (
             db.query(func.coalesce(func.sum(Video.output_size_bytes), 0))
-            .filter(Video.storage_backend == "b2")
+            .filter(Video.storage_backend.in_(("b2", "r2")))
             .scalar()
         )
         local_bytes = (
@@ -161,7 +205,7 @@ def disk_report() -> dict:
                     per_kind[kind]["bytes"] += size
                     per_kind[kind]["files"] += files
             # Logos and avatars sit directly in the channel directory,
-            # alongside the videos/ subtree that B2 already covers.
+            # alongside the videos/ subtree that R2 already covers.
             try:
                 for entry in channel_dir.iterdir():
                     if entry.is_file():
@@ -196,15 +240,22 @@ def disk_report() -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Audit local vs B2 storage before a migration.")
+    parser = argparse.ArgumentParser(description="Audit local vs R2 storage before a migration.")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args()
 
+    from src.utils import b2_storage
+
     report = {
         "storage_path": str(STORAGE_PATH),
-        "b2": b2_status(),
+        "r2": r2_status(),
+        # B2 still holds everything uploaded before the R2 migration, so its
+        # state belongs in the report too — otherwise those copies read as
+        # missing for as long as the two stores coexist.
+        "b2_configured": b2_storage.is_b2_configured(),
         "database": database_report(),
         "disk": disk_report(),
+        "asset_backup": asset_backup_report(),
     }
 
     unprotected = sum(v["bytes"] for v in report["disk"]["channel_assets"].values())
@@ -216,23 +267,28 @@ def main() -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
 
-    b2 = report["b2"]
+    r2 = report["r2"]
     print("=" * 66)
     print("AUDIT DE SAUVEGARDE KAPPGEN")
     print("=" * 66)
     print(f"Dossier de stockage : {report['storage_path']}")
     print()
 
-    print("── Backblaze B2 " + "─" * 50)
-    if b2["configured"]:
-        print("  Configuré : OUI — les envois sont actifs.")
+    print("── Stockage objet " + "─" * 48)
+    if r2["configured"]:
+        print("  R2 : configuré — les envois sont actifs.")
     else:
-        print("  Configuré : NON — AUCUN envoi n'a lieu, tout reste sur ce disque.")
-        print(f"  Variables manquantes : {', '.join(b2['missing_variables'])}")
-    if b2["cap_bytes"]:
+        print("  R2 : NON configuré — aucun envoi vers R2.")
+        print(f"       Variables manquantes : {', '.join(r2['missing_variables'])}")
+    # B2 still holds everything uploaded before the migration; ignoring it
+    # would report those copies as missing.
+    print(f"  B2 : {'configuré (migration en cours)' if report['b2_configured'] else 'non configuré'}")
+    if not r2["configured"] and not report["b2_configured"]:
+        print("  AUCUN stockage distant actif : tout reste sur ce disque.")
+    if r2["cap_bytes"]:
         used = report["database"]["remote_render_bytes"]
-        print(f"  Plafond configuré : {human(b2['cap_bytes'])} — utilisé {human(used)}")
-        if used >= b2["cap_bytes"]:
+        print(f"  Plafond configuré : {human(r2['cap_bytes'])} — utilisé {human(used)}")
+        if used >= r2["cap_bytes"]:
             print("  ATTENTION : plafond atteint, les nouveaux rendus restent en local.")
     else:
         print("  Plafond : aucun.")
@@ -243,7 +299,7 @@ def main() -> int:
     print(f"  Vidéos avec un rendu : {db_report['videos_with_output']}")
     for backend, count in sorted(db_report["videos_by_backend"].items()):
         print(f"    storage_backend={backend or 'non défini'} : {count}")
-    print(f"  Rendus sur B2   : {human(db_report['remote_render_bytes'])}")
+    print(f"  Rendus distants (B2+R2) : {human(db_report['remote_render_bytes'])}")
     print(f"  Rendus en local : {human(db_report['local_render_bytes'])}")
     print(f"  Miniatures avec copie distante : {db_report['thumbnails_with_remote_copy']}")
     print(f"  Miniatures SANS copie distante : {db_report['thumbnails_without_remote_copy']}")
@@ -272,17 +328,41 @@ def main() -> int:
     else:
         print("  (rien trouvé — vérifie que STORAGE_PATH pointe bien sur le bon volume)")
     print()
-    print(f"  TOTAL jamais sauvegardé : {human(report['never_uploaded_bytes'])}")
+    print(f"  TOTAL de ces dossiers : {human(report['never_uploaded_bytes'])}")
+    print()
+
+    backup = report["asset_backup"]
+    print("── Sauvegarde manuelle de ces assets (asset-backups/) " + "─" * 12)
+    if not backup["stores"]:
+        print("  Aucun stockage distant configuré.")
+    for store in backup["stores"]:
+        if store.get("error"):
+            print(f"  {store['name']} : injoignable ({store['error']})")
+        elif store["objects"] == 0:
+            print(f"  {store['name']} : aucune. Lance backup_assets.py --execute")
+        else:
+            print(f"  {store['name']} : {store['objects']} objet(s), {human(store['bytes'])}")
+    gap = report["never_uploaded_bytes"] - backup["best_bytes"]
+    if backup["best_bytes"] and gap <= 1024 * 1024:
+        print("  Couvre l'intégralité des dossiers listés ci-dessus.")
+    elif backup["best_bytes"]:
+        print(f"  Écart avec le disque : {human(gap)} — relance backup_assets.py --execute.")
     print()
     print("── Verdict " + "─" * 55)
-    if not b2["configured"]:
+    if not r2["configured"] and not report["b2_configured"]:
         print("  Une migration maintenant perdrait TOUT le contenu de ce disque,")
-        print("  rendus et miniatures compris : B2 n'est pas actif.")
-    elif report["never_uploaded_bytes"] > 0 or db_report["thumbnails_without_remote_copy"]:
-        print("  Les rendus sont protégés, mais les éléments listés ci-dessus ne")
-        print("  le sont pas. Ils doivent être copiés avant de changer de serveur.")
+        print("  rendus et miniatures compris : aucun stockage distant n'est actif.")
     else:
-        print("  Rien d'exposé : tout ce qui compte a une copie distante.")
+        gap = report["never_uploaded_bytes"] - report["asset_backup"]["best_bytes"]
+        if gap > 1024 * 1024:
+            print(f"  Les rendus sont protégés, mais {human(gap)} d'assets n'ont aucune")
+            print("  copie distante. À sauvegarder avant de changer de serveur.")
+        elif db_report["thumbnails_without_remote_copy"]:
+            print(f"  Assets et rendus sauvegardés. Restent {db_report['thumbnails_without_remote_copy']}")
+            print("  miniature(s) sans copie distante : leur fichier local n'existe plus,")
+            print("  elles devront être régénérées (ou reprises depuis YouTube).")
+        else:
+            print("  Rien d'exposé : tout ce qui compte a une copie distante.")
     print("=" * 66)
     return 0
 

@@ -1,6 +1,6 @@
 """Back up (and restore) everything on disk that no upload path covers.
 
-Renders and thumbnails already go to B2 on their own. These do not, and
+Renders and thumbnails already go to R2 on their own. These do not, and
 until they do a server migration — or a dead disk — takes them with it:
 every channel's image library (which is also what the public/community
 library is read from), B-roll, sound effects, music, overlays, thumbnail
@@ -10,7 +10,7 @@ style references, logos and voices.
     cd backend && python3 scripts/backup_assets.py --execute      # upload
     cd backend && python3 scripts/backup_assets.py --restore      # bring back
 
-Safe to re-run: a file whose object already exists on B2 with the same size
+Safe to re-run: a file whose object already exists on R2 with the same size
 is skipped, so a second pass only uploads what changed. Nothing is ever
 deleted, locally or remotely — restoring never overwrites a local file that
 is already there and the right size.
@@ -23,8 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.config import STORAGE_PATH  # noqa: E402
-from src.utils import b2_storage  # noqa: E402
-from storage_audit import CHANNEL_ASSET_DIRS, ROOT_ASSET_DIRS, human  # noqa: E402
+from storage_audit import CHANNEL_ASSET_DIRS, ROOT_ASSET_DIRS, configured_providers, human  # noqa: E402
 
 # Kept apart from the video/thumbnail keys so an asset backup can never be
 # confused with a render, and so the whole set can be restored (or audited)
@@ -50,7 +49,7 @@ def targets() -> list:
                 if sub.is_dir():
                     pairs.append((sub, f"{BACKUP_PREFIX}/channels/{channel_dir.name}/{kind}"))
             # Logos and avatars sit loose in the channel directory; the
-            # videos/ subtree is deliberately excluded (already on B2).
+            # videos/ subtree is deliberately excluded (already on R2).
             loose = [f for f in channel_dir.iterdir() if f.is_file()]
             if loose:
                 pairs.append((channel_dir, f"{BACKUP_PREFIX}/channels/{channel_dir.name}", True))
@@ -76,8 +75,9 @@ def files_of(entry) -> list:
     return out
 
 
-def run_backup(execute: bool) -> int:
-    client = b2_storage._get_client() if execute else None
+def run_backup(store: dict, execute: bool) -> int:
+    module, bucket = store["module"], store["bucket"]
+    client = module._get_client() if execute else None
     uploaded = skipped = failed = 0
     uploaded_bytes = pending_bytes = 0
 
@@ -87,7 +87,7 @@ def run_backup(execute: bool) -> int:
                 size = local_path.stat().st_size
             except OSError:
                 continue
-            remote_size = b2_storage.object_size_if_exists(key)
+            remote_size = module.object_size_if_exists(key)
             if remote_size == size:
                 skipped += 1
                 continue
@@ -96,7 +96,7 @@ def run_backup(execute: bool) -> int:
                 uploaded += 1
                 continue
             try:
-                client.upload_file(str(local_path), b2_storage.B2_BUCKET_NAME, key)
+                client.upload_file(str(local_path), bucket, key)
                 uploaded += 1
                 uploaded_bytes += size
                 if uploaded % 100 == 0:
@@ -110,24 +110,25 @@ def run_backup(execute: bool) -> int:
         print(f"Envoyés : {uploaded} fichier(s), {human(uploaded_bytes)}")
     else:
         print(f"À envoyer : {uploaded} fichier(s), {human(pending_bytes)}")
-    print(f"Déjà présents sur B2 (ignorés) : {skipped}")
+    print(f"Déjà présents sur {store['name']} (ignorés) : {skipped}")
     if failed:
         print(f"Échecs : {failed} — relance la commande, les fichiers déjà envoyés seront ignorés.")
     return 1 if failed else 0
 
 
-def run_restore() -> int:
+def run_restore(store: dict) -> int:
     """Download the whole backup prefix back under STORAGE_PATH.
 
     Used on the new server after a migration. A local file that already
     exists with the right size is left alone, so an interrupted restore can
     simply be re-run.
     """
-    client = b2_storage._get_client()
+    module, bucket = store["module"], store["bucket"]
+    client = module._get_client()
     paginator = client.get_paginator("list_objects_v2")
     restored = skipped = failed = 0
     restored_bytes = 0
-    for page in paginator.paginate(Bucket=b2_storage.B2_BUCKET_NAME, Prefix=f"{BACKUP_PREFIX}/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"{BACKUP_PREFIX}/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             rel = key[len(BACKUP_PREFIX) + 1:]
@@ -139,7 +140,7 @@ def run_restore() -> int:
                 continue
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                client.download_file(b2_storage.B2_BUCKET_NAME, key, str(dest))
+                client.download_file(bucket, key, str(dest))
                 restored += 1
                 restored_bytes += obj["Size"]
                 if restored % 100 == 0:
@@ -156,24 +157,31 @@ def run_restore() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sauvegarde vers B2 des assets qu'aucun envoi ne couvre.")
+    parser = argparse.ArgumentParser(description="Sauvegarde vers R2 des assets qu'aucun envoi ne couvre.")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--execute", action="store_true", help="envoyer réellement (sinon simulation)")
     group.add_argument("--restore", action="store_true", help="retélécharger la sauvegarde dans STORAGE_PATH")
     args = parser.parse_args()
 
-    if not b2_storage.is_b2_configured():
-        print("B2 n'est pas configuré : rien à faire. Vérifie les variables B2_* du service.")
+    # Whichever store is live. R2 comes first while the migration runs, so a
+    # fresh backup lands on the destination rather than on the store being
+    # emptied; a restore reads from the same one.
+    stores = configured_providers()
+    if not stores:
+        print("Aucun stockage objet configuré : rien à faire. Vérifie les variables R2_*/B2_* du service.")
         return 2
+    store = stores[0]
 
-    print(f"Stockage : {STORAGE_PATH}")
-    print(f"Préfixe B2 : {BACKUP_PREFIX}/")
+    print(f"Stockage local : {STORAGE_PATH}")
+    print(f"Destination : {store['name']} — préfixe {BACKUP_PREFIX}/")
+    if len(stores) > 1:
+        print(f"(également configuré : {', '.join(s['name'] for s in stores[1:])})")
     print()
     if args.restore:
-        return run_restore()
+        return run_restore(store)
     if not args.execute:
         print("SIMULATION — rien n'est envoyé. Ajoute --execute pour lancer.\n")
-    return run_backup(execute=args.execute)
+    return run_backup(store, execute=args.execute)
 
 
 if __name__ == "__main__":
