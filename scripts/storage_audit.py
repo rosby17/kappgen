@@ -165,11 +165,18 @@ def database_report() -> dict:
             db.query(Video.storage_backend, func.count(Video.id)).group_by(Video.storage_backend).all()
         )
         done = db.query(Video).filter(Video.output_path.isnot(None))
-        remote_bytes = (
-            db.query(func.coalesce(func.sum(Video.output_size_bytes), 0))
-            .filter(Video.storage_backend.in_(("b2", "r2")))
-            .scalar()
-        )
+        def bytes_on(backends):
+            return int(
+                db.query(func.coalesce(func.sum(Video.output_size_bytes), 0))
+                .filter(Video.storage_backend.in_(backends))
+                .scalar()
+                or 0
+            )
+
+        remote_bytes = bytes_on(("b2", "r2"))
+        # Kept apart because the cap only ever governs R2: comparing it to the
+        # combined total announced "plafond atteint" while R2 was still empty.
+        r2_bytes = bytes_on(("r2",))
         local_bytes = (
             db.query(func.coalesce(func.sum(Video.output_size_bytes), 0))
             .filter(Video.storage_backend.notin_(("b2", "r2")))
@@ -181,6 +188,7 @@ def database_report() -> dict:
             "thumbnails_without_remote_copy": db.query(Video).filter(Video.thumbnail_storage_url.is_(None)).count(),
             "thumbnails_with_remote_copy": db.query(Video).filter(Video.thumbnail_storage_url.isnot(None)).count(),
             "remote_render_bytes": int(remote_bytes or 0),
+            "r2_render_bytes": r2_bytes,
             "local_render_bytes": int(local_bytes or 0),
         }
     finally:
@@ -286,10 +294,16 @@ def main() -> int:
     if not r2["configured"] and not report["b2_configured"]:
         print("  AUCUN stockage distant actif : tout reste sur ce disque.")
     if r2["cap_bytes"]:
-        used = report["database"]["remote_render_bytes"]
-        print(f"  Plafond configuré : {human(r2['cap_bytes'])} — utilisé {human(used)}")
+        used = report["database"]["r2_render_bytes"]
+        total_remote = report["database"]["remote_render_bytes"]
+        print(f"  Plafond R2 : {human(r2['cap_bytes'])} — utilisé {human(used)}")
         if used >= r2["cap_bytes"]:
             print("  ATTENTION : plafond atteint, les nouveaux rendus restent en local.")
+        elif total_remote > r2["cap_bytes"]:
+            # The migration is about to move far more than the cap allows.
+            print(f"  ATTENTION : {human(total_remote)} de rendus doivent migrer vers R2,")
+            print("  bien au-delà de ce plafond. should_upload_to_r2() bloquera alors")
+            print("  chaque nouveau rendu en local. Relever ou retirer R2_FREE_TIER_CAP_BYTES.")
     else:
         print("  Plafond : aucun.")
     print()
